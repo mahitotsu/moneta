@@ -9,7 +9,8 @@
 # Usage:
 #   ./apply-schema.sh <cluster-endpoint> <region> <lambda-execution-role-arn>
 #
-# Requires: psql, aws cli (with credentials that have dsql:DbConnectAdmin on the cluster).
+# Requires: aws cli (with credentials that have dsql:DbConnectAdmin on the cluster),
+# docker (runs psql via the postgres:16-alpine image -- no local psql install needed).
 set -euo pipefail
 
 CLUSTER_ENDPOINT="${1:?usage: apply-schema.sh <cluster-endpoint> <region> <lambda-execution-role-arn>}"
@@ -26,8 +27,8 @@ token() {
 }
 
 run_sql() {
-    PGPASSWORD="$(token)" psql \
-        "host=$CLUSTER_ENDPOINT port=5432 dbname=postgres user=admin sslmode=require" \
+    docker run --rm -e PGPASSWORD="$(token)" postgres:16-alpine \
+        psql "host=$CLUSTER_ENDPOINT port=5432 dbname=postgres user=admin sslmode=require" \
         -v ON_ERROR_STOP=1 \
         -c "$1"
 }
@@ -44,7 +45,9 @@ done < <(awk 'BEGIN{RS=";\n\n"} {gsub(/^\n+|\n+$/,""); if (length($0) > 0) print
 echo "Creating non-admin app role ($APP_DB_ROLE) and granting IAM + table access..."
 run_sql "CREATE ROLE $APP_DB_ROLE WITH LOGIN;"
 run_sql "AWS IAM GRANT $APP_DB_ROLE TO '$LAMBDA_ROLE_ARN';"
-run_sql "GRANT USAGE ON SCHEMA public TO $APP_DB_ROLE;"
+# No explicit "GRANT USAGE ON SCHEMA public": DSQL rejects it ("feature not
+# supported on system entity", public is a system entity there), but USAGE on
+# public is granted to PUBLIC by default anyway, same as stock PostgreSQL.
 run_sql "GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO $APP_DB_ROLE;"
 
 echo "Done."
