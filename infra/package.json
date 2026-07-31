@@ -5,7 +5,11 @@
     "build": "tsc",
     "watch": "tsc -w",
     "test": "jest",
-    "cdk": "cdk"
+    "cdk": "NODE_OPTIONS=\"--require ./force-ipv4.cjs\" cdk",
+    "synth": "npm run cdk -- synth",
+    "diff": "npm run cdk -- diff",
+    "deploy": "npm run cdk -- deploy",
+    "destroy": "npm run cdk -- destroy"
   },
   "devDependencies": {
     "@swc/core": "^1.15.0",

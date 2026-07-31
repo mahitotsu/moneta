@@ -1,6 +1,7 @@
 // Workaround for this sandbox's DNS resolver hanging ~15s on AAAA queries
-// (see infra/README-network-workaround.md). Forces Node's dns.lookup to
-// resolve IPv4 only, which is instant here. Loaded via NODE_OPTIONS=--require.
+// (see the "Do not run `npx cdk ...` directly" section of infra/README.md).
+// Forces Node's dns.lookup to resolve IPv4 only, which is instant here.
+// Loaded via NODE_OPTIONS=--require by the npm scripts in package.json.
 const dns = require("dns");
 const originalLookup = dns.lookup;
 dns.lookup = (hostname, options, callback) => {
