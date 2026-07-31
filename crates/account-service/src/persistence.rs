@@ -1,6 +1,7 @@
 use account_domain::{Account, AccountId, AccountState, Command, Decimal, FreezeReason, OffsetDateTime, Uuid};
 use serde::Deserialize;
-use sqlx::{Postgres, Transaction};
+use serde_json::Value;
+use sqlx::{PgPool, Postgres, Transaction};
 
 /// SQSメッセージ本文の形式。`MessageGroupId`（=口座ID）はSQS属性側にも
 /// 重複して載るが、ここでは本文からドメイン層に渡す値として直接持つ。
@@ -201,5 +202,39 @@ pub async fn apply_command(
         }
     }
 
+    Ok(())
+}
+
+/// account_eventsの1行（アウトボックスリレー用）。`kind`は'event'または'rejection'、
+/// `payload`は対応する`Event`/`DomainError`のJSON表現(account-domainのシリアライズ形式そのもの)。
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct UnpublishedEvent {
+    pub id: Uuid,
+    pub account_id: Uuid,
+    pub kind: String,
+    pub payload: Value,
+    pub created_at: OffsetDateTime,
+}
+
+/// まだEventBridgeへ発行していない行を古い順に取得する（アウトボックスのポーリング対象）。
+pub async fn fetch_unpublished_events(pool: &PgPool, limit: i64) -> Result<Vec<UnpublishedEvent>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, account_id, kind, payload, created_at FROM account_events \
+         WHERE published_at IS NULL ORDER BY created_at LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// EventBridgeへの発行が成功した行にpublished_atを記録する。呼び出し順序
+/// （PutEvents成功後に呼ぶこと）はoutbox_relay側の責務——先にこちらを呼ぶと、
+/// PutEventsが失敗した際にイベントが発行されないまま「発行済み」扱いになり、
+/// サイレントなデータロスを起こす（docs/adr/0002と同じ設計思想）。
+pub async fn mark_published(pool: &PgPool, event_id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE account_events SET published_at = now() WHERE id = $1")
+        .bind(event_id)
+        .execute(pool)
+        .await?;
     Ok(())
 }

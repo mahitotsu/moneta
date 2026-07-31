@@ -7,7 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This is a technology-validation PoC for a blog article, not a reference architecture for
 organizational rollout. Prioritize technical validity over organizational realism (review
 processes, team ownership, governance) — those are left as discussion points for the article,
-not implemented. Architecture: Web UI → API Gateway → SQS FIFO → Lambda (Rust) → Aurora DSQL.
+not implemented. Write path: Web UI (not yet built) → API Gateway (not yet built) → SQS FIFO →
+Lambda (Rust) → Aurora DSQL. Read path: DSQL outbox → EventBridge → Query service (Lambda +
+DynamoDB) → API Gateway → caller.
 
 **`docs/adr/` is the single source of truth for design rationale, constraints, and decision
 history — this file only orients and points there.** Don't copy specifics (retry counts,
@@ -16,12 +18,15 @@ already drifted out of sync here once. Read the relevant ADR before changing beh
 and add a new ADR (or revise one) when a non-obvious decision is made or reversed.
 
 - `0001`: microservice boundaries (aggregate ≠ microservice; bounded contexts) and event-driven
-  service integration — proposed/out of current implementation scope.
+  service integration — Transfer/Notification service remain proposed/out of scope; Query service
+  is now implemented, see `0004`.
 - `0002`: SQS FIFO message lifecycle, error classification (`DomainError` vs. infra failure),
   transaction granularity, DLQ design, Aurora DSQL constraints — directly reflected in
   `account-service`'s code.
 - `0003`: why `account-domain` and `account-service` are separate crates, and the boundary
   between them.
+- `0004`: Query service — transactional outbox (DSQL → EventBridge), the account-service/Query
+  service ownership boundary, DynamoDB read model, and the DynamoDB-direct-integration query API.
 
 ## Commands
 

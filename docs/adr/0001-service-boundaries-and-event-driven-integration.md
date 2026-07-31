@@ -2,8 +2,10 @@
 
 ## ステータス
 
-Proposed（本PoCの実装スコープ外）。記事の考察パートに残すための設計メモであり、
-コードの実装は現時点でAccount serviceのみを対象とする。
+Proposed（Transfer/Notification serviceは実装スコープ外のまま）。ただしQuery serviceについては
+[[0004-query-service-event-driven-projection]]で一部実装済み——account-serviceからのイベント発行
+（アウトボックス経由）・DynamoDB読み取りモデルへの投影・照会APIまでを実証した。本ADRはサービス
+分割とイベント駆動連携の設計思想そのものの記録として残し、実装の詳細・訂正はADR-0004を参照。
 
 ## コンテキスト
 
@@ -38,9 +40,14 @@ Query/NotificationサービスがAccount/Transfer等の各サービスのデー�
 対象が増えるたびに改修が必要になる構造は避ける。代わりに以下を採用する。
 
 - 発行側（Account、Transferなど）が共通のイベントバス（EventBridgeを想定）に対して、
-  バージョニングされたスキーマでドメインイベントを発行する
-- 発行側は自分のイベントスキーマをEventBridge Schema Registryに登録し、
-  購読ルール（source / detail-typeでのマッチング）も発行側チームが自分たちのIaCで定義する
+  バージョニングされたスキーマでドメインイベントを発行し、自分のイベントスキーマを
+  EventBridge Schema Registryに登録する（イベントスキーマは発行側が知っているべきものであり、
+  発行側の所有物）
+- 購読ルール（source / detail-typeでのマッチング）は購読側チームが自分たちのIaCで定義する
+  （どのイベント種別が自分のview構築に必要かは購読側の関心事であり、発行側は誰が購読しているかを
+  一切知らない）。~~当初「購読ルールも発行側チームが定義する」としていたが、
+  [[0004-query-service-event-driven-projection]]での実装検討により、Viewスキーマへのwillを持つ側
+  （購読側）が購読条件を決めるべきという結論に至り、この記述を訂正した。~~
 - Query/Notificationサービスのコア実装は、新しいイベント発行元が増えても改修不要
   （中央サービスにコードを足すのではなく、周辺のIaC上でルール・スキーマ登録を完結させる）
 
@@ -56,4 +63,12 @@ Query/NotificationサービスがAccount/Transfer等の各サービスのデー�
 Lambdaハンドラーの「SQSメッセージをMessageGroupIdでグルーピングし、発生源を問わずコマンドとして
 aggregateに適用する」という骨格設計は、この4サービス構想と矛盾しない。Web UIからの直接操作でも、
 将来Transfer serviceのサガが発行するコマンドでも同じ経路で扱えるため、
-Transfer/Query/Notificationを先取りした特別な作り込みは現時点で不要。
+Transfer/Notificationを先取りした特別な作り込みは現時点で不要。
+
+Query serviceについては[[0004-query-service-event-driven-projection]]で実装した。account-service
+からのイベント発行はEventBridgeへの直接PutEventsではなく、DSQLのアウトボックステーブル
+（`account_events.published_at`）をポーリングして発行するトランザクショナルアウトボックス方式を
+採る（DSQLのCDC機能はコスト方針と非互換のため不採用）。Query service側はDynamoDBへの読み取り
+モデル投影と、API Gateway+DynamoDB直接統合による照会APIまでを実装し、上記のセルフサービス方式
+（発行側はスキーマ登録のみ、購読側がRuleを定義する）を実証した。Notification serviceは引き続き
+未実装。

@@ -15,10 +15,14 @@ CREATE TABLE account_events (
     account_id UUID NOT NULL,
     kind TEXT NOT NULL,
     payload JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- NULLの間はEventBridgeへ未発行(アウトボックスのポーリング対象)。
+    -- account-outbox-relayがPutEvents成功後にここへタイムスタンプを書く(docs/adr/0004)。
+    published_at TIMESTAMPTZ
 );
 
 CREATE INDEX ASYNC account_events_account_id_idx ON account_events (account_id);
+CREATE INDEX ASYNC account_events_published_at_idx ON account_events (published_at, created_at);
 
 CREATE TABLE processed_messages (
     message_id TEXT PRIMARY KEY,

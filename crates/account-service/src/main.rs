@@ -1,8 +1,4 @@
-mod batch;
-mod grouping;
-mod handler;
-mod persistence;
-
+use account_service::handler;
 use lambda_runtime::{run, service_fn, Error};
 
 #[tokio::main]

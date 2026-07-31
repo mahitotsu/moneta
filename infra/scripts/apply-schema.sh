@@ -7,15 +7,22 @@
 # https://awslabs.github.io/aurora-dsql-starter-kit/database-roles-iam-authentication.html
 #
 # Usage:
-#   ./apply-schema.sh <cluster-endpoint> <region> <lambda-execution-role-arn>
+#   ./apply-schema.sh <cluster-endpoint> <region> <lambda-execution-role-arn> <outbox-relay-role-arn>
+#
+# Both role ARNs are granted the same non-admin app role: account-service (the write path)
+# and account-outbox-relay (docs/adr/0004's outbox poller) are the only two Lambdas that
+# ever touch DSQL directly. The Query service side (projector/query API) never connects to
+# DSQL at all, so it needs no grant here.
 #
 # Requires: aws cli (with credentials that have dsql:DbConnectAdmin on the cluster),
 # docker (runs psql via the postgres:16-alpine image -- no local psql install needed).
 set -euo pipefail
 
-CLUSTER_ENDPOINT="${1:?usage: apply-schema.sh <cluster-endpoint> <region> <lambda-execution-role-arn>}"
-REGION="${2:?usage: apply-schema.sh <cluster-endpoint> <region> <lambda-execution-role-arn>}"
-LAMBDA_ROLE_ARN="${3:?usage: apply-schema.sh <cluster-endpoint> <region> <lambda-execution-role-arn>}"
+USAGE="usage: apply-schema.sh <cluster-endpoint> <region> <lambda-execution-role-arn> <outbox-relay-role-arn>"
+CLUSTER_ENDPOINT="${1:?$USAGE}"
+REGION="${2:?$USAGE}"
+LAMBDA_ROLE_ARN="${3:?$USAGE}"
+OUTBOX_RELAY_ROLE_ARN="${4:?$USAGE}"
 APP_DB_ROLE="account_service_app"
 
 SCHEMA_SQL="$(dirname "$0")/../../crates/account-service/schema.sql"
@@ -45,6 +52,7 @@ done < <(awk 'BEGIN{RS=";\n\n"} {gsub(/^\n+|\n+$/,""); if (length($0) > 0) print
 echo "Creating non-admin app role ($APP_DB_ROLE) and granting IAM + table access..."
 run_sql "CREATE ROLE $APP_DB_ROLE WITH LOGIN;"
 run_sql "AWS IAM GRANT $APP_DB_ROLE TO '$LAMBDA_ROLE_ARN';"
+run_sql "AWS IAM GRANT $APP_DB_ROLE TO '$OUTBOX_RELAY_ROLE_ARN';"
 # No explicit "GRANT USAGE ON SCHEMA public": DSQL rejects it ("feature not
 # supported on system entity", public is a system entity there), but USAGE on
 # public is granted to PUBLIC by default anyway, same as stock PostgreSQL.
