@@ -27,6 +27,9 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
   between them.
 - `0004`: Query service — transactional outbox (DSQL → EventBridge), the account-service/Query
   service ownership boundary, DynamoDB read model, and the DynamoDB-direct-integration query API.
+- `0005`: schema/role/IAM-grant setup is applied automatically on every deploy via a CDK Custom
+  Resource, not a manually-run script — `schema.sql` is the idempotent single source of truth,
+  embedded directly into the migrator Lambda.
 
 ## Commands
 

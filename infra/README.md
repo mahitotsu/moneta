@@ -12,6 +12,10 @@ The `cdk.json` file tells the CDK Toolkit how to execute your app.
 * `npm run deploy`   deploy this stack to your default AWS account/region
 * `npm run destroy`  tear down the deployed stack
 
+`npm run deploy` is self-contained: schema/role/IAM-grant setup on the DSQL cluster runs
+automatically as part of the deploy via a Custom Resource (see docs/adr/0005), so there's no
+separate manual script to run afterward.
+
 ## Do not run `npx cdk ...` directly
 
 Use the `npm run` scripts above, not a bare `npx cdk deploy`/`synth`/`diff`. This dev sandbox's DNS

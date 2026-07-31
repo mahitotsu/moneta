@@ -49,8 +49,29 @@ describe("AccountPipelineStack", () => {
     });
   });
 
-  test("creates exactly the three Lambda functions: write path, outbox relay, query projector", () => {
-    template.resourceCountIs("AWS::Lambda::Function", 3);
+  test("creates exactly five Lambda functions: write path, outbox relay, query projector, schema migrator, and the Provider framework's own handler", () => {
+    template.resourceCountIs("AWS::Lambda::Function", 5);
+  });
+
+  test("applies the schema via a Custom Resource, granting only the two DSQL-connecting Lambdas' roles", () => {
+    template.hasResourceProperties("AWS::CloudFormation::CustomResource", {
+      LambdaRoleArns: [
+        { "Fn::GetAtt": Match.arrayWith(["AccountServiceFunctionServiceRole41347123"]) },
+        { "Fn::GetAtt": Match.arrayWith(["AccountOutboxRelayFunctionServiceRoleC6C7598E"]) },
+      ],
+    });
+  });
+
+  test("the schema migrator gets dsql:DbConnectAdmin, not the regular dsql:DbConnect", () => {
+    template.resourcePropertiesCountIs(
+      "AWS::IAM::Policy",
+      {
+        PolicyDocument: Match.objectLike({
+          Statement: Match.arrayWith([Match.objectLike({ Action: "dsql:DbConnectAdmin" })]),
+        }),
+      },
+      1,
+    );
   });
 
   test("exposes GET /accounts/{accountId} as a direct DynamoDB integration, not a Lambda proxy", () => {

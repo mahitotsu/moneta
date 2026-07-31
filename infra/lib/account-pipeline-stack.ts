@@ -1,8 +1,10 @@
+import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import * as cdk from "aws-cdk-lib/core";
 import { Construct } from "constructs";
 import * as apigateway from "aws-cdk-lib/aws-apigateway";
+import * as customResources from "aws-cdk-lib/custom-resources";
 import * as dsql from "aws-cdk-lib/aws-dsql";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
@@ -20,7 +22,8 @@ import * as sqs from "aws-cdk-lib/aws-sqs";
 const MAX_RECEIVE_COUNT = 3;
 
 // DSQL runtime connections must use a non-admin custom role (dsql:DbConnect), not the
-// admin role (dsql:DbConnectAdmin, reserved for schema setup). See apply-schema.sh.
+// admin role (dsql:DbConnectAdmin, reserved for schema setup -- see the
+// AccountSchemaMigratorFunction custom resource below, docs/adr/0005).
 const APP_DB_ROLE = "account_service_app";
 
 // EventBridge (docs/adr/0004): account-serviceが発行するドメインイベントスキーマの契約名。
@@ -379,6 +382,59 @@ export class AccountPipelineStack extends cdk.Stack {
       methodResponses: [{ statusCode: "200" }, { statusCode: "404" }],
     });
 
+    // --- スキーマ適用(CDK Custom Resource、docs/adr/0005) ----------------------
+    // かつては`infra/scripts/apply-schema.sh`をデプロイ後に手動実行する運用だったが、
+    // outbox relay用のロール追加をスクリプト更新し忘れたまま実AWSにデプロイし、DSQLへの接続が
+    // access deniedになる不具合を実際に起こした。デプロイ自体にスキーマ適用を組み込み、
+    // 手動手順を無くす。CREATE TABLE IF NOT EXISTS / ALTER TABLE ADD COLUMN IF NOT EXISTSは
+    // 公式ドキュメントでべき等性を確認済み(schema.sql参照)。CREATE ROLE・AWS IAM GRANTは
+    // べき等な構文が無いため、Lambda側で「既に存在する」系のエラーを捕捉して無視する。
+    const schemaMigratorFn = new lambda.Function(this, "AccountSchemaMigratorFunction", {
+      runtime: lambda.Runtime.PROVIDED_AL2023,
+      architecture: lambda.Architecture.X86_64,
+      handler: "bootstrap",
+      timeout: cdk.Duration.seconds(30),
+      code: rustLambdaCode("account-schema-migrator"),
+    });
+    schemaMigratorFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        // 通常のdsql:DbConnectとは別のIAMアクション(admin接続専用)。
+        actions: ["dsql:DbConnectAdmin"],
+        resources: [cluster.attrResourceArn],
+      }),
+    );
+
+    const schemaMigrationProvider = new customResources.Provider(this, "AccountSchemaMigrationProvider", {
+      onEventHandler: schemaMigratorFn,
+    });
+
+    // schema.sqlの内容またはグラント対象ロールの一覧が変わるたびに、CloudFormationが
+    // ResourceProperties変更とみなしUpdateイベントを発火させる(=再適用される)ようにする
+    // ためだけのトリガー値。値そのものにLambda側では意味を持たせていない。
+    const schemaSqlPath = path.join(repoRoot, "crates", "account-service", "schema.sql");
+    const lambdaRoleArnsNeedingDsqlAccess = [fn.role!.roleArn, outboxRelayFn.role!.roleArn];
+    const migrationTrigger = crypto
+      .createHash("sha256")
+      .update(fs.readFileSync(schemaSqlPath, "utf8"))
+      .update(lambdaRoleArnsNeedingDsqlAccess.join(","))
+      .digest("hex");
+
+    const schemaMigration = new cdk.CustomResource(this, "AccountSchemaMigration", {
+      serviceToken: schemaMigrationProvider.serviceToken,
+      properties: {
+        ClusterEndpoint: cluster.attrEndpoint,
+        LambdaRoleArns: lambdaRoleArnsNeedingDsqlAccess,
+        Trigger: migrationTrigger,
+      },
+    });
+
+    // account-serviceとoutbox relayは、スキーマ適用・IAM GRANTが完了して初めてDSQLへの接続に
+    // 成功する。fn/outboxRelayFnのコンストラクト全体(CDKが自動生成するIAM Roleを含む)に
+    // 明示的な依存を張ろうとすると、そのRoleのARNをschemaMigration自身がLambdaRoleArnsとして
+    // 参照しているため循環依存になる(試して実際に検出された)。そのため明示的な順序付けは
+    // 行わず、同時にデプロイされてこの2つのLambdaが先に呼ばれた場合はADR-0002の分類通り
+    // インフラ起因の失敗としてリトライに委ね、移行完了後に自然に解消させる。
+
     // --- Outputs ---------------------------------------------------------------
     new cdk.CfnOutput(this, "ClusterEndpoint", { value: cluster.attrEndpoint });
     new cdk.CfnOutput(this, "ClusterResourceArn", { value: cluster.attrResourceArn });
@@ -387,9 +443,8 @@ export class AccountPipelineStack extends cdk.Stack {
     new cdk.CfnOutput(this, "AccountServiceFunctionName", { value: fn.functionName });
     new cdk.CfnOutput(this, "LambdaExecutionRoleArn", { value: fn.role!.roleArn });
     new cdk.CfnOutput(this, "OutboxRelayFunctionName", { value: outboxRelayFn.functionName });
-    // apply-schema.shがこのロールにもdsql:DbConnectをグラントする(outbox relayもDSQLへ
-    // 接続するため)。
     new cdk.CfnOutput(this, "OutboxRelayExecutionRoleArn", { value: outboxRelayFn.role!.roleArn });
+    new cdk.CfnOutput(this, "SchemaMigratorFunctionName", { value: schemaMigratorFn.functionName });
     new cdk.CfnOutput(this, "DomainEventBusName", { value: domainEventBus.eventBusName });
     new cdk.CfnOutput(this, "AccountViewTableName", { value: accountViewTable.tableName });
     new cdk.CfnOutput(this, "QueryProjectorFunctionName", { value: queryProjectorFn.functionName });

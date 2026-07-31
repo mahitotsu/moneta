@@ -19,6 +19,10 @@ path = "src/bin/outbox_relay.rs"
 name = "account-query-projector"
 path = "src/bin/query_projector.rs"
 
+[[bin]]
+name = "account-schema-migrator"
+path = "src/bin/schema_migrator.rs"
+
 [dependencies]
 aurora-dsql-sqlx-connector = { version = "0.2.2", features = ["pool", "occ"] }
 aws-config = "1"
