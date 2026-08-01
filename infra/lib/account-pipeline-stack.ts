@@ -382,6 +382,209 @@ export class AccountPipelineStack extends cdk.Stack {
       methodResponses: [{ statusCode: "200" }, { statusCode: "404" }],
     });
 
+    // ==========================================================================
+    // 書き込み経路API Gateway(docs/adr/0006) — [account-service所有]
+    //
+    // ADR-0002のメッセージライフサイクル図が元々想定していた形(API Gateway: 構造検証のみ
+    // → SQS FIFO、Lambdaを挟まない)を実装する。読み取り経路(APIGW→DynamoDB GetItem直接統合)
+    // と対称的な思想だが、SQSはQueryプロトコル(form-urlencoded)のAPIであり、DynamoDBの
+    // JSON APIとは統合の形が異なる(AWS公式ドキュメントで確認済み、docs/adr/0006参照)。
+    // ==========================================================================
+
+    const commandApiSqsRole = new iam.Role(this, "CommandApiSqsRole", {
+      assumedBy: new iam.ServicePrincipal("apigateway.amazonaws.com"),
+    });
+    commandApiSqsRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["sqs:SendMessage"],
+        resources: [commandQueue.queueArn],
+      }),
+    );
+
+    const commandApi = new apigateway.RestApi(this, "AccountCommandApi", {
+      restApiName: "moneta-account-command-api",
+      deployOptions: { stageName: "prod" },
+    });
+
+    // Idempotency-Keyヘッダー(必須) → SQS MessageDeduplicationId。contentBasedDeduplication
+    // は無効化されており(プロデューサー側が明示的に設定する前提)、VTLにはハッシュ化・
+    // UUID生成の手段がないため、クライアント側にこのヘッダーを要求する(docs/adr/0006)。
+    const commandRequestValidator = new apigateway.RequestValidator(this, "CommandRequestValidator", {
+      restApi: commandApi,
+      validateRequestBody: true,
+      validateRequestParameters: true,
+    });
+    // ボディを持たないコマンド(Unfreeze/Close)用。ボディ検証はせず、ヘッダーの必須チェックのみ行う。
+    const commandParamsOnlyValidator = new apigateway.RequestValidator(this, "CommandParamsOnlyValidator", {
+      restApi: commandApi,
+      validateRequestBody: false,
+      validateRequestParameters: true,
+    });
+
+    // 金額・残高はJSON上「文字列」(rust_decimal の serde-with-str機能。
+    // crates/account-domain/Cargo.toml、テストevent_serializes_amount_as_string_not_floatで確認済み)。
+    // ここでのpatternは「小数として解釈できる文字列か」という構造検証であり、
+    // 「正の値か」等の業務ルール(DomainError::InvalidAmount)には踏み込まない(ADR-0002の境界)。
+    const decimalStringSchema: apigateway.JsonSchema = {
+      type: apigateway.JsonSchemaType.STRING,
+      pattern: "^-?\\d+(\\.\\d+)?$",
+    };
+
+    const openModel = commandApi.addModel("OpenCommandModel", {
+      contentType: "application/json",
+      schema: {
+        schema: apigateway.JsonSchemaVersion.DRAFT4,
+        type: apigateway.JsonSchemaType.OBJECT,
+        required: ["initial_balance"],
+        properties: { initial_balance: decimalStringSchema },
+        additionalProperties: false,
+      },
+    });
+    const amountModel = commandApi.addModel("AmountCommandModel", {
+      contentType: "application/json",
+      schema: {
+        schema: apigateway.JsonSchemaVersion.DRAFT4,
+        type: apigateway.JsonSchemaType.OBJECT,
+        required: ["amount"],
+        properties: { amount: decimalStringSchema },
+        additionalProperties: false,
+      },
+    });
+    // FreezeReasonの値はRustのenumバリアント名とそのまま一致させる(rename_allなし)。
+    const freezeModel = commandApi.addModel("FreezeCommandModel", {
+      contentType: "application/json",
+      schema: {
+        schema: apigateway.JsonSchemaVersion.DRAFT4,
+        type: apigateway.JsonSchemaType.OBJECT,
+        required: ["reason"],
+        properties: {
+          reason: {
+            type: apigateway.JsonSchemaType.STRING,
+            enum: ["SuspectedFraud", "CourtOrder", "CustomerRequest"],
+          },
+        },
+        additionalProperties: false,
+      },
+    });
+
+    // AccountCommandEnvelope(persistence.rs)が期待するJSON本文を、SQS SendMessageの
+    // MessageBodyパラメータとして組み立てるVTL。MessageBodyはform-urlencodedパラメータの
+    // 値であってJSON-in-JSONではないため、DynamoDB統合のような二重エスケープは不要——ただし
+    // 実機検証の結果、API GatewayのVTLエンジンは`$util.urlEncode("...")`のような二重引用符の
+    // 文字列リテラル内で`\"`によるエスケープをサポートしない(パースエラー"Unable to transform
+    // request"になることをtest-invoke-methodで確認済み)。回避策として、`#set($q = '"')`で
+    // 二重引用符1文字を単一引用符リテラル(エスケープ不要)に退避し、`${q}`という変数参照として
+    // 埋め込むことでパーサーの引用符衝突そのものを避けている(docs/adr/0006)。
+    const sqsIntegration = (commandJsonFragment: string) =>
+      new apigateway.AwsIntegration({
+        service: "sqs",
+        // SQSクラシック(Query プロトコル)エンドポイントの形。QueueUrlをform paramとして
+        // 渡す必要はなく、pathにアカウントID+キュー名を埋め込む。
+        path: `${cdk.Aws.ACCOUNT_ID}/${commandQueue.queueName}`,
+        integrationHttpMethod: "POST",
+        options: {
+          credentialsRole: commandApiSqsRole,
+          passthroughBehavior: apigateway.PassthroughBehavior.NEVER,
+          requestParameters: {
+            "integration.request.header.Content-Type": `'application/x-www-form-urlencoded'`,
+          },
+          requestTemplates: {
+            // #set行はVTLディレクティブとして改行で終端する必要があるが、それ以外の
+            // フォームフィールド(Action=.../&MessageGroupId=...等)の間に改行を挟むと、
+            // 直前フィールドの値に改行文字が混入してSQS側の値マッチングが壊れる
+            // (実機検証で発見——"Action=SendMessage\n"が"SendMessage"と一致せず、
+            // SQSが"Version is missing"という無関係なエラーを返した。docs/adr/0006)。
+            // そのため#set行の直後にだけ改行を残し、残りは1行で連結する。
+            "application/json": [
+              "#set($q = '\"')\n",
+              "Action=SendMessage",
+              "&MessageGroupId=$util.urlEncode($input.params('accountId'))",
+              "&MessageDeduplicationId=$util.urlEncode($input.params().header.get('Idempotency-Key'))",
+              `&MessageBody=$util.urlEncode("{\${q}account_id\${q}:\${q}$input.params('accountId')\${q},\${q}command\${q}:${commandJsonFragment}}")`,
+            ].join(""),
+          },
+          // SQSのSendMessageレスポンスはXML(Queryプロトコル)であり、そこからMessageIdを
+          // パースしようとはせず、200を202に読み替えて固定のacceptedボディを返す。selectionPattern
+          // を指定し、SQS側の非2xx(例:MessageDeduplicationId不足等)を誤って202とみなさない
+          // ようにする(実機検証でこの誤りを検出——パターン未指定のエントリはデフォルトの
+          // catch-allとして扱われ、SQSの400も202に化けていた)。
+          integrationResponses: [
+            {
+              statusCode: "202",
+              selectionPattern: "2\\d{2}",
+              responseTemplates: {
+                "application/json": `{"accountId": "$input.params('accountId')", "status": "accepted"}`,
+              },
+            },
+            {
+              statusCode: "502",
+              responseTemplates: {
+                "application/json": `{"message": "failed to enqueue command"}`,
+              },
+            },
+          ],
+        },
+      });
+
+    const openCommandJson = `{\${q}Open\${q}:{\${q}initial_balance\${q}:\${q}$util.escapeJavaScript($input.path('$.initial_balance'))\${q}}}`;
+    const depositCommandJson = `{\${q}Deposit\${q}:{\${q}amount\${q}:\${q}$util.escapeJavaScript($input.path('$.amount'))\${q}}}`;
+    const withdrawCommandJson = `{\${q}Withdraw\${q}:{\${q}amount\${q}:\${q}$util.escapeJavaScript($input.path('$.amount'))\${q}}}`;
+    const freezeCommandJson = `{\${q}Freeze\${q}:{\${q}reason\${q}:\${q}$util.escapeJavaScript($input.path('$.reason'))\${q}}}`;
+    // Unfreeze/CloseはCommandのユニットバリアントであり、serdeのデフォルト外部タグ付け表現
+    // では素のJSON文字列になる(account.rsにtag属性なし。{"Unfreeze":{}}ではない)。
+    const unfreezeCommandJson = `\${q}Unfreeze\${q}`;
+    const closeCommandJson = `\${q}Close\${q}`;
+
+    const requireIdempotencyKey = {
+      "method.request.header.Idempotency-Key": true,
+    };
+
+    const commandAccountsResource = commandApi.root.addResource("accounts");
+    const commandAccountResource = commandAccountsResource.addResource("{accountId}");
+
+    // クライアントがUUIDを生成し、PUTで口座IDを指定して開設する(docs/adr/0006) —
+    // AccountCommandEnvelopeがOpenを含む全コマンドでaccount_idを事前に要求する設計と一致し、
+    // タイムアウト後の再送でも同じIDを使い回せる(べき等)。
+    commandAccountResource.addMethod("PUT", sqsIntegration(openCommandJson), {
+      requestValidator: commandRequestValidator,
+      requestParameters: requireIdempotencyKey,
+      requestModels: { "application/json": openModel },
+      methodResponses: [{ statusCode: "202" }, { statusCode: "502" }],
+    });
+
+    commandAccountResource.addResource("deposits").addMethod("POST", sqsIntegration(depositCommandJson), {
+      requestValidator: commandRequestValidator,
+      requestParameters: requireIdempotencyKey,
+      requestModels: { "application/json": amountModel },
+      methodResponses: [{ statusCode: "202" }, { statusCode: "502" }],
+    });
+
+    commandAccountResource.addResource("withdrawals").addMethod("POST", sqsIntegration(withdrawCommandJson), {
+      requestValidator: commandRequestValidator,
+      requestParameters: requireIdempotencyKey,
+      requestModels: { "application/json": amountModel },
+      methodResponses: [{ statusCode: "202" }, { statusCode: "502" }],
+    });
+
+    commandAccountResource.addResource("freeze").addMethod("POST", sqsIntegration(freezeCommandJson), {
+      requestValidator: commandRequestValidator,
+      requestParameters: requireIdempotencyKey,
+      requestModels: { "application/json": freezeModel },
+      methodResponses: [{ statusCode: "202" }, { statusCode: "502" }],
+    });
+
+    commandAccountResource.addResource("unfreeze").addMethod("POST", sqsIntegration(unfreezeCommandJson), {
+      requestValidator: commandParamsOnlyValidator,
+      requestParameters: requireIdempotencyKey,
+      methodResponses: [{ statusCode: "202" }, { statusCode: "502" }],
+    });
+
+    commandAccountResource.addResource("close").addMethod("POST", sqsIntegration(closeCommandJson), {
+      requestValidator: commandParamsOnlyValidator,
+      requestParameters: requireIdempotencyKey,
+      methodResponses: [{ statusCode: "202" }, { statusCode: "502" }],
+    });
+
     // --- スキーマ適用(CDK Custom Resource、docs/adr/0005) ----------------------
     // かつては`infra/scripts/apply-schema.sh`をデプロイ後に手動実行する運用だったが、
     // outbox relay用のロール追加をスクリプト更新し忘れたまま実AWSにデプロイし、DSQLへの接続が
@@ -449,5 +652,6 @@ export class AccountPipelineStack extends cdk.Stack {
     new cdk.CfnOutput(this, "AccountViewTableName", { value: accountViewTable.tableName });
     new cdk.CfnOutput(this, "QueryProjectorFunctionName", { value: queryProjectorFn.functionName });
     new cdk.CfnOutput(this, "QueryApiUrl", { value: queryApi.url });
+    new cdk.CfnOutput(this, "CommandApiUrl", { value: commandApi.url });
   }
 }

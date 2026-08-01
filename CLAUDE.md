@@ -7,9 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This is a technology-validation PoC for a blog article, not a reference architecture for
 organizational rollout. Prioritize technical validity over organizational realism (review
 processes, team ownership, governance) — those are left as discussion points for the article,
-not implemented. Write path: Web UI (not yet built) → API Gateway (not yet built) → SQS FIFO →
-Lambda (Rust) → Aurora DSQL. Read path: DSQL outbox → EventBridge → Query service (Lambda +
-DynamoDB) → API Gateway → caller.
+not implemented. Write path: Web UI (not yet built) → API Gateway → SQS FIFO → Lambda (Rust) →
+Aurora DSQL. Read path: DSQL outbox → EventBridge → Query service (Lambda + DynamoDB) →
+API Gateway → caller.
 
 **`docs/adr/` is the single source of truth for design rationale, constraints, and decision
 history — this file only orients and points there.** Don't copy specifics (retry counts,
@@ -30,6 +30,8 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
 - `0005`: schema/role/IAM-grant setup is applied automatically on every deploy via a CDK Custom
   Resource, not a manually-run script — `schema.sql` is the idempotent single source of truth,
   embedded directly into the migrator Lambda.
+- `0006`: write-path API Gateway — Lambda-less APIGW→SQS `SendMessage` direct integration,
+  client-generated account IDs, `Idempotency-Key` header, per-command REST resources.
 
 ## Commands
 
