@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
-use account_domain::{AccountId, Event};
-use account_service::{outbox::EventEnvelope, projection};
+use account_domain::{AccountId, Event, EventEnvelope};
 use aws_lambda_events::eventbridge::EventBridgeEvent;
 use aws_sdk_dynamodb::types::AttributeValue;
 use lambda_runtime::{run, service_fn, Error, LambdaEvent};
+use query_service::projection;
 
 const EVENT_KIND: &str = "event";
 

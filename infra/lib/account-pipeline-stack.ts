@@ -5,6 +5,8 @@ import * as cdk from "aws-cdk-lib/core";
 import { Construct } from "constructs";
 import * as apigateway from "aws-cdk-lib/aws-apigateway";
 import * as customResources from "aws-cdk-lib/custom-resources";
+import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
+import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
 import * as dsql from "aws-cdk-lib/aws-dsql";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
@@ -13,6 +15,8 @@ import * as eventschemas from "aws-cdk-lib/aws-eventschemas";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
+import * as s3 from "aws-cdk-lib/aws-s3";
+import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
 import * as scheduler from "aws-cdk-lib/aws-scheduler";
 import * as sqs from "aws-cdk-lib/aws-sqs";
 
@@ -47,9 +51,10 @@ export class AccountPipelineStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    // Rust製3バイナリ(account-service, account-outbox-relay, account-query-projector)は
-    // 全て同じワークスペースルート・同じ手順でビルドするため、バイナリ名だけを差し替えられる
-    // ヘルパーに切り出して重複を避ける。
+    // Rust製4バイナリ(account-service, account-outbox-relay, account-schema-migratorは
+    // account-serviceパッケージ、account-query-projectorはquery-serviceパッケージ——
+    // docs/adr/0008でクレートを分離した)は全て同じワークスペースルート・同じ手順でビルド
+    // するため、パッケージ名・バイナリ名だけを差し替えられるヘルパーに切り出して重複を避ける。
     //
     // このビルドは(ホストもLambdaターゲットもx86_64なので)CPUアーキテクチャの変換ではなく、
     // glibcバージョンの互換性のために必要——このリポジトリの開発ホストはLambdaのprovided.al2023
@@ -74,7 +79,7 @@ export class AccountPipelineStack extends cdk.Stack {
       fs.mkdirSync(dir, { recursive: true });
     }
 
-    const rustLambdaCode = (binaryName: string): lambda.Code =>
+    const rustLambdaCode = (packageName: string, binaryName: string): lambda.Code =>
       lambda.Code.fromAsset(repoRoot, {
         // キャッシュディレクトリ自体はrepoRoot配下(discoverable/削除しやすい場所)に置くが、
         // アセットのソースには含めない。含めてしまうとCDKがLambdaアセットの内容ハッシュを
@@ -97,7 +102,7 @@ export class AccountPipelineStack extends cdk.Stack {
               // 初回のみrustupをインストールする(キャッシュ済みならスキップ)。
               '[ -x "$CARGO_HOME/bin/cargo" ] || curl --proto \'=https\' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable',
               '. "$CARGO_HOME/env"',
-              `cargo build --release --target x86_64-unknown-linux-gnu -p account-service --bin ${binaryName}`,
+              `cargo build --release --target x86_64-unknown-linux-gnu -p ${packageName} --bin ${binaryName}`,
               `cp target/x86_64-unknown-linux-gnu/release/${binaryName} /asset-output/bootstrap`,
               // このコンテナはrootで動くため、キャッシュ用ボリューム(ホスト側の
               // .rust-lambda-docker-cache)に書き込まれるファイルは何もしなければホスト側で
@@ -151,7 +156,7 @@ export class AccountPipelineStack extends cdk.Stack {
       architecture: lambda.Architecture.X86_64,
       handler: "bootstrap",
       timeout: cdk.Duration.seconds(30),
-      code: rustLambdaCode("account-service"),
+      code: rustLambdaCode("account-service", "account-service"),
       environment: {
         // No password: aurora-dsql-sqlx-connector generates and injects a short-lived
         // IAM auth token per connection using the Lambda execution role's credentials.
@@ -250,7 +255,7 @@ export class AccountPipelineStack extends cdk.Stack {
       architecture: lambda.Architecture.X86_64,
       handler: "bootstrap",
       timeout: cdk.Duration.seconds(30),
-      code: rustLambdaCode("account-outbox-relay"),
+      code: rustLambdaCode("account-service", "account-outbox-relay"),
       environment: {
         DATABASE_URL: `postgres://${APP_DB_ROLE}@${cluster.attrEndpoint}:5432/postgres?sslmode=require`,
         EVENT_BUS_NAME: domainEventBus.eventBusName,
@@ -298,7 +303,7 @@ export class AccountPipelineStack extends cdk.Stack {
       architecture: lambda.Architecture.X86_64,
       handler: "bootstrap",
       timeout: cdk.Duration.seconds(30),
-      code: rustLambdaCode("account-query-projector"),
+      code: rustLambdaCode("query-service", "account-query-projector"),
       environment: {
         TABLE_NAME: accountViewTable.tableName,
       },
@@ -597,7 +602,7 @@ export class AccountPipelineStack extends cdk.Stack {
       architecture: lambda.Architecture.X86_64,
       handler: "bootstrap",
       timeout: cdk.Duration.seconds(30),
-      code: rustLambdaCode("account-schema-migrator"),
+      code: rustLambdaCode("account-service", "account-schema-migrator"),
     });
     schemaMigratorFn.addToRolePolicy(
       new iam.PolicyStatement({
@@ -638,6 +643,102 @@ export class AccountPipelineStack extends cdk.Stack {
     // 行わず、同時にデプロイされてこの2つのLambdaが先に呼ばれた場合はADR-0002の分類通り
     // インフラ起因の失敗としてリトライに委ね、移行完了後に自然に解消させる。
 
+    // ==========================================================================
+    // Web UIホスティング + CloudFrontによるオリジン統合(docs/adr/0007)
+    //
+    // queryApi/commandApiはどちらもリソースパスが/accounts/{accountId}から始まる
+    // (GETが照会、PUTがOpen)。CloudFrontのcache behaviorはHTTPメソッドではなくパスでしか
+    // 振り分けられないため、単純な/accounts/*という1つのbehaviorではこの2つのAPIを区別
+    // できない。ブラウザから見えるパスに/query-api・/command-apiというprefixを与え、
+    // CloudFront Function(viewer-request)でprefixを剥がしてから各オリジンへ転送すること
+    // で区別する。結果としてWeb UIは常に単一オリジン(CloudFrontドメイン)だけを叩くこと
+    // になり、CORSプリフライト自体が発生しない(同一オリジンのリクエストはブラウザのCORS
+    // 機構の対象外——Idempotency-Keyのようなカスタムヘッダーを使うPUT/POSTも同様)。
+    // 既存のqueryApi/commandApiの実装(VTL含む)は無改修。
+    // ==========================================================================
+
+    const webUiBucket = new s3.Bucket(this, "WebUiBucket", {
+      // CDKのs3.Bucketはデフォルトでは PublicAccessBlockConfiguration をテンプレートに
+      // 出力しない(アカウントレベルの既定に委ねる)。CloudFront(OAC)経由でのみ読み取り
+      // 可能にする意図を明示するため、バケット側でも明示的にBLOCK_ALLにする。
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      // PoCスタックのため自由に壊せるようにする(DSQLクラスタのdeletionProtectionEnabled:
+      // falseと同じ方針)。
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+    });
+
+    const queryApiPrefixFunction = new cloudfront.Function(this, "QueryApiPrefixFunction", {
+      runtime: cloudfront.FunctionRuntime.JS_2_0,
+      code: cloudfront.FunctionCode.fromInline(
+        [
+          "function handler(event) {",
+          "  var request = event.request;",
+          '  request.uri = request.uri.replace(/^\\/query-api/, "") || "/";',
+          "  return request;",
+          "}",
+        ].join("\n"),
+      ),
+    });
+
+    const commandApiPrefixFunction = new cloudfront.Function(this, "CommandApiPrefixFunction", {
+      runtime: cloudfront.FunctionRuntime.JS_2_0,
+      code: cloudfront.FunctionCode.fromInline(
+        [
+          "function handler(event) {",
+          "  var request = event.request;",
+          '  request.uri = request.uri.replace(/^\\/command-api/, "") || "/";',
+          "  return request;",
+          "}",
+        ].join("\n"),
+      ),
+    });
+
+    // CloudFrontはデフォルトで任意ヘッダーをオリジンへ転送しないため、Idempotency-Key
+    // (ADR-0006決定3)を明示的に転送する。
+    const commandApiOriginRequestPolicy = new cloudfront.OriginRequestPolicy(this, "CommandApiOriginRequestPolicy", {
+      headerBehavior: cloudfront.OriginRequestHeaderBehavior.allowList("Idempotency-Key", "Content-Type"),
+    });
+
+    const webUiDistribution = new cloudfront.Distribution(this, "WebUiDistribution", {
+      defaultBehavior: {
+        origin: origins.S3BucketOrigin.withOriginAccessControl(webUiBucket),
+      },
+      additionalBehaviors: {
+        // 結果整合性のあるレスポンスをCDNにキャッシュさせないため、API系はどちらも
+        // CACHING_DISABLED(ADR-0007)。
+        "/query-api/*": {
+          origin: new origins.RestApiOrigin(queryApi),
+          cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+          functionAssociations: [
+            { function: queryApiPrefixFunction, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST },
+          ],
+        },
+        "/command-api/*": {
+          origin: new origins.RestApiOrigin(commandApi),
+          // デフォルト(ALLOW_GET_HEAD)だとPUT/POSTが403になる(実機検証で発見)。書き込み
+          // コマンドはPUT(Open)とPOST(Deposit等)のため明示的に全メソッドを許可する。
+          allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+          cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+          originRequestPolicy: commandApiOriginRequestPolicy,
+          functionAssociations: [
+            { function: commandApiPrefixFunction, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST },
+          ],
+        },
+      },
+      defaultRootObject: "index.html",
+    });
+
+    // web-ui/distを事前ビルドしておく必要がある(web-ui/README.md参照)。Rust Lambda群の
+    // ようなDockerバンドリングは不要と判断した——Node/npmのビルドにはLambda実行時との
+    // glibcバージョン互換性問題が無いため。
+    new s3deploy.BucketDeployment(this, "WebUiDeployment", {
+      sources: [s3deploy.Source.asset(path.join(repoRoot, "web-ui", "dist"))],
+      destinationBucket: webUiBucket,
+      distribution: webUiDistribution,
+      distributionPaths: ["/*"],
+    });
+
     // --- Outputs ---------------------------------------------------------------
     new cdk.CfnOutput(this, "ClusterEndpoint", { value: cluster.attrEndpoint });
     new cdk.CfnOutput(this, "ClusterResourceArn", { value: cluster.attrResourceArn });
@@ -653,5 +754,6 @@ export class AccountPipelineStack extends cdk.Stack {
     new cdk.CfnOutput(this, "QueryProjectorFunctionName", { value: queryProjectorFn.functionName });
     new cdk.CfnOutput(this, "QueryApiUrl", { value: queryApi.url });
     new cdk.CfnOutput(this, "CommandApiUrl", { value: commandApi.url });
+    new cdk.CfnOutput(this, "WebUiUrl", { value: `https://${webUiDistribution.domainName}` });
   }
 }

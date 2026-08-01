@@ -7,9 +7,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This is a technology-validation PoC for a blog article, not a reference architecture for
 organizational rollout. Prioritize technical validity over organizational realism (review
 processes, team ownership, governance) — those are left as discussion points for the article,
-not implemented. Write path: Web UI (not yet built) → API Gateway → SQS FIFO → Lambda (Rust) →
-Aurora DSQL. Read path: DSQL outbox → EventBridge → Query service (Lambda + DynamoDB) →
-API Gateway → caller.
+not implemented. Write path: Web UI (`web-ui/`, React) → CloudFront → API Gateway → SQS FIFO →
+Lambda (Rust) → Aurora DSQL. Read path: DSQL outbox → EventBridge → Query service
+(Lambda + DynamoDB) → CloudFront → API Gateway → caller. CloudFront unifies the static UI and
+both APIs under one origin so the browser never needs CORS — see `0007`.
 
 **`docs/adr/` is the single source of truth for design rationale, constraints, and decision
 history — this file only orients and points there.** Don't copy specifics (retry counts,
@@ -32,6 +33,13 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
   embedded directly into the migrator Lambda.
 - `0006`: write-path API Gateway — Lambda-less APIGW→SQS `SendMessage` direct integration,
   client-generated account IDs, `Idempotency-Key` header, per-command REST resources.
+- `0007`: Web UI — React/TypeScript/Vite + TanStack Query, no auth UI (explicit scope
+  boundary), and a single CloudFront distribution that unifies the static site and both APIs
+  under one origin (prefix-routed via CloudFront Functions) so CORS is never needed, in prod or
+  local dev.
+- `0008`: Query service extracted into its own crate (`crates/query-service`) — its
+  Cargo.toml deliberately excludes `sqlx`/`aurora-dsql-sqlx-connector`/`aws-sdk-eventbridge`,
+  so "Query service never touches DSQL" is now compiler-enforced, not just a comment.
 
 ## Commands
 
@@ -40,6 +48,7 @@ cargo build --workspace              # build everything
 cargo test --workspace               # run all tests (fast — account-domain has zero AWS/DB deps)
 cargo test -p account-domain         # domain-only tests, no async runtime needed
 cargo test -p account-service        # Lambda handler tests (grouping/batch logic; no live DB needed)
+cargo test -p query-service          # projection tests (event → view, no AWS deps needed)
 cargo test -p account-domain <name>  # run a single test by name (substring match)
 cargo clippy --workspace --all-targets   # must be warning-free before considering work done
 ```
@@ -51,14 +60,17 @@ after install.
 
 ## Architecture
 
-### Crate boundary (ADR-0003)
+### Crate boundary (ADR-0003, ADR-0008)
 
 `account-domain` has zero AWS/DB/async dependencies — enforced by what's absent from its
 `Cargo.toml`, not just convention. All business rules live there as pure functions.
-`account-service` holds everything else (Lambda/SQS glue, DSQL persistence mapping,
-orchestration) and is deliberately not further split into a repository-trait layer (ADR-0003
-explains why not, given this PoC's current scope). If you're about to add a non-domain
-dependency to `account-domain`, stop — it belongs in `account-service`.
+`account-service` holds everything else on the write path (Lambda/SQS glue, DSQL persistence
+mapping, orchestration) and is deliberately not further split into a repository-trait layer
+(ADR-0003 explains why not, given this PoC's current scope). `query-service` is a third crate
+(ADR-0008) holding the DynamoDB projection Lambda; its Cargo.toml has no DSQL/SQS/EventBridge
+dependencies, so it cannot reach into account-service's write-path internals even accidentally.
+If you're about to add a non-domain dependency to `account-domain`, or a DSQL/write-path
+dependency to `query-service`, stop — it belongs elsewhere.
 
 ### Domain model conventions (`account-domain`)
 

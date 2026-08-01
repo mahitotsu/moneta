@@ -1,0 +1,155 @@
+:root {
+  --text: #3f3f46;
+  --text-h: #18181b;
+  --bg: #fff;
+  --border: #e4e4e7;
+  --panel-bg: #fafafa;
+  --accent: #2563eb;
+  --accent-text: #fff;
+  --danger: #b91c1c;
+  --danger-bg: #fef2f2;
+  --pending: #b45309;
+  --pending-bg: #fffbeb;
+
+  font: 16px/145% system-ui, "Segoe UI", Roboto, sans-serif;
+  color-scheme: light dark;
+  color: var(--text);
+  background: var(--bg);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --text: #d4d4d8;
+    --text-h: #fafafa;
+    --bg: #18181b;
+    --border: #3f3f46;
+    --panel-bg: #212124;
+    --accent: #60a5fa;
+    --accent-text: #0a0a0a;
+    --danger: #f87171;
+    --danger-bg: #2a1414;
+    --pending: #fbbf24;
+    --pending-bg: #2a2210;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+#root {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 24px 16px 64px;
+}
+
+h1 {
+  font-size: 24px;
+  color: var(--text-h);
+  margin: 0 0 4px;
+}
+
+h2 {
+  font-size: 16px;
+  color: var(--text-h);
+  margin: 0 0 12px;
+}
+
+.subtitle {
+  margin: 0 0 24px;
+  font-size: 14px;
+  color: var(--text);
+  opacity: 0.8;
+}
+
+.panel {
+  border: 1px solid var(--border);
+  background: var(--panel-bg);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.field-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+input,
+select {
+  font: inherit;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text-h);
+}
+
+button {
+  font: inherit;
+  padding: 6px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--accent-text);
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button.secondary {
+  background: transparent;
+  color: var(--accent);
+}
+
+.operations-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.status-line {
+  font-size: 13px;
+  margin-top: 8px;
+}
+
+.status-line.error {
+  color: var(--danger);
+}
+
+.status-line.pending {
+  color: var(--pending);
+}
+
+.badge {
+  display: inline-block;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--pending-bg);
+  color: var(--pending);
+}
+
+dl.account-view {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  margin: 0;
+}
+
+dl.account-view dt {
+  opacity: 0.7;
+}
+
+dl.account-view dd {
+  margin: 0;
+  font-family: ui-monospace, Consolas, monospace;
+}

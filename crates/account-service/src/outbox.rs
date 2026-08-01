@@ -1,23 +1,7 @@
-use account_domain::{OffsetDateTime, Uuid};
-use serde::{Deserialize, Serialize};
+use account_domain::EventEnvelope;
 use serde_json::Value;
 
 use crate::persistence::UnpublishedEvent;
-
-/// account-serviceがEventBridgeへ発行するイベントの`detail`の形。発行側(account-outbox-relay)と
-/// 購読側(account-query-projector)の双方がこの型を通してやり取りする——これがaccount-serviceの
-/// 公開契約(ドメインイベントスキーマ)そのもの(docs/adr/0004)。Query側はこの形にしか依存せず、
-/// account-serviceの内部DBスキーマを一切知らない。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct EventEnvelope {
-    pub event_id: Uuid,
-    pub account_id: Uuid,
-    pub occurred_at: OffsetDateTime,
-    /// "event"(状態変化を表すもの) または "rejection"(却下されたコマンド)。
-    pub kind: String,
-    /// account-domainの`Event`または`DomainError`のJSON表現(serdeのデフォルト外部タグ形式)。
-    pub data: Value,
-}
 
 /// EventBridgeへ発行する1エントリの中身。
 pub struct OutboxEntry {
@@ -54,6 +38,7 @@ fn variant_name(payload: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use account_domain::{OffsetDateTime, Uuid};
     use serde_json::json;
 
     fn unpublished_event(kind: &str, payload: Value) -> UnpublishedEvent {
