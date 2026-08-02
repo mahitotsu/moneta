@@ -40,6 +40,12 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
 - `0008`: Query service extracted into its own crate (`crates/query-service`) — its
   Cargo.toml deliberately excludes `sqlx`/`aurora-dsql-sqlx-connector`/`aws-sdk-eventbridge`,
   so "Query service never touches DSQL" is now compiler-enforced, not just a comment.
+- `0009`: Web UI reworked into a customer persona (dummy sign-in, localStorage-only
+  account list, balance/history, self-service freeze/unfreeze/close) and a separate
+  external-channel-emulator persona (ATM/incoming transfer/bill payment) that reuses the
+  existing Deposit/Withdraw commands unchanged — customers never deposit/withdraw directly
+  from the web UI, matching real net-banking. Also adds a second Query service read model
+  (`AccountHistoryTable`) for transaction history.
 
 ## Commands
 

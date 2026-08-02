@@ -297,6 +297,16 @@ export class AccountPipelineStack extends cdk.Stack {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
     });
 
+    // 取引履歴(docs/adr/0009) — accountViewTableとは別の第二のread model。1アイテム=
+    // 1トランザクション、ソートキーはナノ秒タイムスタンプ(ゼロパディング)+event_idで
+    // 時刻順ソートと一意性の両方を満たす(crates/query-service/src/bin/query_projector.rs)。
+    const accountHistoryTable = new dynamodb.Table(this, "AccountHistoryTable", {
+      tableName: "moneta-account-history",
+      partitionKey: { name: "accountId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "sk", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    });
+
     // --- [Query Service所有] Query Projector: イベント→view変換 ---------------
     const queryProjectorFn = new lambda.Function(this, "AccountQueryProjectorFunction", {
       runtime: lambda.Runtime.PROVIDED_AL2023,
@@ -306,10 +316,12 @@ export class AccountPipelineStack extends cdk.Stack {
       code: rustLambdaCode("query-service", "account-query-projector"),
       environment: {
         TABLE_NAME: accountViewTable.tableName,
+        HISTORY_TABLE_NAME: accountHistoryTable.tableName,
       },
     });
 
     accountViewTable.grantWriteData(queryProjectorFn);
+    accountHistoryTable.grantWriteData(queryProjectorFn);
     // account-serviceのDSQLクラスタへは一切アクセスしない(EventBridgeのdetailだけで完結)。
 
     // --- [Query Service所有] EventBridge Rule(購読条件) -----------------------
@@ -338,6 +350,12 @@ export class AccountPipelineStack extends cdk.Stack {
       new iam.PolicyStatement({
         actions: ["dynamodb:GetItem"],
         resources: [accountViewTable.tableArn],
+      }),
+    );
+    queryApiDynamoRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["dynamodb:Query"],
+        resources: [accountHistoryTable.tableArn],
       }),
     );
 
@@ -385,6 +403,54 @@ export class AccountPipelineStack extends cdk.Stack {
     const accountResource = accountsResource.addResource("{accountId}");
     accountResource.addMethod("GET", getAccountIntegration, {
       methodResponses: [{ statusCode: "200" }, { statusCode: "404" }],
+    });
+
+    // --- [Query Service所有] 取引履歴API: API Gateway + DynamoDB Query直接統合 --
+    // accountHistoryTableを新しい順(ScanIndexForward: false)に最大50件返す。ページネーション
+    // はPoCスコープでは省略する(docs/adr/0009)。GetItem直接統合と同じ思想だが、こちらは
+    // Query操作でItems配列が返るため、レスポンスVTLで#foreachによるJSON配列の組み立てが必要
+    // ——ADR-0006がVTLの実機バグを繰り返し踏んだ経緯を踏まえ、デプロイ後にtest-invoke-method
+    // で実機検証してから完了とする。
+    const listTransactionsIntegration = new apigateway.AwsIntegration({
+      service: "dynamodb",
+      action: "Query",
+      options: {
+        credentialsRole: queryApiDynamoRole,
+        passthroughBehavior: apigateway.PassthroughBehavior.NEVER,
+        requestTemplates: {
+          "application/json": JSON.stringify({
+            TableName: accountHistoryTable.tableName,
+            KeyConditionExpression: "accountId = :accountId",
+            ExpressionAttributeValues: {
+              ":accountId": { S: "$input.params('accountId')" },
+            },
+            ScanIndexForward: false,
+            Limit: 50,
+          }),
+        },
+        integrationResponses: [
+          {
+            statusCode: "200",
+            responseTemplates: {
+              // 各アイテムのentry属性(history_entry_from_eventが生成した、既にJSON文字列)を
+              // カンマ区切りで連結してJSON配列を組み立てる。
+              "application/json": [
+                "#set($items = $input.path('$.Items'))",
+                "[",
+                "#foreach($item in $items)",
+                "$item.entry.S#if($foreach.hasNext),#end",
+                "#end",
+                "]",
+              ].join("\n"),
+            },
+          },
+        ],
+      },
+    });
+
+    const transactionsResource = accountResource.addResource("transactions");
+    transactionsResource.addMethod("GET", listTransactionsIntegration, {
+      methodResponses: [{ statusCode: "200" }],
     });
 
     // ==========================================================================
@@ -751,6 +817,7 @@ export class AccountPipelineStack extends cdk.Stack {
     new cdk.CfnOutput(this, "SchemaMigratorFunctionName", { value: schemaMigratorFn.functionName });
     new cdk.CfnOutput(this, "DomainEventBusName", { value: domainEventBus.eventBusName });
     new cdk.CfnOutput(this, "AccountViewTableName", { value: accountViewTable.tableName });
+    new cdk.CfnOutput(this, "AccountHistoryTableName", { value: accountHistoryTable.tableName });
     new cdk.CfnOutput(this, "QueryProjectorFunctionName", { value: queryProjectorFn.functionName });
     new cdk.CfnOutput(this, "QueryApiUrl", { value: queryApi.url });
     new cdk.CfnOutput(this, "CommandApiUrl", { value: commandApi.url });

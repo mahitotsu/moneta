@@ -39,7 +39,7 @@ fn state_to_view(state: &AccountState) -> Value {
     }
 }
 
-fn freeze_reason_label(reason: &FreezeReason) -> &'static str {
+pub(crate) fn freeze_reason_label(reason: &FreezeReason) -> &'static str {
     match reason {
         FreezeReason::SuspectedFraud => "suspected_fraud",
         FreezeReason::CourtOrder => "court_order",

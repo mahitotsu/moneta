@@ -94,6 +94,35 @@ describe("AccountPipelineStack", () => {
     });
   });
 
+  // 取引履歴(docs/adr/0009)。GetItemではなくQueryを使う直接統合であること、履歴専用
+  // テーブルへのdynamodb:Query権限だけが付与されていること(GetItem権限と混同していないか)
+  // を確認する。
+  test("exposes GET /accounts/{accountId}/transactions as a direct DynamoDB Query integration", () => {
+    // Uriはdynamodb:action/{GetItem,Query}で終わるFn::Join(パーティション部分がトークン化
+    // されている)。GetItem統合と区別する一番頑健な手がかりとして使う。
+    template.hasResourceProperties("AWS::ApiGateway::Method", {
+      HttpMethod: "GET",
+      Integration: Match.objectLike({
+        Type: "AWS",
+        IntegrationHttpMethod: "POST",
+        Uri: Match.objectLike({
+          "Fn::Join": Match.arrayWith([Match.arrayWith([Match.stringLikeRegexp("action/Query$")])]),
+        }),
+      }),
+    });
+  });
+
+  test("creates the account history table with a composite key (accountId, sk) separate from the view table", () => {
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      TableName: "moneta-account-history",
+      BillingMode: "PAY_PER_REQUEST",
+      KeySchema: [
+        { AttributeName: "accountId", KeyType: "HASH" },
+        { AttributeName: "sk", KeyType: "RANGE" },
+      ],
+    });
+  });
+
   test("only account-service and the outbox relay get dsql:DbConnect (query projector never touches DSQL)", () => {
     template.resourcePropertiesCountIs(
       "AWS::IAM::Policy",

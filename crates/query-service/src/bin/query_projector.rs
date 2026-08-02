@@ -1,12 +1,16 @@
 use std::collections::HashMap;
 
-use account_domain::{AccountId, Event, EventEnvelope};
+use account_domain::{AccountId, Event, EventEnvelope, OffsetDateTime, Uuid};
 use aws_lambda_events::eventbridge::EventBridgeEvent;
 use aws_sdk_dynamodb::types::AttributeValue;
 use lambda_runtime::{run, service_fn, Error, LambdaEvent};
-use query_service::projection;
+use query_service::{history, projection};
 
 const EVENT_KIND: &str = "event";
+// DynamoDBのソートキーは文字列として辞書順に並ぶため、ナノ秒タイムスタンプを固定幅で
+// ゼロパディングし、数値順=文字列順になるようにする(docs/adr/0009)。i128のナノ秒値は
+// 現実的な日時の範囲では20桁に収まる。
+const NANOS_WIDTH: usize = 20;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -17,24 +21,27 @@ async fn main() -> Result<(), Error> {
         .init();
 
     let table_name = std::env::var("TABLE_NAME").expect("TABLE_NAME environment variable must be set");
+    let history_table_name =
+        std::env::var("HISTORY_TABLE_NAME").expect("HISTORY_TABLE_NAME environment variable must be set");
     let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
     let dynamodb = aws_sdk_dynamodb::Client::new(&aws_config);
 
     run(service_fn(move |event: LambdaEvent<EventBridgeEvent<EventEnvelope>>| {
         let dynamodb = dynamodb.clone();
         let table_name = table_name.clone();
-        async move { project_one(&dynamodb, &table_name, event.payload.detail).await }
+        let history_table_name = history_table_name.clone();
+        async move { project_one(&dynamodb, &table_name, &history_table_name, event.payload.detail).await }
     }))
     .await
 }
 
-/// account-serviceが発行したドメインイベント1件を、Query Serviceのview(DynamoDB)へ冪等に
-/// 適用する。アウトボックスはat-least-onceかつ順序無保証で発行しうるため、保存済みより新しい
-/// イベントの場合のみ上書きするlast-writer-wins方式を取る(docs/adr/0004。DSQL CDC公式ガイダンス
-/// が推奨する方式をそのまま踏襲)。
+/// account-serviceが発行したドメインイベント1件を、Query Serviceの2つのread modelへ適用する:
+/// (1) 現在状態のview(last-writer-wins、docs/adr/0004) (2) 取引履歴(event_idをキーに含む
+/// 冪等な追記、docs/adr/0009——ADR-0004の投影パターンの延長)。
 async fn project_one(
     dynamodb: &aws_sdk_dynamodb::Client,
     table_name: &str,
+    history_table_name: &str,
     envelope: EventEnvelope,
 ) -> Result<(), Error> {
     if envelope.kind != EVENT_KIND {
@@ -45,16 +52,35 @@ async fn project_one(
         return Ok(());
     }
 
-    let event: Event = serde_json::from_value(envelope.data)?;
     let account_id = AccountId::from(envelope.account_id);
-    let view = projection::view_from_event(account_id, &event);
-    let occurred_at_nanos = envelope.occurred_at.unix_timestamp_nanos().to_string();
+    let event_id = envelope.event_id;
+    let occurred_at = envelope.occurred_at;
+    let event: Event = serde_json::from_value(envelope.data)?;
+
+    put_current_view(dynamodb, table_name, account_id, occurred_at, event_id, &event).await?;
+    put_history_entry(dynamodb, history_table_name, account_id, occurred_at, event_id, &event).await?;
+
+    Ok(())
+}
+
+/// 保存済みより新しいイベントの場合のみ上書きするlast-writer-wins方式(docs/adr/0004。
+/// DSQL CDC公式ガイダンスが推奨する方式をそのまま踏襲)。
+async fn put_current_view(
+    dynamodb: &aws_sdk_dynamodb::Client,
+    table_name: &str,
+    account_id: AccountId,
+    occurred_at: OffsetDateTime,
+    event_id: Uuid,
+    event: &Event,
+) -> Result<(), Error> {
+    let view = projection::view_from_event(account_id, event);
+    let occurred_at_nanos = occurred_at.unix_timestamp_nanos().to_string();
 
     let mut item: HashMap<String, AttributeValue> = HashMap::new();
-    item.insert("accountId".to_string(), AttributeValue::S(envelope.account_id.to_string()));
+    item.insert("accountId".to_string(), AttributeValue::S(account_id.to_string()));
     item.insert("view".to_string(), AttributeValue::S(serde_json::to_string(&view)?));
     item.insert("lastEventAt".to_string(), AttributeValue::N(occurred_at_nanos.clone()));
-    item.insert("lastEventId".to_string(), AttributeValue::S(envelope.event_id.to_string()));
+    item.insert("lastEventId".to_string(), AttributeValue::S(event_id.to_string()));
 
     let result = dynamodb
         .put_item()
@@ -74,11 +100,35 @@ async fn project_one(
             if is_stale_or_duplicate {
                 // 条件不成立=より新しいイベントが既に反映済み(重複配信または遅延到着)。
                 // 最終的にlast-writer-winsで正しい状態に収束するため、エラーではなく正常終了とする。
-                tracing::info!(account_id = %envelope.account_id, "skipping stale or duplicate event");
+                tracing::info!(%account_id, "skipping stale or duplicate event for current view");
                 Ok(())
             } else {
                 Err(err.into())
             }
         }
     }
+}
+
+/// 取引履歴への追記。ソートキーに`event_id`を含めるため、at-least-once配信で同じイベントが
+/// 再送されても同じキーへの冪等な上書きになるだけであり、current viewと違って
+/// ConditionExpressionは不要(docs/adr/0009)。
+async fn put_history_entry(
+    dynamodb: &aws_sdk_dynamodb::Client,
+    history_table_name: &str,
+    account_id: AccountId,
+    occurred_at: OffsetDateTime,
+    event_id: Uuid,
+    event: &Event,
+) -> Result<(), Error> {
+    let entry = history::history_entry_from_event(event, occurred_at, event_id);
+    let occurred_at_nanos = occurred_at.unix_timestamp_nanos();
+    let sort_key = format!("{occurred_at_nanos:0NANOS_WIDTH$}#{event_id}");
+
+    let mut item: HashMap<String, AttributeValue> = HashMap::new();
+    item.insert("accountId".to_string(), AttributeValue::S(account_id.to_string()));
+    item.insert("sk".to_string(), AttributeValue::S(sort_key));
+    item.insert("entry".to_string(), AttributeValue::S(serde_json::to_string(&entry)?));
+
+    dynamodb.put_item().table_name(history_table_name).set_item(Some(item)).send().await?;
+    Ok(())
 }

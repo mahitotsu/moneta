@@ -1,4 +1,4 @@
-import type { AccountView, CommandAcceptedResponse, FreezeReasonRequest } from "./types";
+import type { AccountView, CommandAcceptedResponse, FreezeReasonRequest, TransactionEntry } from "./types";
 
 // 相対パスのみを叩く。本番はCloudFrontのbehavior(/query-api/*, /command-api/*)、
 // ローカル開発はvite.config.tsのserver.proxyが、それぞれ実際のAPI Gatewayへ転送する
@@ -69,4 +69,13 @@ export async function getAccount(accountId: string): Promise<AccountView | null>
     throw new Error(`query failed: ${response.status} ${await response.text()}`);
   }
   return response.json() as Promise<AccountView>;
+}
+
+/** 新しい順に最大50件(ページネーションは省略、docs/adr/0009)。 */
+export async function getTransactionHistory(accountId: string): Promise<TransactionEntry[]> {
+  const response = await fetch(`${QUERY_API_BASE}/accounts/${accountId}/transactions`);
+  if (!response.ok) {
+    throw new Error(`transaction history query failed: ${response.status} ${await response.text()}`);
+  }
+  return response.json() as Promise<TransactionEntry[]>;
 }

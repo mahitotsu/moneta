@@ -74,6 +74,77 @@ h2 {
   margin-bottom: 16px;
 }
 
+.header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.mode-switch {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 12px;
+}
+
+.mode-switch button.active {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.account-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.account-list button {
+  width: 100%;
+  text-align: left;
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+.transaction-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.transaction-list li {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+
+.transaction-type {
+  font-weight: 600;
+  color: var(--text-h);
+  min-width: 5em;
+}
+
+.transaction-amount {
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+.transaction-balance {
+  opacity: 0.7;
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+.transaction-time {
+  margin-left: auto;
+  opacity: 0.6;
+  font-size: 12px;
+}
+
 .field-row {
   display: flex;
   gap: 8px;

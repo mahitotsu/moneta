@@ -28,3 +28,17 @@ export interface CommandAcceptedResponse {
   accountId: string;
   status: "accepted";
 }
+
+/**
+ * `GET /accounts/{id}/transactions`のレスポンス配列の要素
+ * (query-service/src/history.rsのhistory_entry_from_eventが単一の真実源、docs/adr/0009)。
+ * amountはopened/frozen/unfrozen/closedでは無い(null)——それらは金額の増減を伴わない。
+ */
+export interface TransactionEntry {
+  type: "opened" | "deposited" | "withdrawn" | "frozen" | "unfrozen" | "closed";
+  amount: string | null;
+  balanceAfter: string;
+  occurredAt: string;
+  eventId: string;
+  reason: FreezeReasonView | null;
+}
