@@ -5,7 +5,7 @@ import { BrandAppBar } from "./AppBar";
 import { PlusCircle } from "./icons";
 import { getAccount } from "../api/client";
 import { formatAccountNumber, formatCurrency } from "../format";
-import { addAccountFor, getAccountsFor, signOut, type CustomerAccount } from "../customerSession";
+import { addAccountFor, getAccountsFor, removeAccountFor, signOut, type CustomerAccount } from "../customerSession";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -68,7 +68,39 @@ export function AccountListScreen({ customerName, onSelectAccount, onSignedOut }
         ) : (
           <ul className="account-list">
             {accounts.map((a, i) => {
-              const account = balanceQueries[i]?.data;
+              const query = balanceQueries[i];
+              const account = query?.data;
+              // isSuccess && data===nullは確定404(バックエンドにこの口座が存在しない)。
+              // まだ読み込み中/反映待ち(dataがundefinedのまま)とは区別する——放置しても
+              // 解決しないので、一覧から削除する手段をここで用意する。
+              const isMissing = query?.isSuccess && account === null;
+
+              if (isMissing) {
+                return (
+                  <li key={a.accountId}>
+                    <div className="account-card account-card-missing">
+                      <span className="account-card-main">
+                        <span className="account-card-name">{a.nickname ?? "普通預金"}</span>
+                        <span className="account-card-number">
+                          ●●●●{formatAccountNumber(a.accountId).slice(-4)}
+                        </span>
+                        <span className="account-card-note">この口座は見つかりませんでした</span>
+                      </span>
+                      <button
+                        type="button"
+                        className="account-card-remove"
+                        onClick={() => {
+                          removeAccountFor(customerName, a.accountId);
+                          refresh();
+                        }}
+                      >
+                        一覧から削除
+                      </button>
+                    </div>
+                  </li>
+                );
+              }
+
               return (
                 <li key={a.accountId}>
                   <button type="button" className="account-card" onClick={() => onSelectAccount(a.accountId)}>

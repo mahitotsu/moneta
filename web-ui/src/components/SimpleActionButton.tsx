@@ -1,9 +1,10 @@
 import type { ReactNode } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { CommandAcceptedResponse } from "../api/types";
+import { useSettlingMutation } from "../hooks/useSettlingMutation";
 
 interface Props {
   accountId: string;
+  currentStatus: string;
   icon: ReactNode;
   title: string;
   description: string;
@@ -16,6 +17,7 @@ interface Props {
 /** Unfreeze/Closeで共有(ボディなしPOST、docs/adr/0007参照)。設定画面の1行として表示する。 */
 export function SimpleActionButton({
   accountId,
+  currentStatus,
   icon,
   title,
   description,
@@ -24,11 +26,11 @@ export function SimpleActionButton({
   variant = "default",
   action,
 }: Props) {
-  const queryClient = useQueryClient();
-  const mutation = useMutation({
-    mutationFn: () => action(accountId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["account", accountId] }),
-  });
+  const { mutate, isBusy, isError, error } = useSettlingMutation(
+    () => action(accountId),
+    ["account", accountId],
+    currentStatus,
+  );
 
   return (
     <div className="settings-item">
@@ -44,15 +46,15 @@ export function SimpleActionButton({
       <button
         type="button"
         className={`settings-item-action${variant === "danger" ? " settings-item-action-danger" : ""}`}
-        disabled={mutation.isPending}
+        disabled={isBusy}
         onClick={() => {
           if (confirmMessage && !window.confirm(confirmMessage)) return;
-          mutation.mutate();
+          mutate();
         }}
       >
-        {submitLabel}
+        {isBusy ? "処理中..." : submitLabel}
       </button>
-      {mutation.isError && <p className="status-line error">{(mutation.error as Error).message}</p>}
+      {isError && <p className="status-line error">{(error as Error).message}</p>}
     </div>
   );
 }

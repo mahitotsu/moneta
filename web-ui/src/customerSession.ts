@@ -39,3 +39,9 @@ export function addAccountFor(customerName: string, accountId: string, nickname?
   const updated = [...existing, { accountId, nickname }];
   localStorage.setItem(accountsKey(customerName), JSON.stringify(updated));
 }
+
+/** バックエンドに存在しない口座(確定404)をこの一覧から外す。口座自体は削除しない。 */
+export function removeAccountFor(customerName: string, accountId: string): void {
+  const updated = getAccountsFor(customerName).filter((a) => a.accountId !== accountId);
+  localStorage.setItem(accountsKey(customerName), JSON.stringify(updated));
+}

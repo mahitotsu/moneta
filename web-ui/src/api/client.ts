@@ -14,19 +14,43 @@ const COMMAND_API_BASE = "/command-api";
 const COMMAND_FAILURE_MESSAGE = "手続きの受け付けに失敗しました。時間をおいて再度お試しください。";
 const QUERY_FAILURE_MESSAGE = "情報の取得に失敗しました。時間をおいて再度お試しください。";
 
+// ネットワーク断・5xxのみ再試行する(4xxはリトライしても結果が変わらない)。
+// `init.headers`にIdempotency-Keyが含まれる呼び出し(postCommand/openAccount)では、
+// 呼び出し側が生成した同一のキーを全試行で使い回すことで、SQSのMessageDeduplicationId
+// による重複排除(ADR-0006決定3)が効き、途中で失敗して自動再試行しても
+// バックエンド側で二重にコマンドが処理されることはない。
+const MAX_RETRIES = 2;
+const RETRY_BASE_DELAY_MS = 500;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function fetchOrThrow(input: string, init: RequestInit, businessMessage: string, logLabel: string): Promise<Response> {
-  let response: Response;
-  try {
-    response = await fetch(input, init);
-  } catch (cause) {
-    console.error(`${logLabel}: network error`, cause);
-    throw new Error(businessMessage);
+  for (let attempt = 0; ; attempt++) {
+    let response: Response;
+    try {
+      response = await fetch(input, init);
+    } catch (cause) {
+      if (attempt < MAX_RETRIES) {
+        console.warn(`${logLabel}: network error, retrying (${attempt + 1}/${MAX_RETRIES})`, cause);
+        await delay(RETRY_BASE_DELAY_MS * 2 ** attempt);
+        continue;
+      }
+      console.error(`${logLabel}: network error`, cause);
+      throw new Error(businessMessage);
+    }
+    if (!response.ok) {
+      if (response.status >= 500 && attempt < MAX_RETRIES) {
+        console.warn(`${logLabel}: ${response.status}, retrying (${attempt + 1}/${MAX_RETRIES})`);
+        await delay(RETRY_BASE_DELAY_MS * 2 ** attempt);
+        continue;
+      }
+      console.error(`${logLabel}: ${response.status} ${await response.text()}`);
+      throw new Error(businessMessage);
+    }
+    return response;
   }
-  if (!response.ok) {
-    console.error(`${logLabel}: ${response.status} ${await response.text()}`);
-    throw new Error(businessMessage);
-  }
-  return response;
 }
 
 async function postCommand(path: string, body?: unknown): Promise<CommandAcceptedResponse> {
@@ -37,6 +61,7 @@ async function postCommand(path: string, body?: unknown): Promise<CommandAccepte
       headers: {
         "Content-Type": "application/json",
         // 全コマンドで必須(ADR-0006決定3)。SQSのMessageDeduplicationIdにそのままマップされる。
+        // fetchOrThrow内でのリトライはこの同一ヘッダーを使い回す。
         "Idempotency-Key": crypto.randomUUID(),
       },
       body: body === undefined ? undefined : JSON.stringify(body),

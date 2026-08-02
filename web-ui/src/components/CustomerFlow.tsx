@@ -22,7 +22,13 @@ export function CustomerFlow() {
       />
     );
   } else if (selectedAccountId) {
-    content = <CustomerAccountDetail accountId={selectedAccountId} onBack={() => setSelectedAccountId(null)} />;
+    content = (
+      <CustomerAccountDetail
+        accountId={selectedAccountId}
+        customerName={customerName}
+        onBack={() => setSelectedAccountId(null)}
+      />
+    );
   } else {
     content = (
       <AccountListScreen

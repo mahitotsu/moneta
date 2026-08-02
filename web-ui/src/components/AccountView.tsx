@@ -3,6 +3,7 @@ import { useAccount } from "../hooks/useAccount";
 import { formatAccountNumber, formatCurrency, formatDateTime } from "../format";
 import { FREEZE_REASON_VIEW_LABEL } from "../api/types";
 import { Eye, EyeOff } from "./icons";
+import { removeAccountFor } from "../customerSession";
 
 const STATUS_LABEL: Record<string, string> = {
   active: "有効",
@@ -16,15 +17,44 @@ const STATUS_BADGE_CLASS: Record<string, string> = {
   closed: "badge badge-neutral",
 };
 
-export function AccountView({ accountId }: { accountId: string }) {
+export function AccountView({
+  accountId,
+  customerName,
+  onRemoved,
+}: {
+  accountId: string;
+  customerName: string;
+  onRemoved: () => void;
+}) {
   const [hidden, setHidden] = useState(false);
-  const { data, isLoading, isFetching } = useAccount(accountId);
+  const { data, isLoading, isFetching, isSuccess } = useAccount(accountId);
 
   if (isLoading) {
     return (
       <div className="balance-hero">
         <div className="skeleton skeleton-line" style={{ width: "40%" }} />
         <div className="skeleton skeleton-line skeleton-balance" />
+      </div>
+    );
+  }
+
+  // isSuccess && data===nullは「確定して存在しない(404)」であり、下のまだ反映されて
+  // いないだけのケースとは違って、待っても解決しない。ここだけは区別して、一覧から
+  // 削除する手段を用意する(さもないと永久にこの画面から出られなくなる)。
+  if (isSuccess && data === null) {
+    return (
+      <div className="balance-hero">
+        <p>この口座は見つかりませんでした。</p>
+        <button
+          type="button"
+          className="settings-item-action settings-item-action-danger"
+          onClick={() => {
+            removeAccountFor(customerName, accountId);
+            onRemoved();
+          }}
+        >
+          一覧から削除する
+        </button>
       </div>
     );
   }

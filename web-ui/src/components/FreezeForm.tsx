@@ -1,23 +1,23 @@
 import { useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { freeze } from "../api/client";
 import { FREEZE_REASONS, type FreezeReasonRequest } from "../api/types";
 import { Lock } from "./icons";
+import { useSettlingMutation } from "../hooks/useSettlingMutation";
 
-export function FreezeForm({ accountId }: { accountId: string }) {
+export function FreezeForm({ accountId, currentStatus }: { accountId: string; currentStatus: string }) {
   const [reason, setReason] = useState<FreezeReasonRequest>(FREEZE_REASONS[0].value);
-  const queryClient = useQueryClient();
-  const mutation = useMutation({
-    mutationFn: () => freeze(accountId, reason),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["account", accountId] }),
-  });
+  const { mutate, isBusy, isSettling, isError, error } = useSettlingMutation(
+    () => freeze(accountId, reason),
+    ["account", accountId],
+    currentStatus,
+  );
 
   return (
     <form
       className="settings-item"
       onSubmit={(e) => {
         e.preventDefault();
-        mutation.mutate();
+        mutate();
       }}
     >
       <div className="settings-item-header">
@@ -43,11 +43,11 @@ export function FreezeForm({ accountId }: { accountId: string }) {
           </button>
         ))}
       </div>
-      <button type="submit" className="settings-item-action" disabled={mutation.isPending}>
-        凍結する
+      <button type="submit" className="settings-item-action" disabled={isBusy}>
+        {isBusy ? "処理中..." : "凍結する"}
       </button>
-      {mutation.isError && <p className="status-line error">{(mutation.error as Error).message}</p>}
-      {mutation.isSuccess && <p className="status-line pending">受理されました。反映まで少し時間がかかります。</p>}
+      {isError && <p className="status-line error">{(error as Error).message}</p>}
+      {isSettling && <p className="status-line pending">受理されました。反映まで少し時間がかかります。</p>}
     </form>
   );
 }

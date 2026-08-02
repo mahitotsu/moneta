@@ -439,6 +439,25 @@ button.secondary {
   color: var(--text-h);
 }
 
+.account-card-missing {
+  justify-content: space-between;
+  opacity: 0.85;
+}
+
+.account-card-note {
+  font-size: 12px;
+  color: var(--danger);
+}
+
+.account-card-remove {
+  flex: none;
+  background: transparent;
+  border-color: var(--danger);
+  color: var(--danger);
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
 .add-account-tile {
   display: flex;
   align-items: center;

@@ -20,16 +20,25 @@ import { useAccount } from "../hooks/useAccount";
  * Unfreeze/Close のみ有効(Freezeは`AlreadyFrozen`で拒否)、Closedはどのコマンドも
  * `AccountClosed`で拒否される終端状態なので管理セクション自体を出さない。
  */
-export function CustomerAccountDetail({ accountId, onBack }: { accountId: string; onBack: () => void }) {
+export function CustomerAccountDetail({
+  accountId,
+  customerName,
+  onBack,
+}: {
+  accountId: string;
+  customerName: string;
+  onBack: () => void;
+}) {
   const [managingOpen, setManagingOpen] = useState(false);
-  const { data: account } = useAccount(accountId);
+  const { data: account, isSuccess } = useAccount(accountId);
+  const isMissing = isSuccess && account === null;
 
   return (
     <>
       <DetailAppBar title="口座詳細" onBack={onBack} />
       <div className="bank-body">
-        <AccountView accountId={accountId} />
-        <TransactionHistory accountId={accountId} />
+        <AccountView accountId={accountId} customerName={customerName} onRemoved={onBack} />
+        {!isMissing && <TransactionHistory accountId={accountId} />}
 
         {account && account.status !== "closed" && (
           <section className="panel settings-panel">
@@ -46,10 +55,11 @@ export function CustomerAccountDetail({ accountId, onBack }: { accountId: string
             </button>
             {managingOpen && (
               <div className="settings-list">
-                {account.status === "active" && <FreezeForm accountId={accountId} />}
+                {account.status === "active" && <FreezeForm accountId={accountId} currentStatus={account.status} />}
                 {account.status === "frozen" && (
                   <SimpleActionButton
                     accountId={accountId}
+                    currentStatus={account.status}
                     icon={<Unlock />}
                     title="凍結を解除する"
                     description="この口座の凍結を解除し、通常どおり利用できる状態に戻します。"
@@ -59,6 +69,7 @@ export function CustomerAccountDetail({ accountId, onBack }: { accountId: string
                 )}
                 <SimpleActionButton
                   accountId={accountId}
+                  currentStatus={account.status}
                   icon={<XCircle />}
                   title="口座を解約する"
                   description="この口座を解約します。解約後は取引できなくなります。"
