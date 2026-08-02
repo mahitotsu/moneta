@@ -8,7 +8,9 @@ function App() {
   const [mode, setMode] = useState<Mode>("customer");
 
   return (
-    <>
+    // 顧客ログイン(青)/外部チャネル(オレンジ)でテーマ色を変え、今どちらを表示しているか
+    // 一目で分かるようにする(index.cssの.theme-customer/.theme-channel)。
+    <div className={mode === "customer" ? "theme-customer" : "theme-channel"}>
       <nav className="mode-switch">
         <button
           type="button"
@@ -27,7 +29,7 @@ function App() {
       </nav>
 
       {mode === "customer" ? <CustomerFlow /> : <ChannelEmulatorScreen />}
-    </>
+    </div>
   );
 }
 

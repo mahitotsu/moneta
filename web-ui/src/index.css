@@ -104,6 +104,35 @@ h2 {
   color: var(--accent-text);
 }
 
+/* 顧客ログイン/外部チャネルのどちらを表示しているか一目で分かるよう、モードごとに
+ * --accent/--panel-bg/--borderを上書きする。ボタン・パネル境界線など既存のコンポーネントは
+ * 変数を参照しているだけなので、色分け自体は追加のコンポーネント変更なしに波及する。 */
+.theme-customer {
+  --accent: #2563eb;
+  --accent-text: #fff;
+}
+
+.theme-channel {
+  --accent: #c2410c;
+  --accent-text: #fff;
+  --panel-bg: #fff7ed;
+  --border: #fdba74;
+}
+
+@media (prefers-color-scheme: dark) {
+  .theme-customer {
+    --accent: #60a5fa;
+    --accent-text: #0a0a0a;
+  }
+
+  .theme-channel {
+    --accent: #fb923c;
+    --accent-text: #1a0f00;
+    --panel-bg: #2a1608;
+    --border: #7c3f12;
+  }
+}
+
 .field-row {
   display: flex;
   gap: 8px;
