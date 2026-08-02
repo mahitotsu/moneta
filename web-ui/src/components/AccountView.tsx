@@ -1,8 +1,8 @@
-import { useQuery } from "@tanstack/react-query";
-import { getAccount } from "../api/client";
-
-// 反映ラグ(最大約1分、docs/adr/0004)を見せつつも待たせすぎないポーリング間隔。
-const POLL_INTERVAL_MS = 3000;
+import { useState } from "react";
+import { useAccount } from "../hooks/useAccount";
+import { formatAccountNumber, formatCurrency, formatDateTime } from "../format";
+import { FREEZE_REASON_VIEW_LABEL } from "../api/types";
+import { Eye, EyeOff } from "./icons";
 
 const STATUS_LABEL: Record<string, string> = {
   active: "有効",
@@ -10,60 +10,83 @@ const STATUS_LABEL: Record<string, string> = {
   closed: "解約済み",
 };
 
+const STATUS_BADGE_CLASS: Record<string, string> = {
+  active: "badge badge-positive",
+  frozen: "badge badge-pending",
+  closed: "badge badge-neutral",
+};
+
 export function AccountView({ accountId }: { accountId: string }) {
-  const { data, isLoading, isFetching, error } = useQuery({
-    queryKey: ["account", accountId],
-    queryFn: () => getAccount(accountId),
-    refetchInterval: POLL_INTERVAL_MS,
-  });
+  const [hidden, setHidden] = useState(false);
+  const { data, isLoading, isFetching } = useAccount(accountId);
 
   if (isLoading) {
-    return <p>読み込み中...</p>;
+    return (
+      <div className="balance-hero">
+        <div className="skeleton skeleton-line" style={{ width: "40%" }} />
+        <div className="skeleton skeleton-line skeleton-balance" />
+      </div>
+    );
   }
 
-  if (error) {
-    return <p className="status-line error">{(error as Error).message}</p>;
-  }
-
+  // dataが無い間は、理由が「まだ書き込みが反映されていない(結果整合性、docs/adr/0004の
+  // 仕様どおりの正常な状態)」でも「取得が一時的に失敗した」でも、利用者から見れば同じ
+  // 「まだ表示できていない」でしかない。後者はrefetchIntervalが自動的に再試行するため、
+  // ここで「失敗しました」と言い切ると、仕様どおりの正常な待ち状態まで壊れているかの
+  // ように見せてしまう。よって両者を区別せず同じ穏やかな文言で表示する。
   if (!data) {
     return (
-      <div className="panel">
+      <div className="balance-hero">
         <p>
-          この口座はまだ照会結果に反映されていません。書き込みは非同期のため、DynamoDBへの
-          反映まで最大約1分かかることがあります(docs/adr/0004)。
+          この口座はまだ最新の情報に反映されていません。手続きの反映には少し時間がかかる
+          場合があります(最大で約1分程度)。
         </p>
-        {isFetching && <span className="badge">再確認中...</span>}
+        <p className="hero-refetch-status">
+          <span className={`live-dot${isFetching ? " live-dot-active" : ""}`} aria-hidden="true" />
+          自動的に再確認しています
+        </p>
       </div>
     );
   }
 
   return (
-    <div className="panel">
-      <h2>
-        口座の状態 {isFetching && <span className="badge">更新中</span>}
-      </h2>
-      <dl className="account-view">
-        <dt>口座ID</dt>
-        <dd>{accountId}</dd>
-        <dt>状態</dt>
-        <dd>{STATUS_LABEL[data.status]}</dd>
-        <dt>残高</dt>
-        <dd>{data.balance}</dd>
-        {data.status === "frozen" && (
-          <>
-            <dt>凍結理由</dt>
-            <dd>{data.frozenReason}</dd>
-            <dt>凍結日時</dt>
-            <dd>{data.frozenAt}</dd>
-          </>
-        )}
-        {data.status === "closed" && (
-          <>
-            <dt>解約日時</dt>
-            <dd>{data.closedAt}</dd>
-          </>
-        )}
-      </dl>
+    <div className="balance-hero">
+      <div className="balance-hero-top">
+        <span className="account-type">普通預金 ●●●●{formatAccountNumber(accountId).slice(-4)}</span>
+        <span className="hero-top-right">
+          <span
+            className={`live-dot${isFetching ? " live-dot-active" : ""}`}
+            aria-hidden="true"
+            title="自動更新中"
+          />
+          <span className={STATUS_BADGE_CLASS[data.status]}>{STATUS_LABEL[data.status]}</span>
+        </span>
+      </div>
+      <div className="balance-row">
+        <span className="balance-figure">{hidden ? "¥ ••••••••" : formatCurrency(data.balance)}</span>
+        <button
+          type="button"
+          className="icon-button"
+          onClick={() => setHidden((h) => !h)}
+          aria-label={hidden ? "残高を表示" : "残高を隠す"}
+        >
+          {hidden ? <EyeOff /> : <Eye />}
+        </button>
+      </div>
+      {data.status === "frozen" && (
+        <dl className="hero-meta">
+          <dt>凍結理由</dt>
+          <dd>{FREEZE_REASON_VIEW_LABEL[data.frozenReason]}</dd>
+          <dt>凍結日時</dt>
+          <dd>{formatDateTime(data.frozenAt)}</dd>
+        </dl>
+      )}
+      {data.status === "closed" && (
+        <dl className="hero-meta">
+          <dt>解約日時</dt>
+          <dd>{formatDateTime(data.closedAt)}</dd>
+        </dl>
+      )}
     </div>
   );
 }

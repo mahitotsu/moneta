@@ -17,6 +17,13 @@ export const FREEZE_REASONS: { value: FreezeReasonRequest; label: string }[] = [
   { value: "CustomerRequest", label: "本人からの依頼 (CustomerRequest)" },
 ];
 
+/** `frozenReason`/取引履歴の`reason`(共にFreezeReasonView)を表示する際の日本語ラベル。 */
+export const FREEZE_REASON_VIEW_LABEL: Record<FreezeReasonView, string> = {
+  suspected_fraud: "不正利用の疑い",
+  court_order: "裁判所命令",
+  customer_request: "本人からの依頼",
+};
+
 /** `GET /accounts/{id}`のレスポンス全体(projection.rsのstate_to_viewが単一の真実源)。 */
 export type AccountView =
   | { status: "active"; balance: string; frozenReason: null; frozenAt: null; closedAt: null }

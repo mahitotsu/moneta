@@ -10,8 +10,17 @@
   --danger-bg: #fef2f2;
   --pending: #b45309;
   --pending-bg: #fffbeb;
+  --positive: #15803d;
+  --positive-bg: #f0fdf4;
+  --neutral: #52525b;
+  --neutral-bg: #f4f4f5;
+  --brand: #0b3b63;
+  --brand-2: #124a7d;
+  --brand-text: #fff;
+  --skeleton: #e4e4e7;
 
-  font: 16px/145% system-ui, "Segoe UI", Roboto, sans-serif;
+  font: 16px/145% system-ui, "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Segoe UI", Roboto,
+    sans-serif;
   color-scheme: light dark;
   color: var(--text);
   background: var(--bg);
@@ -30,6 +39,14 @@
     --danger-bg: #2a1414;
     --pending: #fbbf24;
     --pending-bg: #2a2210;
+    --positive: #4ade80;
+    --positive-bg: #10231a;
+    --neutral: #a1a1aa;
+    --neutral-bg: #27272a;
+    --brand: #10233b;
+    --brand-2: #16345a;
+    --brand-text: #f4f7fb;
+    --skeleton: #3f3f46;
   }
 }
 
@@ -74,13 +91,6 @@ h2 {
   margin-bottom: 16px;
 }
 
-.header-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-}
-
 .mode-switch {
   display: flex;
   gap: 8px;
@@ -94,61 +104,29 @@ h2 {
   color: var(--accent-text);
 }
 
-.account-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.account-list button {
-  width: 100%;
-  text-align: left;
-  font-family: ui-monospace, Consolas, monospace;
-}
-
-.transaction-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.transaction-list li {
-  display: flex;
-  gap: 12px;
-  align-items: baseline;
-  padding: 6px 0;
-  border-bottom: 1px solid var(--border);
-  font-size: 14px;
-}
-
-.transaction-type {
-  font-weight: 600;
-  color: var(--text-h);
-  min-width: 5em;
-}
-
-.transaction-amount {
-  font-family: ui-monospace, Consolas, monospace;
-}
-
-.transaction-balance {
-  opacity: 0.7;
-  font-family: ui-monospace, Consolas, monospace;
-}
-
-.transaction-time {
-  margin-left: auto;
-  opacity: 0.6;
-  font-size: 12px;
-}
-
 .field-row {
   display: flex;
   gap: 8px;
   align-items: center;
+}
+
+.field-label {
+  display: block;
+  font-size: 13px;
+  color: var(--text);
+  opacity: 0.8;
+  margin-bottom: 6px;
+}
+
+.field-input-wide {
+  display: block;
+  width: 100%;
+  margin-bottom: 12px;
+}
+
+.button-block {
+  display: block;
+  width: 100%;
 }
 
 input,
@@ -209,18 +187,603 @@ button.secondary {
   color: var(--pending);
 }
 
-dl.account-view {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 4px 12px;
+.badge-positive {
+  background: var(--positive-bg);
+  color: var(--positive);
+}
+
+.badge-pending {
+  background: var(--pending-bg);
+  color: var(--pending);
+}
+
+.badge-neutral {
+  background: var(--neutral-bg);
+  color: var(--neutral);
+}
+
+/* ---- 顧客向け画面: 銀行アプリらしい外枠(docs/adr/0009の「実物寄せ」) ---- */
+
+.bank-frame {
+  max-width: 420px;
+  margin: 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  overflow: hidden;
+  background: var(--bg);
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.08),
+    0 12px 28px -16px rgba(0, 0, 0, 0.25);
+}
+
+.appbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 14px 16px;
+  background: linear-gradient(135deg, var(--brand), var(--brand-2));
+  color: var(--brand-text);
+}
+
+.appbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.appbar-mark {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.16);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.appbar-titles {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.appbar-bank-name {
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.02em;
+}
+
+.appbar-greeting {
+  font-size: 12px;
+  opacity: 0.85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.appbar-title {
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.appbar-spacer {
+  width: 34px;
+}
+
+.appbar-action {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--brand-text);
+}
+
+.appbar-action:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.bank-body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.bank-body .panel,
+.bank-body form.panel {
+  margin-bottom: 0;
+}
+
+/* ---- サインイン ---- */
+
+.signin-body {
+  padding-top: 32px;
+}
+
+.signin-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.signin-mark {
+  background: var(--brand);
+  color: var(--brand-text);
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  margin-bottom: 8px;
+}
+
+.signin-title {
+  margin: 0;
+  font-size: 20px;
+}
+
+.signin-body .subtitle {
+  margin: 0 0 8px;
+}
+
+.disclaimer {
+  font-size: 12px;
+  line-height: 160%;
+  opacity: 0.75;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
   margin: 0;
 }
 
-dl.account-view dt {
+/* ---- ダッシュボード(口座一覧) ---- */
+
+.total-balance-panel {
+  text-align: center;
+}
+
+.total-balance-panel .subtitle {
+  margin: 0 0 4px;
+}
+
+.account-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.account-card {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--border);
+  background: var(--panel-bg);
+  border-radius: 10px;
+  padding: 12px 14px;
+  text-align: left;
+}
+
+.account-card-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.account-card-name {
+  font-weight: 600;
+  color: var(--text-h);
+}
+
+.account-card-number {
+  font-size: 12px;
+  font-family: ui-monospace, Consolas, monospace;
   opacity: 0.7;
 }
 
-dl.account-view dd {
-  margin: 0;
+.account-card-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  flex: none;
+}
+
+.account-card-balance {
   font-family: ui-monospace, Consolas, monospace;
+  font-weight: 600;
+  color: var(--text-h);
+}
+
+.add-account-tile {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 12px;
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--text);
+}
+
+.add-account-tile:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ---- 口座詳細: 残高ヒーローカード ---- */
+
+.balance-hero {
+  border: 1px solid var(--border);
+  background: var(--panel-bg);
+  border-radius: 12px;
+  padding: 18px;
+}
+
+.balance-hero-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.account-type {
+  font-size: 13px;
+  opacity: 0.75;
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+.hero-top-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+/* ポーリングごとにDOMの出し入れをすると画面がガタつくため、常時マウントしたまま
+   opacityだけをtransitionさせる(docs/adr/0007のisFetching表示、実装上の教訓)。 */
+.live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--pending);
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+
+.live-dot-active {
+  opacity: 1;
+}
+
+.hero-refetch-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 0;
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.balance-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.balance-figure {
+  font-size: 30px;
+  font-weight: 700;
+  color: var(--text-h);
+  font-family: ui-monospace, Consolas, monospace;
+  letter-spacing: -0.01em;
+}
+
+.icon-button {
+  padding: 4px;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  opacity: 0.7;
+}
+
+.icon-button:hover {
+  opacity: 1;
+}
+
+.hero-meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  margin: 14px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.hero-meta dt {
+  opacity: 0.7;
+}
+
+.hero-meta dd {
+  margin: 0;
+}
+
+/* ---- 取引履歴(通帳風) ---- */
+
+.tx-group + .tx-group {
+  margin-top: 14px;
+}
+
+.tx-date {
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.6;
+  margin: 0 0 6px;
+}
+
+.tx-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tx-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.tx-row:last-child {
+  border-bottom: none;
+}
+
+.tx-icon {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tx-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.tx-icon-positive {
+  background: var(--positive-bg);
+  color: var(--positive);
+}
+
+.tx-icon-negative {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.tx-icon-neutral {
+  background: var(--neutral-bg);
+  color: var(--neutral);
+}
+
+.tx-main {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+.tx-type {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-h);
+}
+
+.tx-reason {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.tx-time {
+  font-size: 12px;
+  opacity: 0.6;
+}
+
+.tx-amounts {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  flex: none;
+}
+
+.tx-amount {
+  font-family: ui-monospace, Consolas, monospace;
+  font-weight: 600;
+}
+
+.tx-amount-positive {
+  color: var(--positive);
+}
+
+.tx-amount-negative {
+  color: var(--danger);
+}
+
+.tx-balance {
+  font-size: 12px;
+  opacity: 0.6;
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+/* ---- 口座を管理(折りたたみ設定リスト) ---- */
+
+.settings-panel {
+  padding: 0;
+}
+
+.settings-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: transparent;
+  border: none;
+  color: var(--text-h);
+  font-weight: 600;
+  padding: 14px 16px;
+}
+
+.chevron {
+  display: flex;
+  transition: transform 0.15s ease;
+  opacity: 0.7;
+}
+
+.chevron-open {
+  transform: rotate(180deg);
+}
+
+.settings-list {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+}
+
+.settings-item {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-list .settings-item:last-child {
+  border-bottom: none;
+}
+
+.settings-item-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.settings-item-icon {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--neutral-bg);
+  color: var(--neutral);
+}
+
+.settings-item-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.settings-item-icon-danger {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.settings-item-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-h);
+}
+
+.settings-item-desc {
+  margin: 2px 0 0;
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.settings-item-action {
+  width: 100%;
+}
+
+.settings-item-action-danger {
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+.chip-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.chip {
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.chip-selected {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+/* ---- 読み込み中のプレースホルダー ---- */
+
+.skeleton {
+  background: var(--skeleton);
+  border-radius: 4px;
+  animation: skeleton-pulse 1.2s ease-in-out infinite;
+}
+
+.skeleton-line {
+  height: 14px;
+  width: 100%;
+  margin-bottom: 6px;
+}
+
+.skeleton-balance {
+  height: 30px;
+  width: 60%;
+}
+
+@keyframes skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.6;
+  }
+  50% {
+    opacity: 1;
+  }
 }

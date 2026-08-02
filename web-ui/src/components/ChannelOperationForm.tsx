@@ -37,7 +37,7 @@ export function ChannelOperationForm({ title, description, submitLabel, counterp
       <p className="subtitle">{description}</p>
       <div className="field-row">
         <input
-          placeholder="対象の口座ID (UUID)"
+          placeholder="対象の口座ID"
           value={accountId}
           onChange={(e) => setAccountId(e.target.value)}
         />
@@ -58,7 +58,7 @@ export function ChannelOperationForm({ title, description, submitLabel, counterp
         </button>
       </div>
       {mutation.isError && <p className="status-line error">{(mutation.error as Error).message}</p>}
-      {mutation.isSuccess && <p className="status-line pending">受理されました(202)</p>}
+      {mutation.isSuccess && <p className="status-line pending">受理されました。反映まで少し時間がかかります。</p>}
     </form>
   );
 }

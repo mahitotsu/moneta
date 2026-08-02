@@ -19,8 +19,10 @@ export function OpenAccountForm({ onOpened }: { onOpened: (accountId: string) =>
       }}
     >
       <h2>口座を新規開設</h2>
+      <label className="field-label" htmlFor="initial-balance">
+        初期残高
+      </label>
       <div className="field-row">
-        <label htmlFor="initial-balance">初期残高</label>
         <input
           id="initial-balance"
           value={initialBalance}
