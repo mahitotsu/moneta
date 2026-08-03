@@ -1,5 +1,13 @@
-use account_domain::{Account, AccountId, AccountState, Decimal, Event, FreezeReason};
+use account_domain::{Account, AccountId, AccountState, Decimal, Event, FreezeReason, OffsetDateTime, Rfc3339};
 use serde_json::{json, Value};
+
+/// `time::OffsetDateTime`のデフォルトのhuman-readable serde表現(`"2026-08-04 12:34:56.0 +00:00:00"`
+/// 形式)はRFC3339ではなく、JSの`new Date(...)`ではパースできない(`web-ui/src/format.ts`の
+/// `toDate`が`Invalid Date`になり、日時表示が静かに壊れる)。Query APIが返す外部向けJSONに
+/// 埋め込む際は、必ずこの関数でRFC3339文字列に変換してから渡す。
+pub(crate) fn format_timestamp(dt: OffsetDateTime) -> String {
+    dt.format(&Rfc3339).expect("OffsetDateTime always formats as RFC3339")
+}
 
 /// ドメインイベントから、Query APIが返すview(口座の現在状態)を導出する。`Event`自身の情報だけで
 /// 結果の`AccountState`が決まる(`account-domain::Account::evolve`は`self`の既存状態を参照しない)
@@ -26,7 +34,7 @@ fn state_to_view(state: &AccountState) -> Value {
             "status": "frozen",
             "balance": balance,
             "frozenReason": freeze_reason_label(reason),
-            "frozenAt": frozen_at,
+            "frozenAt": format_timestamp(*frozen_at),
             "closedAt": Value::Null,
         }),
         AccountState::Closed { final_balance, closed_at } => json!({
@@ -34,7 +42,7 @@ fn state_to_view(state: &AccountState) -> Value {
             "balance": final_balance,
             "frozenReason": Value::Null,
             "frozenAt": Value::Null,
-            "closedAt": closed_at,
+            "closedAt": format_timestamp(*closed_at),
         }),
     }
 }
@@ -77,6 +85,11 @@ mod tests {
         let view = view_from_event(AccountId::new(), &event);
         assert_eq!(view["status"], "frozen");
         assert_eq!(view["frozenReason"], "court_order");
+        // `OffsetDateTime`'s default serde format isn't RFC3339 and isn't parseable by JS's
+        // `new Date(...)` (web-ui/src/format.ts's `toDate`) -- lock in that frozenAt is always
+        // converted via format_timestamp before it reaches the wire.
+        let frozen_at = view["frozenAt"].as_str().expect("frozenAt should be a string");
+        OffsetDateTime::parse(frozen_at, &Rfc3339).expect("frozenAt should be valid RFC3339");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use account_domain::{Event, OffsetDateTime, Uuid};
 use serde_json::{json, Value};
 
-use crate::projection::freeze_reason_label;
+use crate::projection::{format_timestamp, freeze_reason_label};
 
 /// ドメインイベント1件を、取引履歴の1エントリ(Query APIの`GET .../transactions`が返す
 /// 配列の要素)へ変換する。`projection::view_from_event`(現在状態のview)とは別の、
@@ -24,7 +24,7 @@ pub fn history_entry_from_event(event: &Event, occurred_at: OffsetDateTime, even
         "type": kind,
         "amount": amount,
         "balanceAfter": balance_after,
-        "occurredAt": occurred_at,
+        "occurredAt": format_timestamp(occurred_at),
         "eventId": event_id,
         "reason": reason,
     })
@@ -74,6 +74,11 @@ mod tests {
         assert_eq!(entry["type"], "frozen");
         assert_eq!(entry["amount"], Value::Null);
         assert_eq!(entry["reason"], "court_order");
+        // Same regression guard as projection.rs: occurredAt must be RFC3339, not `time`'s
+        // default serde format (which JS's `new Date(...)` can't parse).
+        let occurred_at_str = entry["occurredAt"].as_str().expect("occurredAt should be a string");
+        account_domain::OffsetDateTime::parse(occurred_at_str, &account_domain::Rfc3339)
+            .expect("occurredAt should be valid RFC3339");
     }
 
     #[test]
