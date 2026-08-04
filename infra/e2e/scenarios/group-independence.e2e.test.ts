@@ -8,29 +8,42 @@ import { fetchStackOutputs } from "../../support/stackOutputs";
 import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { waitFor } from "../support/poll";
 import { openFreshAccount } from "../support/testAccount";
+import { waitForMatchingMessage } from "../support/dlq";
 
 describe("E1: 無関係な口座は互いに影響しない", () => {
-  it("不正なaccountIdへの操作が持続的に失敗していても、別口座への入金は通常通り反映される", async () => {
-    const outputs = await fetchStackOutputs();
-    const commandApi = createCommandApi(outputs.commandApiUrl);
-    const queryApi = createQueryApi(outputs.queryApiUrl);
+  it(
+    "不正なaccountIdへの操作が持続的に失敗していても、別口座への入金は通常通り反映される",
+    async () => {
+      const outputs = await fetchStackOutputs();
+      const commandApi = createCommandApi(outputs.commandApiUrl);
+      const queryApi = createQueryApi(outputs.queryApiUrl);
 
-    // Fire-and-forget: this accountId is not a UUID, so persistence.rs's deserialization fails
-    // for every delivery attempt -- an infra failure that SQS retries into its own group,
-    // independent of any other account's MessageGroupId.
-    void commandApi.deposit("not-a-valid-account-id", "10");
+      // Not a UUID, so persistence.rs's deserialization fails for every delivery attempt -- an
+      // infra failure that SQS retries into its own group, independent of any other account's
+      // MessageGroupId. Unique per run (like known-gap-malformed-account-id.e2e.test.ts) so the
+      // DLQ cleanup below targets only this run's message, not a leftover from another run.
+      const noisyAccountId = `not-a-valid-account-id-${crypto.randomUUID()}`;
+      const noisyDepositPromise = commandApi.deposit(noisyAccountId, "10");
 
-    const accountId = await openFreshAccount(commandApi, queryApi, "0");
-    const depositResponse = await commandApi.deposit(accountId, "10");
-    expect(depositResponse.status).toBe(202);
+      const accountId = await openFreshAccount(commandApi, queryApi, "0");
+      const depositResponse = await commandApi.deposit(accountId, "10");
+      expect(depositResponse.status).toBe(202);
 
-    const view = await waitFor(
-      async () => {
-        const v = await queryApi.getAccount(accountId);
-        return v && Number(v.balance) === 10 ? v : undefined;
-      },
-      { description: `account ${accountId} balance to reach 10 despite the unrelated failing group` },
-    );
-    expect(view.status).toBe("active");
-  });
+      const view = await waitFor(
+        async () => {
+          const v = await queryApi.getAccount(accountId);
+          return v && Number(v.balance) === 10 ? v : undefined;
+        },
+        { description: `account ${accountId} balance to reach 10 despite the unrelated failing group` },
+      );
+      expect(view.status).toBe("active");
+
+      // Clean up: left alone, this message would retry to exhaustion and sit in the DLQ forever
+      // (docs/adr/0002決定6's CloudWatch alarms watch exactly that), accumulating by one on
+      // every run of this test.
+      await noisyDepositPromise;
+      await waitForMatchingMessage(outputs.deadLetterQueueUrl, (body) => body.includes(noisyAccountId));
+    },
+    300_000,
+  );
 });
