@@ -21,16 +21,39 @@ npm run test:e2e
 ```
 
 `npm test`(CDK synthテスト、`infra/test/`)とは別のJest設定(`e2e/jest.config.js`)を
-使う。実AWS環境を叩き、結果整合性待ちのシナリオは1件あたり最大150秒程度かかるため、通常の
-`npm test`には含めていない。
+使う。実AWS環境を叩くため、通常の`npm test`には含めていない。
 
-**`--maxWorkers=3`を外さないこと。** outbox relay(`AccountOutboxRelayFunction`,
-`infra/lib/account-pipeline-stack.ts`)はタイムアウト30秒・EventBridge Schedulerで1分に
-1回だけ起動する、容量が固定されたPoC規模のLambdaである。シナリオファイル数が増えた際に
-Jestのデフォルト並列度(CPU数に応じて自動)で実行したところ、ほぼ全ての結果整合性待ちの
-シナリオ(単純なA1すら)が90秒でタイムアウトした——テストスイート自身が生む同時書き込みの
-バーストが、この固定容量のリレーを詰まらせたと考えられる。ワーカー数を絞ることで、
-テストスイートが自らその場しのぎのボトルネックを作らないようにしている。
+**outbox relayの直接Invokeによる高速化(`support/relay.ts`)。** outbox relay
+(`AccountOutboxRelayFunction`)は本番ではEventBridge Schedulerで1分に1回だけ起動する
+(ADR-0004)。この1分という値はEventBridgeのrate式の仕様上のハード下限であり、本番の
+アーキテクチャ・コスト方針を変えずに縮めることはできない。そこで**本番のスケジュールは
+一切変更せず**、`support/poll.ts`の`waitFor`はデフォルトでポーリングの毎回、outbox relay
+Lambdaを直接Invokeする(`relay_once`はイベントの中身を見ないため、呼び出し元を問わない)。
+これにより、大半のシナリオの待ち時間は1分間隔ではなくrelayの実行時間程度まで縮む。
+
+**例外はF1/F2だけ。** ADR-0004の主張は「最大約1分」という**上限**であり、正確な自然発生の
+遅延時間を測定する必要はない——何秒で収束したかに関わらず、上限内に収束しさえすれば主張は
+満たされる。`triggerRelay: false`(`scenarios/eventual-consistency.e2e.test.ts`/
+`scenarios/transaction-history-lag.e2e.test.ts`)が防いでいるのは「F1/F2自身がrelayを
+叩いて自分の成功を作り出してしまう(自己成就的なテストになる)」ことだけである。
+
+`relay_once`は呼び出し元を問わず未発行の行を全部処理するため、他のシナリオファイルと
+並行実行すると、他のテストが自分のポーリングで起こしたrelayのInvokeに、F1/F2のイベントも
+ついでに乗って発行されることがある(実際、フルスイート実行でF1/F2が数秒〜十数秒で終わる
+ことがある)。これは合否判定上まったく問題ない——「誰かが偶然relayを起こしてくれて上限内に
+収束した」も「上限約1分以内に収束する」という主張の反証にはならない。F1/F2が保証している
+のは「収束すること」「中間状態が壊れていないこと」「タイムアウト(上限)を超えて放置され
+ないこと」であり、収束にかかった正確な秒数そのものではないため、他のテストとの並行実行は
+問題にならない。
+
+新しいシナリオを追加する際、待ちが「上限内に収束するかどうか」の検証でない限りは、
+デフォルトの加速(`triggerRelay`を指定しない)のままでよい。
+
+**`--maxWorkers=3`について。** シナリオファイル数が増えた際にJestのデフォルト並列度
+(CPU数に応じて自動)で実行したところ、テストスイート自身が生む同時書き込みのバーストが
+1分間隔の固定容量リレーを詰まらせ、ほぼ全てのシナリオがタイムアウトしたことがあった
+(relay直接Invoke導入前の話)。直接Invoke導入後はこの詰まりは起きにくくなっているはずだが、
+`--maxWorkers`を上げる場合は一度様子を見ながら行うこと。
 
 ## テストの独立性(クリーンアップ不要)
 
@@ -40,6 +63,12 @@ Jestのデフォルト並列度(CPU数に応じて自動)で実行したとこ�
 データ量を定期的にリセットする運用スクリプトという位置づけのまま残し、E2E実行の前提には
 していない。
 
+**例外はDLQに到達するシナリオ(G4・E1)。** これらは意図的に持続的なインフラ失敗を起こす
+ため、後片付けしないとDLQにメッセージが実行のたびに溜まり続け、ADR-0002決定6のCloudWatch
+アラームにいずれ影響しうる。`support/dlq.ts`の`waitForMatchingMessage`で該当メッセージを
+確認後に削除しており(他のメッセージには触れない)、新しくDLQ行きのシナリオを追加する際は
+同じ後片付けが必須になる。
+
 ## シナリオ対応表
 
 | シナリオID | ファイル | 状態 |
@@ -47,7 +76,7 @@ Jestのデフォルト並列度(CPU数に応じて自動)で実行したとこ�
 | A1 | `scenarios/open-account.e2e.test.ts` | 実装済み |
 | A2/A4, A3/A5 | `scenarios/deposit-withdraw.e2e.test.ts` | 実装済み(バックエンド視点ではA2=A4、A3=A5。UI固有の差異は下記「未実装」参照) |
 | A6, B2, B7 | `scenarios/domain-errors-frozen-account.e2e.test.ts`(Frozen口座1つを共有) | 実装済み |
-| A7 | `scenarios/unfreeze-lifecycle.e2e.test.ts` | 実装済み(専用フィクスチャ、4連続待ちのためタイムアウト720秒) |
+| A7 | `scenarios/unfreeze-lifecycle.e2e.test.ts` | 実装済み(専用フィクスチャ、4連続待ちのためタイムアウト240秒) |
 | A8, B3 | `scenarios/domain-errors-closed-account.e2e.test.ts`(Closed口座1つを共有) | 実装済み |
 | A9 | `scenarios/transaction-history.e2e.test.ts` | 実装済み |
 | B1, B5, B6, B8 | `scenarios/domain-errors-active-account.e2e.test.ts`(Active口座1つを共有) | 実装済み |
@@ -76,7 +105,8 @@ Jestのデフォルト並列度(CPU数に応じて自動)で実行したとこ�
 - 却下系シナリオはどれも定義上「状態を変えない」ため、同じ前提条件(Active/Frozen等)を
   必要とする複数シナリオは`beforeAll`で1つのフィクスチャ口座を共有してよい
   (`domain-errors-active-account.e2e.test.ts`/`domain-errors-frozen-account.e2e.test.ts`)。
-  開設・凍結・解約のたびに発生する結果整合性待ち(最大約150秒、ADR-0004+負荷時のマージン)を、シナリオの数だけ
-  重複して払わずに済む。ファイルもシナリオのグループごとに分けているのは、Jestがテスト
+  開設・凍結・解約のたびに発生する結果整合性待ち(relay直接Invokeで通常は数秒〜数十秒、
+  詰まった場合の上限は150秒)を、シナリオの数だけ重複して払わずに済む。ファイルもシナリオの
+  グループごとに分けているのは、Jestがテスト
   ファイル単位でしか並列実行しない(1ファイル内の`it`は直列実行される)ため。新しい却下系
   シナリオを追加する際は、既存のフィクスチャ(Active/Frozen)を使い回せないか先に検討する。

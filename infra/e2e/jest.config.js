@@ -5,10 +5,11 @@ module.exports = {
   transform: {
     '^.+\\.tsx?$': ['@swc/jest']
   },
-  // Most scenarios wait for eventual consistency at least once (opening the fixture account,
-  // support/testAccount.ts), and several wait a second time after freezing/closing/depositing --
-  // each wait bounded at up to 150s under load (support/poll.ts). Give headroom for two such
-  // waits in sequence plus settle-window guards; scenarios needing more (e.g. A7's 4-wait
+  // `waitFor` (support/poll.ts) triggers the outbox relay directly by default, so most
+  // eventual-consistency waits collapse to well under the relay's natural ~1-minute cadence --
+  // see support/relay.ts. 180s gives headroom for a couple of accelerated waits in sequence
+  // plus settle-window guards. The scenarios that deliberately opt out of acceleration (F1/F2,
+  // which are testing the natural cadence itself) or that chain several waits (A7's 4-step
   // lifecycle) set their own longer per-test timeout as the 3rd arg to `it`.
-  testTimeout: 420_000,
+  testTimeout: 180_000,
 };

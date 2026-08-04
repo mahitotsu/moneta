@@ -16,6 +16,7 @@
   "devDependencies": {
     "@aws-sdk/client-cloudformation": "^3.1101.0",
     "@aws-sdk/client-dynamodb": "^3.1101.0",
+    "@aws-sdk/client-lambda": "^3.1102.0",
     "@aws-sdk/client-sqs": "^3.1101.0",
     "@aws-sdk/dsql-signer": "^3.1101.0",
     "@aws-sdk/lib-dynamodb": "^3.1101.0",
@@ -24,8 +25,8 @@
     "@types/jest": "^30",
     "@types/node": "^24.10.1",
     "@types/pg": "^8.20.3",
-    "jest": "^30",
     "aws-cdk": "2.1132.0",
+    "jest": "^30",
     "pg": "^8.22.0",
     "tsx": "^4.23.0",
     "typescript": "~7.0.2"

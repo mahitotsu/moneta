@@ -16,6 +16,7 @@ export interface StackOutputs {
   accountHistoryTableName: string;
   commandApiUrl: string;
   queryApiUrl: string;
+  outboxRelayFunctionName: string;
 }
 
 const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
@@ -26,6 +27,7 @@ const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
   accountHistoryTableName: "AccountHistoryTableName",
   commandApiUrl: "CommandApiUrl",
   queryApiUrl: "QueryApiUrl",
+  outboxRelayFunctionName: "OutboxRelayFunctionName",
 };
 
 export async function fetchStackOutputs(): Promise<StackOutputs> {

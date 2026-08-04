@@ -1,18 +1,23 @@
+import { triggerOutboxRelay } from "./relay";
+
 export interface WaitForOptions {
   timeoutMs?: number;
   intervalMs?: number;
   description?: string;
+  // Defaults to true: invoke the outbox relay directly on every poll attempt instead of
+  // waiting on its own 1-minute schedule (see relay.ts for why). Almost no scenario is actually
+  // testing that cadence, so almost every caller wants this. The two that ARE testing it (F1/F2,
+  // docs/e2e-scenarios.md) pass `triggerRelay: false` for their specific measured wait --
+  // triggering the relay there would erase the very thing being measured. `timeoutMs` follows
+  // suit unless overridden: short when accelerated, long (the natural ~1-minute bound) when not.
+  triggerRelay?: boolean;
 }
 
-// Query-side propagation lag is bounded by the outbox relay's EventBridge Scheduler interval
-// (1 minute, the Scheduler's own floor -- docs/adr/0004). The relay Lambda itself has a 30s
-// timeout per invocation (infra/lib/account-pipeline-stack.ts's AccountOutboxRelayFunction),
-// so a large concurrent burst of writes (e.g. running many E2E scenario files in parallel) can
-// make some rows miss a tick and roll into the next one; 150s gives margin for that on top of
-// the ~1-minute bound without being so long that a genuine regression takes forever to fail.
-// This is why infra/package.json's test:e2e caps Jest's --maxWorkers -- to keep the harness's
-// own concurrency from being the thing that creates that burst.
-const DEFAULT_TIMEOUT_MS = 150_000;
+const ACCELERATED_TIMEOUT_MS = 45_000;
+// The natural bound: outbox relay's EventBridge Scheduler interval (1 minute, the Scheduler's
+// own floor -- docs/adr/0004) plus margin for a burst of concurrent test-suite writes to miss a
+// tick (see infra/e2e/README.md's --maxWorkers note).
+const NATURAL_TIMEOUT_MS = 150_000;
 const DEFAULT_INTERVAL_MS = 3_000;
 
 function sleep(ms: number): Promise<void> {
@@ -24,9 +29,13 @@ function sleep(ms: number): Promise<void> {
 // wait rather than a fixed sleep, so tests fail fast when the system is actually broken and
 // don't flake when it's just slow.
 export async function waitFor<T>(check: () => Promise<T | undefined>, options: WaitForOptions = {}): Promise<T> {
-  const { timeoutMs = DEFAULT_TIMEOUT_MS, intervalMs = DEFAULT_INTERVAL_MS, description = "condition" } = options;
+  const { intervalMs = DEFAULT_INTERVAL_MS, description = "condition", triggerRelay = true } = options;
+  const timeoutMs = options.timeoutMs ?? (triggerRelay ? ACCELERATED_TIMEOUT_MS : NATURAL_TIMEOUT_MS);
   const deadline = Date.now() + timeoutMs;
   for (;;) {
+    if (triggerRelay) {
+      await triggerOutboxRelay();
+    }
     const result = await check();
     if (result !== undefined) return result;
     if (Date.now() >= deadline) {
@@ -40,9 +49,9 @@ export async function waitFor<T>(check: () => Promise<T | undefined>, options: W
 // to poll for (DomainError rejections aren't published as events -- ADR-0002's "future
 // Notification service" gap), so the only externally observable proof is "state stayed put
 // for long enough that the command must already have been processed". Rejections are decided
-// within a single synchronous SQS-consumed Lambda invocation (no outbox/EventBridge hop), so
-// the settle window only needs to cover SQS-to-Lambda delivery latency, not the 1-minute
-// projection lag F1/F2 deal with.
+// within a single synchronous SQS-consumed Lambda invocation (no outbox/EventBridge hop, so
+// triggering the relay wouldn't affect this path at all) -- the settle window only needs to
+// cover SQS-to-Lambda delivery latency, not the projection lag `waitFor` deals with.
 export const REJECTION_SETTLE_MS = 15_000;
 
 export async function settle(ms: number = REJECTION_SETTLE_MS): Promise<void> {
