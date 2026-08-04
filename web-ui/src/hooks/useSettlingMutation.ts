@@ -25,7 +25,7 @@ export function useSettlingMutation(
   const queryClient = useQueryClient();
   const [isSettling, setIsSettling] = useState(false);
   const statusAtClickRef = useRef<string | null>(null);
-  const timeoutRef = useRef<ReturnType<typeof setTimeout>>();
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const clearSettleTimeout = useCallback(() => {
     clearTimeout(timeoutRef.current);
