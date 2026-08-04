@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig, loadEnv, type ProxyOptions } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -32,6 +33,9 @@ export default defineConfig(({ mode }) => {
         ...apiProxy(env.VITE_QUERY_API_URL, "/query-api"),
         ...apiProxy(env.VITE_COMMAND_API_URL, "/command-api"),
       },
+    },
+    test: {
+      environment: "jsdom",
     },
   };
 });
