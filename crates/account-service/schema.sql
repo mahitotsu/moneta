@@ -23,11 +23,16 @@ CREATE TABLE IF NOT EXISTS account_events (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     -- NULLの間はEventBridgeへ未発行(アウトボックスのポーリング対象)。
     -- account-outbox-relayがPutEvents成功後にここへタイムスタンプを書く(docs/adr/0004)。
-    published_at TIMESTAMPTZ
+    published_at TIMESTAMPTZ,
+    -- コマンド発行元(例: transfer-service)が付与する不透明な相関ID。account-domainの
+    -- Command/Event/DomainErrorはこの値を一切参照しない——輸送のみの関心事(docs/adr/0010決定4)。
+    -- 発行しないコマンド(顧客の通常操作)ではNULLのままでよい。
+    correlation_id TEXT
 );
 
--- account_eventsが先に(published_at列なしで)作られていた既存デプロイ向け。
+-- account_eventsが先に(published_at/correlation_id列なしで)作られていた既存デプロイ向け。
 ALTER TABLE account_events ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ;
+ALTER TABLE account_events ADD COLUMN IF NOT EXISTS correlation_id TEXT;
 
 -- CREATE INDEX ASYNCがIF NOT EXISTSをサポートするか公式ドキュメントで確認が取れなかったため
 -- (CREATE TABLE/ALTER TABLE ADD COLUMNは確認済み)、あえて付けていない。再実行時の重複エラーは

@@ -239,6 +239,10 @@ export class AccountPipelineStack extends cdk.Stack {
                 occurred_at: { type: "string", format: "date-time" },
                 kind: { type: "string", enum: ["event", "rejection"] },
                 data: {},
+                // コマンド発行元(例: transfer-service)が付与する不透明な相関ID(docs/adr/0010
+                // 決定4)。発行しないコマンド(顧客の通常操作)ではフィールド自体が欠落する
+                // (EventEnvelopeのskip_serializing_if)ため必須にしない。
+                correlation_id: { type: "string" },
               },
             },
           },
@@ -656,6 +660,98 @@ export class AccountPipelineStack extends cdk.Stack {
       methodResponses: [{ statusCode: "202" }, { statusCode: "502" }],
     });
 
+    // ==========================================================================
+    // Transfer service(docs/adr/0010) — 口座間送金のサガ(オーケストレーション)。
+    //
+    // account-service/query-serviceには一切変更を加えない(EventEnvelopeへのcorrelation_id
+    // 追加を除く。上記のAccountDomainEventSchemaのcorrelation_idプロパティ参照)。
+    // account-serviceへのコマンド発行はコマンドAPI(VTL)を経由せず、commandQueueへ直接
+    // SendMessageする(docs/adr/0010決定1・決定6——新しいVTLを実機検証なしに追加するリスクを
+    // 避けるため)。
+    // ==========================================================================
+
+    // --- [Transfer service所有] サガ状態(DynamoDB) ----------------------------
+    // Query serviceと同じ技術選択だが理由は別(docs/adr/0010決定2): サガの状態更新は常に
+    // 「1つのtransferIdにつき1アイテム」の読み書きで完結し、DSQLのリレーショナル・
+    // トランザクション機構は不要なため。
+    const transferSagaTable = new dynamodb.Table(this, "TransferSagaTable", {
+      tableName: "moneta-transfer-sagas",
+      partitionKey: { name: "transferId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    });
+
+    // --- [Transfer service所有] 送金受付のSQS FIFOキュー -----------------------
+    // account-serviceのcommandQueueと同じFIFO+DLQの形だが、API Gatewayは経由しない
+    // (docs/adr/0010決定6)。呼び出し元は`aws sqs send-message`等で
+    // `{"transfer_id","from_account_id","to_account_id","amount"}`をMessageBodyとして
+    // 直接送る。
+    const transferCommandDlq = new sqs.Queue(this, "TransferCommandDlq", {
+      queueName: "moneta-transfer-commands.fifo",
+      fifo: true,
+    });
+    const transferCommandQueue = new sqs.Queue(this, "TransferCommandQueue", {
+      queueName: "moneta-transfer-commands-main.fifo",
+      fifo: true,
+      contentBasedDeduplication: false,
+      deadLetterQueue: {
+        queue: transferCommandDlq,
+        maxReceiveCount: MAX_RECEIVE_COUNT,
+      },
+    });
+
+    // --- [Transfer service所有] transfer-command-intake: 送金開始の受付 --------
+    const transferCommandIntakeFn = new lambda.Function(this, "TransferCommandIntakeFunction", {
+      runtime: lambda.Runtime.PROVIDED_AL2023,
+      architecture: lambda.Architecture.X86_64,
+      handler: "bootstrap",
+      timeout: cdk.Duration.seconds(30),
+      code: rustLambdaCode("transfer-service", "transfer-command-intake"),
+      environment: {
+        SAGA_TABLE_NAME: transferSagaTable.tableName,
+        ACCOUNT_COMMAND_QUEUE_URL: commandQueue.queueUrl,
+      },
+    });
+    transferCommandIntakeFn.addEventSource(
+      new SqsEventSource(transferCommandQueue, {
+        batchSize: 10,
+        reportBatchItemFailures: true,
+      }),
+    );
+    transferSagaTable.grantReadWriteData(transferCommandIntakeFn);
+    commandQueue.grantSendMessages(transferCommandIntakeFn);
+
+    // --- [Transfer service所有] transfer-saga-step: 補償トリガーの観測とサガ進行 ---
+    const transferSagaStepFn = new lambda.Function(this, "TransferSagaStepFunction", {
+      runtime: lambda.Runtime.PROVIDED_AL2023,
+      architecture: lambda.Architecture.X86_64,
+      handler: "bootstrap",
+      timeout: cdk.Duration.seconds(30),
+      code: rustLambdaCode("transfer-service", "transfer-saga-step"),
+      environment: {
+        SAGA_TABLE_NAME: transferSagaTable.tableName,
+        ACCOUNT_COMMAND_QUEUE_URL: commandQueue.queueUrl,
+      },
+    });
+    transferSagaTable.grantReadWriteData(transferSagaStepFn);
+    commandQueue.grantSendMessages(transferSagaStepFn);
+
+    // --- [Transfer service所有] EventBridge Rule(補償トリガーの観測) ----------
+    // account-serviceが発行したイベントのうち、correlation_idを持つもの(=transfer-service
+    // が発行したコマンドへの応答)だけを購読する。account.event.*かaccount.rejection.*かを
+    // detail-typeで区別する必要はない(saga_step.rsが`kind`フィールドで判別する)——ADR-0010
+    // 起草時の監査で判明した通り、却下も既に`account.rejection.*`としてEventBridgeへ
+    // 発行されている(docs/adr/0002決定7)。correlation_idを持つイベントはtransfer-serviceが
+    // 発行したコマンドの結果に限られる(顧客の通常操作はこのフィールドを付与しない)ため、
+    // 存在チェックだけで十分に絞り込める。
+    new events.Rule(this, "TransferSagaObservationRule", {
+      eventBus: domainEventBus,
+      eventPattern: {
+        source: [EVENT_SOURCE],
+        detail: { correlation_id: [{ exists: true }] },
+      },
+      targets: [new targets.LambdaFunction(transferSagaStepFn)],
+    });
+
     // --- スキーマ適用(CDK Custom Resource、docs/adr/0005) ----------------------
     // かつては`infra/scripts/apply-schema.sh`をデプロイ後に手動実行する運用だったが、
     // outbox relay用のロール追加をスクリプト更新し忘れたまま実AWSにデプロイし、DSQLへの接続が
@@ -822,5 +918,10 @@ export class AccountPipelineStack extends cdk.Stack {
     new cdk.CfnOutput(this, "QueryApiUrl", { value: queryApi.url });
     new cdk.CfnOutput(this, "CommandApiUrl", { value: commandApi.url });
     new cdk.CfnOutput(this, "WebUiUrl", { value: `https://${webUiDistribution.domainName}` });
+    new cdk.CfnOutput(this, "TransferSagaTableName", { value: transferSagaTable.tableName });
+    new cdk.CfnOutput(this, "TransferCommandQueueUrl", { value: transferCommandQueue.queueUrl });
+    new cdk.CfnOutput(this, "TransferCommandDeadLetterQueueUrl", { value: transferCommandDlq.queueUrl });
+    new cdk.CfnOutput(this, "TransferCommandIntakeFunctionName", { value: transferCommandIntakeFn.functionName });
+    new cdk.CfnOutput(this, "TransferSagaStepFunctionName", { value: transferSagaStepFn.functionName });
   }
 }

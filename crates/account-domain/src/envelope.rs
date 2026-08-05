@@ -18,4 +18,10 @@ pub struct EventEnvelope {
     pub kind: String,
     /// account-domainの`Event`または`DomainError`のJSON表現(serdeのデフォルト外部タグ形式)。
     pub data: Value,
+    /// コマンド発行元(例: transfer-service)が付与する不透明な相関ID(docs/adr/0010決定4)。
+    /// account-domainの状態遷移ロジック(`apply`/`evolve`)はこの値を一切参照しない——
+    /// このイベントを誰が引き起こしたコマンドの結果かを購読側が追跡するための、輸送のみの
+    /// 関心事。発行しないコマンド(顧客の通常操作)では常に`None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
 }

@@ -6,8 +6,3 @@ node_modules
 # CDK asset staging directory
 .cdk.staging
 cdk.out
-
-# Rust Lambdaビルド用Dockerキャッシュ(account-pipeline-stack.tsのbundling.volumes、ホスト
-# パスbind mount)。ビルド成果物であり、他ホストへ持ち越す意味も無い(むしろroot所有ファイルが
-# 混ざり得るため持ち越さない方がよい)。
-.rust-lambda-docker-cache

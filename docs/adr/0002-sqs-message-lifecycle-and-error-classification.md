@@ -236,13 +236,21 @@ DLQ自体の設計は以下の通り。
   古いコマンドが新しい状態の上に後乗りで適用されるリスクを運用者が認識した上で行う必要がある。
 - DLQの`ApproximateNumberOfMessagesVisible`と`ApproximateAgeOfOldestMessage`にCloudWatchアラームを張る。
 
-### 7. 将来のNotificationサービス連携への接続点
+### 7. 却下はEventBridgeへの発行経路を既に持つ（ADR-0004のアウトボックス経由）
 
-`DomainError`による却下を顧客に通知する経路（[[0001-service-boundaries-and-event-driven-integration]]の
-イベントバス経由でのNotificationサービス連携）は、本PoCのスコープ外。ただし、却下確定ロジックを
-小さな関数/トレイト（例：`RejectionSink`）の背後に置き、今はDB書き込みのみを行う実装とし、
-将来EventBridge発行に差し替え可能な形にしておく。これにより、Notificationサービス実装時に
-却下確定ロジック自体を書き直す必要がなくなる。
+`DomainError`による却下は、[[0004-query-service-event-driven-projection]]で実装したアウトボックス
+（`fetch_unpublished_events`/`to_outbox_entry`）が`kind`列（`event`/`rejection`）を区別せず一律に
+処理するため、既に`account.rejection.*`としてEventBridgeへ発行されている。Query Serviceの
+購読ルールが`account.event.*`のみにマッチするよう絞っている（`account-pipeline-stack.ts`）ため、
+現時点では誰も購読していないだけである。したがって、
+[[0001-service-boundaries-and-event-driven-integration]]が構想するNotification/Transferサービスとの
+連携は、account-service側の変更なしに、購読側が`account.rejection.*`向けのEventBridge Ruleを
+追加するだけで実現できる。
+
+~~当初（このADR起草時、ADR-0004実装前）は「却下確定ロジックを小さな関数/トレイト（例：
+`RejectionSink`）の背後に置き、今はDB書き込みのみを行う実装とし、将来EventBridge発行に
+差し替え可能な形にしておく」としていたが、ADR-0004のアウトボックスが`kind`を区別しない
+汎用設計になった結果、この専用の抽象化は不要になった。この記述を訂正した。~~
 
 ## 却下した代替案
 

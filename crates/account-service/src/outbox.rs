@@ -20,6 +20,7 @@ pub fn to_outbox_entry(event: &UnpublishedEvent) -> OutboxEntry {
             occurred_at: event.created_at,
             kind: event.kind.clone(),
             data: event.payload.clone(),
+            correlation_id: event.correlation_id.clone(),
         },
     }
 }
@@ -48,6 +49,7 @@ mod tests {
             kind: kind.to_string(),
             payload,
             created_at: OffsetDateTime::UNIX_EPOCH,
+            correlation_id: None,
         }
     }
 
@@ -81,5 +83,23 @@ mod tests {
         let json = serde_json::to_string(&entry.detail).unwrap();
         let round_tripped: EventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(round_tripped, entry.detail);
+    }
+
+    #[test]
+    fn correlation_id_is_passed_through_to_the_envelope_when_present() {
+        let mut event = unpublished_event("rejection", json!("AccountFrozen"));
+        event.correlation_id = Some("transfer-abc123-credit".to_string());
+        let entry = to_outbox_entry(&event);
+        assert_eq!(entry.detail.correlation_id.as_deref(), Some("transfer-abc123-credit"));
+    }
+
+    #[test]
+    fn correlation_id_is_absent_from_the_serialized_envelope_when_none() {
+        // docs/adr/0010決定4: 発行しないコマンド(顧客の通常操作)ではフィールド自体が
+        // 欠落する(nullとしてすら出ない) -- skip_serializing_ifの効果を固定する。
+        let event = unpublished_event("event", json!({"Deposited": {"amount": "500"}}));
+        let entry = to_outbox_entry(&event);
+        let json = serde_json::to_string(&entry.detail).unwrap();
+        assert!(!json.contains("correlation_id"), "expected no correlation_id key, got: {json}");
     }
 }

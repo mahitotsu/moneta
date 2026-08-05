@@ -9,6 +9,12 @@ use sqlx::{PgPool, Postgres, Transaction};
 pub struct AccountCommandEnvelope {
     pub account_id: Uuid,
     pub command: Command,
+    /// コマンド発行元(例: transfer-service)が付与する不透明な相関ID(docs/adr/0010決定4)。
+    /// `Command`の一部ではなくエンベロープ側に置くことで、account-domainの状態遷移ロジックを
+    /// 一切通さずに`account_events.correlation_id`まで素通しできる。顧客の通常操作では常に
+    /// 欠落しており、その場合は`None`として扱う。
+    #[serde(default)]
+    pub correlation_id: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -185,20 +191,28 @@ pub async fn apply_command(
             }
 
             let payload = serde_json::to_value(&event).expect("Event serialization is infallible");
-            sqlx::query("INSERT INTO account_events (account_id, kind, payload) VALUES ($1, 'event', $2)")
-                .bind(envelope.account_id)
-                .bind(payload)
-                .execute(&mut **tx)
-                .await?;
+            sqlx::query(
+                "INSERT INTO account_events (account_id, kind, payload, correlation_id) \
+                 VALUES ($1, 'event', $2, $3)",
+            )
+            .bind(envelope.account_id)
+            .bind(payload)
+            .bind(&envelope.correlation_id)
+            .execute(&mut **tx)
+            .await?;
         }
         Err(domain_error) => {
             let payload =
                 serde_json::to_value(&domain_error).expect("DomainError serialization is infallible");
-            sqlx::query("INSERT INTO account_events (account_id, kind, payload) VALUES ($1, 'rejection', $2)")
-                .bind(envelope.account_id)
-                .bind(payload)
-                .execute(&mut **tx)
-                .await?;
+            sqlx::query(
+                "INSERT INTO account_events (account_id, kind, payload, correlation_id) \
+                 VALUES ($1, 'rejection', $2, $3)",
+            )
+            .bind(envelope.account_id)
+            .bind(payload)
+            .bind(&envelope.correlation_id)
+            .execute(&mut **tx)
+            .await?;
         }
     }
 
@@ -214,12 +228,13 @@ pub struct UnpublishedEvent {
     pub kind: String,
     pub payload: Value,
     pub created_at: OffsetDateTime,
+    pub correlation_id: Option<String>,
 }
 
 /// まだEventBridgeへ発行していない行を古い順に取得する（アウトボックスのポーリング対象）。
 pub async fn fetch_unpublished_events(pool: &PgPool, limit: i64) -> Result<Vec<UnpublishedEvent>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, account_id, kind, payload, created_at FROM account_events \
+        "SELECT id, account_id, kind, payload, created_at, correlation_id FROM account_events \
          WHERE published_at IS NULL ORDER BY created_at LIMIT $1",
     )
     .bind(limit)

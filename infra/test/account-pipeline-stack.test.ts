@@ -49,8 +49,59 @@ describe("AccountPipelineStack", () => {
     });
   });
 
-  test("creates exactly seven Lambda functions: write path, outbox relay, query projector, schema migrator, the schema Provider framework's own handler, and the two Web UI hosting custom-resource handlers (S3 auto-delete-objects, BucketDeployment sync)", () => {
-    template.resourceCountIs("AWS::Lambda::Function", 7);
+  test("creates the transfer saga DynamoDB table with on-demand billing", () => {
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      TableName: "moneta-transfer-sagas",
+      BillingMode: "PAY_PER_REQUEST",
+      KeySchema: [{ AttributeName: "transferId", KeyType: "HASH" }],
+    });
+  });
+
+  test("creates a separate FIFO queue (with its own DLQ) for transfer commands, distinct from the account command queue", () => {
+    template.hasResourceProperties("AWS::SQS::Queue", {
+      QueueName: "moneta-transfer-commands-main.fifo",
+      FifoQueue: true,
+    });
+    template.hasResourceProperties("AWS::SQS::Queue", {
+      QueueName: "moneta-transfer-commands.fifo",
+      FifoQueue: true,
+    });
+  });
+
+  test("transfer-saga-step subscribes to any account-service event carrying a correlation_id, regardless of event vs. rejection (docs/adr/0010)", () => {
+    template.hasResourceProperties("AWS::Events::Rule", {
+      EventPattern: {
+        source: ["account-service"],
+        detail: { correlation_id: [{ exists: true }] },
+      },
+    });
+  });
+
+  test("transfer-service functions may send to the account command queue but never get dsql:DbConnect", () => {
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: "sqs:SendMessage",
+          }),
+        ]),
+      },
+    });
+    // account-serviceの命令経路と同じく、transfer-serviceもDSQLへは一切触れない
+    // (docs/adr/0010決定1: account-serviceへは公開インターフェース経由でしか関わらない)。
+    const policies = template.findResources("AWS::IAM::Policy");
+    const transferPolicies = Object.entries(policies).filter(([id]) => id.includes("Transfer"));
+    for (const [, policy] of transferPolicies) {
+      const statements = policy.Properties.PolicyDocument.Statement as Array<{ Action: string | string[] }>;
+      for (const statement of statements) {
+        const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+        expect(actions).not.toContain("dsql:DbConnect");
+      }
+    }
+  });
+
+  test("creates exactly nine Lambda functions: write path, outbox relay, query projector, schema migrator, the two transfer-service functions (command intake, saga step), the schema Provider framework's own handler, and the two Web UI hosting custom-resource handlers (S3 auto-delete-objects, BucketDeployment sync)", () => {
+    template.resourceCountIs("AWS::Lambda::Function", 9);
   });
 
   test("applies the schema via a Custom Resource, granting only the two DSQL-connecting Lambdas' roles", () => {

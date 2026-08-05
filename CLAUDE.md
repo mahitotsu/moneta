@@ -19,8 +19,8 @@ already drifted out of sync here once. Read the relevant ADR before changing beh
 and add a new ADR (or revise one) when a non-obvious decision is made or reversed.
 
 - `0001`: microservice boundaries (aggregate ≠ microservice; bounded contexts) and event-driven
-  service integration — Transfer/Notification service remain proposed/out of scope; Query service
-  is now implemented, see `0004`.
+  service integration — Notification service remains proposed/out of scope; Query service is
+  implemented, see `0004`; Transfer service is implemented, see `0010`.
 - `0002`: SQS FIFO message lifecycle, error classification (`DomainError` vs. infra failure),
   transaction granularity, DLQ design, Aurora DSQL constraints — directly reflected in
   `account-service`'s code.
@@ -46,6 +46,16 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
   existing Deposit/Withdraw commands unchanged — customers never deposit/withdraw directly
   from the web UI, matching real net-banking. Also adds a second Query service read model
   (`AccountHistoryTable`) for transaction history.
+- `0010`: Transfer service (`crates/transfer-service`) — cross-account transfer as an
+  orchestration-style saga confined entirely to a new, independent service; account-service and
+  query-service get zero code changes except a correlation ID threaded through as inert cargo
+  (`account_events.correlation_id` → `EventEnvelope.correlation_id`, never read by domain logic).
+  account-service is called the same way any other caller would (direct SQS `SendMessage`
+  against its command queue, no API Gateway — deliberately avoiding new VTL, see decision 6);
+  compensation is triggered by subscribing to EventBridge events carrying a `correlation_id`,
+  which the ADR-0004 outbox already publishes for both `account.event.*` and `account.rejection.*`
+  today (ADR-0002 decision 7 was corrected to reflect this — no dedicated rejection-publishing
+  mechanism needed). No customer-facing API Gateway/UI yet — submission is SQS-only for now.
 
 ## Commands
 
@@ -55,6 +65,7 @@ cargo test --workspace               # run all tests (fast — account-domain ha
 cargo test -p account-domain         # domain-only tests, no async runtime needed
 cargo test -p account-service        # Lambda handler tests (grouping/batch logic; no live DB needed)
 cargo test -p query-service          # projection tests (event → view, no AWS deps needed)
+cargo test -p transfer-service       # saga state-machine tests (no AWS deps needed)
 cargo test -p account-domain <name>  # run a single test by name (substring match)
 cargo clippy --workspace --all-targets   # must be warning-free before considering work done
 ```
@@ -75,8 +86,13 @@ mapping, orchestration) and is deliberately not further split into a repository-
 (ADR-0003 explains why not, given this PoC's current scope). `query-service` is a third crate
 (ADR-0008) holding the DynamoDB projection Lambda; its Cargo.toml has no DSQL/SQS/EventBridge
 dependencies, so it cannot reach into account-service's write-path internals even accidentally.
-If you're about to add a non-domain dependency to `account-domain`, or a DSQL/write-path
-dependency to `query-service`, stop — it belongs elsewhere.
+`transfer-service` (ADR-0010) is a fourth crate holding the cross-account transfer saga; like
+`query-service` it depends only on `account-domain` (not `account-service`) and has no DSQL
+dependency — it talks to account-service exclusively through the same public interface any
+other caller would use (SQS `SendMessage` against account-service's command queue, EventBridge
+subscription for the results), never through shared code or a shared database. If you're about
+to add a non-domain dependency to `account-domain`, or a DSQL dependency to `query-service` or
+`transfer-service`, stop — it belongs elsewhere.
 
 ### Domain model conventions (`account-domain`)
 
