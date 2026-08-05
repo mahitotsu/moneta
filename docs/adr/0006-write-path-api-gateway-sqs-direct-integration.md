@@ -145,11 +145,19 @@ update-integration`でテンプレートを1行ずつ差し替えながら原因
   定数が単一の真実源）。当初はこの精度自体を定義しておらず、実デプロイでDBラウンドトリップ
   由来のスケールのブレ（保存済み`balance`が`900.000000`のような形で読み戻される）を発見した
   ことを契機に、APIの仕様として明示した。`Account::apply`/`apply_to_absent`は
-  `new_balance`/`balance`を必ず`round_dp(AMOUNT_DECIMAL_PLACES)`で正規化し、3桁以上の入力は
-  `DomainError::InvalidAmountPrecision`として却下する。[[0010-transfer-service-saga]]の
-  Transfer serviceはこのコマンドAPI（したがってこのRequest Validator）を経由しない
-  （決定6参照）ため、`transfer-service`の`saga::start`でも同じ`AMOUNT_DECIMAL_PLACES`を
-  参照して同じ検証を行う——単一の真実源はaccount-domain、検証の実施箇所は経路ごとに必要。
+  `new_balance`/`balance`を必ず`Decimal::rescale(AMOUNT_DECIMAL_PLACES)`で正規化し、
+  3桁以上の入力は`DomainError::InvalidAmountPrecision`として却下する。
+
+  `rescale`ではなく`round_dp`を最初に使い、これも実デプロイで見つかった不具合として訂正した:
+  `round_dp`は精度を落とす方向にしか働かず（`old_scale <= dp`なら値をそのまま返す実装、
+  rust_decimal 1.42.1の`round_dp_with_strategy`）、桁が足りない場合（`"1000"`, scale=0）に
+  ゼロ埋めして`"1000.00"`にすることをしない。`rescale`は両方向（不足はゼロ埋め、超過は丸め）
+  で厳密に目標スケールへ揃えるため、精度の強制にはこちらが正しい。
+
+  [[0010-transfer-service-saga]]のTransfer serviceはこのコマンドAPI（したがってこの
+  Request Validator）を経由しない（決定6参照）ため、`transfer-service`の`saga::start`でも
+  同じ`AMOUNT_DECIMAL_PLACES`を参照して同じ検証を行う——単一の真実源はaccount-domain、
+  検証の実施箇所は経路ごとに必要。
 - `FreezeReason`の値（`SuspectedFraud` / `CourtOrder` / `CustomerRequest`）はRustのenum
   バリアント名とそのまま一致させる（`rename_all`は付いていない）。
 - `Command::Unfreeze`/`Command::Close`はユニットバリアントであり、`Command`に
