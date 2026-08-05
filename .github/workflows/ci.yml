@@ -1,0 +1,63 @@
+name: CI
+
+# push/PRのたびにbuild/test/lintを強制する(.githooks/pre-commitの内容と同じ主旨だが、
+# フックがセットアップされていない/意図的にバイパスされた場合の保険としてリモート側でも
+# 実行する)。実AWS環境を要するinfra/e2e/はここに含めない(infra/e2e/README.md参照)。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  web-ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web-ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web-ui/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npx oxlint
+      - run: npm run test
+
+  infra:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: infra/package-lock.json
+      - run: npm ci
+      # cdk synth(npm test)がRust LambdaをDockerコンテナ内でreleaseビルドする
+      # (account-pipeline-stack.tsのbundling)。キャッシュはホストパスbind mountなので、
+      # ランナー間で永続化するにはこのディレクトリ自体をactions/cacheで復元/保存する。
+      - uses: actions/cache@v4
+        with:
+          path: infra/.rust-lambda-docker-cache
+          key: rust-lambda-docker-cache-${{ hashFiles('crates/**/Cargo.toml', 'Cargo.lock') }}
+          restore-keys: |
+            rust-lambda-docker-cache-
+      - run: npm test

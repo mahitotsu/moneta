@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# コミット時にbuild/test/lintを強制する(壊れた状態をコミット履歴に残さないため)。
+# セットアップ(cloneごとに1回): git config core.hooksPath .githooks
+#
+# infra/(CDK synth、Rust LambdaのDockerビルドを含み初回は数分かかる)とinfra/e2e/(実AWS
+# 環境が必要)はここには含めない。前者はGitHub Actionsで、後者は元々手動/実デプロイ環境限定
+# (infra/e2e/README.md参照)。
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+echo "==> cargo build --workspace"
+cargo build --workspace
+
+echo "==> cargo test --workspace"
+cargo test --workspace
+
+echo "==> cargo clippy --workspace --all-targets"
+cargo clippy --workspace --all-targets -- -D warnings
+
+echo "==> web-ui: build (tsc -b && vite build)"
+(cd web-ui && npm run build)
+
+echo "==> web-ui: oxlint"
+(cd web-ui && npx oxlint)
+
+echo "==> web-ui: vitest"
+(cd web-ui && npm run test)
+
+echo "==> pre-commit checks passed"
