@@ -2,7 +2,7 @@ mod account;
 mod envelope;
 mod ids;
 
-pub use account::{Account, AccountState, Command, DomainError, Event, FreezeReason};
+pub use account::{Account, AccountState, Command, DomainError, Event, FreezeReason, AMOUNT_DECIMAL_PLACES};
 pub use envelope::EventEnvelope;
 pub use ids::AccountId;
 

@@ -87,6 +87,8 @@ pub enum DomainError {
     AccountClosed,
     #[error("invalid amount: {0} (must be positive)")]
     InvalidAmount(Decimal),
+    #[error("invalid amount: {0} (at most 2 decimal places allowed)")]
+    InvalidAmountPrecision(Decimal),
     #[error("account is already active")]
     AlreadyActive,
     #[error("account is already frozen")]
@@ -136,9 +138,10 @@ impl Account {
                 if initial_balance < Decimal::ZERO {
                     return Err(DomainError::InvalidAmount(initial_balance));
                 }
+                ensure_at_most_two_decimal_places(initial_balance)?;
                 Ok(Event::Opened {
                     account_id: id,
-                    balance: initial_balance,
+                    balance: initial_balance.round_dp(AMOUNT_DECIMAL_PLACES),
                     opened_at: now,
                 })
             }
@@ -158,14 +161,22 @@ impl Account {
                 Command::Open { .. } => Err(DomainError::AccountAlreadyExists),
                 Command::Deposit { amount } => {
                     ensure_positive(amount)?;
+                    ensure_at_most_two_decimal_places(amount)?;
                     Ok(Event::Deposited {
                         account_id: self.id,
                         amount,
-                        new_balance: balance + amount,
+                        // round_dpは「精度を落とす」のではなく、DBラウンドトリップ由来の
+                        // スケールのブレ(例: 保存済みbalanceが900.000000のような形で読み
+                        // 戻された場合)を正規化する意味を持つ——両オペランドは既に
+                        // ensure_at_most_two_decimal_places/この関数自身の呼び出しで
+                        // 2桁以内だが、rust_decimalの加減算は両者の最大スケールを取るため、
+                        // 万一の食い違いをここで吸収する。
+                        new_balance: (balance + amount).round_dp(AMOUNT_DECIMAL_PLACES),
                     })
                 }
                 Command::Withdraw { amount } => {
                     ensure_positive(amount)?;
+                    ensure_at_most_two_decimal_places(amount)?;
                     if amount > *balance {
                         return Err(DomainError::InsufficientFunds {
                             balance: *balance,
@@ -175,7 +186,7 @@ impl Account {
                     Ok(Event::Withdrawn {
                         account_id: self.id,
                         amount,
-                        new_balance: balance - amount,
+                        new_balance: (balance - amount).round_dp(AMOUNT_DECIMAL_PLACES),
                     })
                 }
                 Command::Freeze { reason } => Ok(Event::Frozen {
@@ -254,9 +265,25 @@ impl Account {
     }
 }
 
+/// 金額(`amount`/`balance`/`initial_balance`)の精度契約: 小数点以下ちょうど2桁まで
+/// (docs/adr/0006決定5)。account-domain以外(API Gatewayのリクエスト検証パターン、
+/// transfer-serviceのサガ入力検証)もこの値に合わせる——ここが単一の真実源。
+pub const AMOUNT_DECIMAL_PLACES: u32 = 2;
+
 fn ensure_positive(amount: Decimal) -> Result<(), DomainError> {
     if amount <= Decimal::ZERO {
         Err(DomainError::InvalidAmount(amount))
+    } else {
+        Ok(())
+    }
+}
+
+/// DBラウンドトリップ由来のスケールのブレ(例: `900.000000`)を許さない——`scale()`は
+/// 値そのものではなく表現上の小数桁数を返すため、`round_dp`で正規化した結果と元の値を
+/// 比較するのではなく、`scale()`を直接見て「これ以上細かい表現になっていないか」を判定する。
+fn ensure_at_most_two_decimal_places(amount: Decimal) -> Result<(), DomainError> {
+    if amount.scale() > AMOUNT_DECIMAL_PLACES {
+        Err(DomainError::InvalidAmountPrecision(amount))
     } else {
         Ok(())
     }
@@ -339,6 +366,41 @@ mod tests {
                 .unwrap_err(),
             DomainError::InvalidAmount(dec!(-10))
         );
+    }
+
+    #[test]
+    fn amounts_with_more_than_two_decimal_places_are_rejected() {
+        let account = Account::open(AccountId::new(), dec!(1000));
+        assert_eq!(
+            account.apply(Command::Deposit { amount: dec!(10.123) }, now()).unwrap_err(),
+            DomainError::InvalidAmountPrecision(dec!(10.123))
+        );
+        assert_eq!(
+            account.apply(Command::Withdraw { amount: dec!(10.001) }, now()).unwrap_err(),
+            DomainError::InvalidAmountPrecision(dec!(10.001))
+        );
+        assert_eq!(
+            Account::apply_to_absent(AccountId::new(), Command::Open { initial_balance: dec!(1.005) }, now())
+                .unwrap_err(),
+            DomainError::InvalidAmountPrecision(dec!(1.005))
+        );
+    }
+
+    /// docs/adr/0006決定5: 金額は常に小数点以下ちょうど2桁に正規化される。DBラウンドトリップ
+    /// 由来のスケールのブレ(実デプロイで発見——保存済みbalanceが`900.000000`のような形で
+    /// 読み戻された)が起きても、次にDeposit/Withdrawが適用された時点で自己修復する
+    /// (`round_dp`)ことをスケールそのもの(`scale()`)で確認する——値の一致だけでは
+    /// rust_decimalが`900.000000 == 900`を等価とみなすため、このバグを検知できない。
+    #[test]
+    fn new_balance_is_normalized_to_two_decimal_places_even_if_the_read_balance_had_drifted_scale() {
+        let drifted_balance = dec!(1000.000000);
+        assert_eq!(drifted_balance.scale(), 6);
+        let account = Account::rehydrate(AccountId::new(), AccountState::Active { balance: drifted_balance });
+
+        let event = account.apply(Command::Withdraw { amount: dec!(100) }, now()).unwrap();
+        let Event::Withdrawn { new_balance, .. } = event else { panic!("expected Withdrawn") };
+        assert_eq!(new_balance, dec!(900));
+        assert_eq!(new_balance.scale(), 2, "expected exactly 2 decimal places, got scale {}", new_balance.scale());
     }
 
     #[test]

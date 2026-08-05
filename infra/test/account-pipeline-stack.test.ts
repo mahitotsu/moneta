@@ -202,6 +202,27 @@ describe("AccountPipelineStack", () => {
     );
   });
 
+  // docs/adr/0006決定5: 金額の精度は小数点以下2桁まで(実デプロイでDBラウンドトリップ由来の
+  // スケールのブレを発見したことを契機に、APIの仕様として明示した)。3桁以上はAPI Gatewayの
+  // リクエスト検証で構造的に拒否する(account-domainのAMOUNT_DECIMAL_PLACESと合わせる)。
+  test("amount/initial_balance JSON Schema models allow at most 2 decimal places", () => {
+    const models = template.findResources("AWS::ApiGateway::Model");
+    // SchemaはCFNテンプレート上インラインオブジェクト(JSON文字列ではない)。金額系モデル
+    // (initial_balance/amount)だけがpatternを持つ(FreezeCommandModelはenumなので対象外)。
+    const patterns = Object.values(models)
+      .map((model) => {
+        const properties = model.Properties.Schema.properties as Record<string, { pattern?: string }>;
+        return Object.values(properties)
+          .map((prop) => prop.pattern)
+          .filter((pattern): pattern is string => pattern !== undefined);
+      })
+      .flat();
+    expect(patterns).toHaveLength(2); // OpenCommandModel(initial_balance) + AmountCommandModel(amount)
+    for (const pattern of patterns) {
+      expect(pattern).toBe("^-?\\d+(\\.\\d{1,2})?$");
+    }
+  });
+
   // Web UIホスティング(docs/adr/0007)。queryApi/commandApiはどちらもパスが/accounts/{id}
   // から始まるため、CloudFrontのcache behavior(パスのみで振り分け)では区別できない——
   // /query-api・/command-apiというprefix + CloudFront Functionによるprefix剥がしで

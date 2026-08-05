@@ -1,4 +1,4 @@
-use account_domain::{Decimal, Uuid};
+use account_domain::{Decimal, Uuid, AMOUNT_DECIMAL_PLACES};
 use serde::{Deserialize, Serialize};
 
 /// 送金サガの状態。DynamoDBの1アイテム=1サガ(docs/adr/0010決定2)。account-domainの
@@ -84,6 +84,12 @@ pub fn expected_step(saga: &TransferSaga) -> Option<ExpectedStep> {
 pub enum StartError {
     NonPositiveAmount,
     SameAccount,
+    /// docs/adr/0006決定5: 金額は小数点以下ちょうど2桁までという契約(account-domainの
+    /// `AMOUNT_DECIMAL_PLACES`が単一の真実源)。Transfer serviceは顧客向けコマンドAPIの
+    /// JSON Schema検証を経由しない(docs/adr/0010決定6)ため、ここで自前に検証しないと、
+    /// account-serviceへコマンド発行するまで(DomainError::InvalidAmountPrecisionとして
+    /// 却下されるまで)不正な精度に気づけない。
+    InvalidAmountPrecision,
 }
 
 /// 新しい送金を受け付け、初期状態のサガと最初のアクション(出金コマンドの発行)を返す。
@@ -95,6 +101,9 @@ pub fn start(
 ) -> Result<(TransferSaga, NextAction), StartError> {
     if amount <= Decimal::ZERO {
         return Err(StartError::NonPositiveAmount);
+    }
+    if amount.scale() > AMOUNT_DECIMAL_PLACES {
+        return Err(StartError::InvalidAmountPrecision);
     }
     if from_account_id == to_account_id {
         return Err(StartError::SameAccount);
@@ -174,6 +183,18 @@ mod tests {
         let to = Uuid::new_v4();
         assert_eq!(start("t".to_string(), from, to, dec!(0)), Err(StartError::NonPositiveAmount));
         assert_eq!(start("t".to_string(), from, to, dec!(-1)), Err(StartError::NonPositiveAmount));
+    }
+
+    #[test]
+    fn start_rejects_amounts_with_more_than_two_decimal_places() {
+        let from = Uuid::new_v4();
+        let to = Uuid::new_v4();
+        assert_eq!(
+            start("t".to_string(), from, to, dec!(10.123)),
+            Err(StartError::InvalidAmountPrecision)
+        );
+        // ちょうど2桁は許可される。
+        assert!(start("t".to_string(), from, to, dec!(10.12)).is_ok());
     }
 
     #[test]

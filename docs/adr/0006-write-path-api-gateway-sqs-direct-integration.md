@@ -138,8 +138,18 @@ update-integration`でテンプレートを1行ずつ差し替えながら原因
 - 金額・残高（`amount` / `initial_balance`）はJSON上「文字列」であって数値ではない
   （`rust_decimal`の`serde-with-str`機能。`crates/account-domain/Cargo.toml`、既存テスト
   `event_serializes_amount_as_string_not_float`で確認済み）。Request Validatorのモデルでは
-  `type: string`＋`pattern: "^-?\d+(\.\d+)?$"`で構造的に検証する（正の値かどうかは
+  `type: string`＋`pattern: "^-?\d+(\.\d{1,2})?$"`で構造的に検証する（正の値かどうかは
   `DomainError::InvalidAmount`として既にドメイン層が扱う業務ルールであり、ここでは踏み込まない）。
+
+  **精度は小数点以下ちょうど2桁までと定義する**（`account-domain`の`AMOUNT_DECIMAL_PLACES`
+  定数が単一の真実源）。当初はこの精度自体を定義しておらず、実デプロイでDBラウンドトリップ
+  由来のスケールのブレ（保存済み`balance`が`900.000000`のような形で読み戻される）を発見した
+  ことを契機に、APIの仕様として明示した。`Account::apply`/`apply_to_absent`は
+  `new_balance`/`balance`を必ず`round_dp(AMOUNT_DECIMAL_PLACES)`で正規化し、3桁以上の入力は
+  `DomainError::InvalidAmountPrecision`として却下する。[[0010-transfer-service-saga]]の
+  Transfer serviceはこのコマンドAPI（したがってこのRequest Validator）を経由しない
+  （決定6参照）ため、`transfer-service`の`saga::start`でも同じ`AMOUNT_DECIMAL_PLACES`を
+  参照して同じ検証を行う——単一の真実源はaccount-domain、検証の実施箇所は経路ごとに必要。
 - `FreezeReason`の値（`SuspectedFraud` / `CourtOrder` / `CustomerRequest`）はRustのenum
   バリアント名とそのまま一致させる（`rename_all`は付いていない）。
 - `Command::Unfreeze`/`Command::Close`はユニットバリアントであり、`Command`に

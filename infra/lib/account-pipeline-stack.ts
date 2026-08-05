@@ -505,11 +505,14 @@ export class AccountPipelineStack extends cdk.Stack {
 
     // 金額・残高はJSON上「文字列」(rust_decimal の serde-with-str機能。
     // crates/account-domain/Cargo.toml、テストevent_serializes_amount_as_string_not_floatで確認済み)。
-    // ここでのpatternは「小数として解釈できる文字列か」という構造検証であり、
-    // 「正の値か」等の業務ルール(DomainError::InvalidAmount)には踏み込まない(ADR-0002の境界)。
+    // 小数点以下は最大2桁まで(docs/adr/0006決定5、account-domainの`AMOUNT_DECIMAL_PLACES`が
+    // 単一の真実源)——実デプロイでDBラウンドトリップ由来のスケールのブレ(900.000000のような
+    // 表示)を発見したことを契機に、精度をAPIの仕様として明示した。「正の値か」等の業務ルール
+    // (DomainError::InvalidAmount)には踏み込まない(ADR-0002の境界)が、桁数は構造検証の範囲と
+    // 位置づける。
     const decimalStringSchema: apigateway.JsonSchema = {
       type: apigateway.JsonSchemaType.STRING,
-      pattern: "^-?\\d+(\\.\\d+)?$",
+      pattern: "^-?\\d+(\\.\\d{1,2})?$",
     };
 
     const openModel = commandApi.addModel("OpenCommandModel", {
