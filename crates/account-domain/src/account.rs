@@ -141,7 +141,7 @@ impl Account {
                 ensure_at_most_two_decimal_places(initial_balance)?;
                 Ok(Event::Opened {
                     account_id: id,
-                    balance: initial_balance.round_dp(AMOUNT_DECIMAL_PLACES),
+                    balance: normalize_amount(initial_balance),
                     opened_at: now,
                 })
             }
@@ -165,13 +165,11 @@ impl Account {
                     Ok(Event::Deposited {
                         account_id: self.id,
                         amount,
-                        // round_dpは「精度を落とす」のではなく、DBラウンドトリップ由来の
-                        // スケールのブレ(例: 保存済みbalanceが900.000000のような形で読み
-                        // 戻された場合)を正規化する意味を持つ——両オペランドは既に
-                        // ensure_at_most_two_decimal_places/この関数自身の呼び出しで
-                        // 2桁以内だが、rust_decimalの加減算は両者の最大スケールを取るため、
-                        // 万一の食い違いをここで吸収する。
-                        new_balance: (balance + amount).round_dp(AMOUNT_DECIMAL_PLACES),
+                        // normalize_amountは単に精度超過を丸めるだけでなく、DBラウンドトリップ
+                        // 由来のスケールのブレ(例: 保存済みbalanceが900.000000のような形で
+                        // 読み戻された場合)や、桁が足りない場合(1000→1000.00)の両方を
+                        // 常にちょうど2桁へ揃える。
+                        new_balance: normalize_amount(balance + amount),
                     })
                 }
                 Command::Withdraw { amount } => {
@@ -186,7 +184,7 @@ impl Account {
                     Ok(Event::Withdrawn {
                         account_id: self.id,
                         amount,
-                        new_balance: (balance - amount).round_dp(AMOUNT_DECIMAL_PLACES),
+                        new_balance: normalize_amount(balance - amount),
                     })
                 }
                 Command::Freeze { reason } => Ok(Event::Frozen {
@@ -276,6 +274,18 @@ fn ensure_positive(amount: Decimal) -> Result<(), DomainError> {
     } else {
         Ok(())
     }
+}
+
+/// 金額を常にちょうど`AMOUNT_DECIMAL_PLACES`桁に正規化する。`Decimal::round_dp`は精度を
+/// 落とす方向にしか働かず、現在の桁数が目標以下ならそのまま返す実装(rust_decimal 1.42.1の
+/// `round_dp_with_strategy`: `if old_scale <= dp { return *self; }`)であり、「1000」を
+/// 「1000.00」へゼロ埋めしない——これを`round_dp`だけで済むと誤って想定していたことが
+/// 実デプロイでの表示不整合(`1000`のまま、`900.000000`は直るが`1000`は2桁にならない)として
+/// 露呈した。`Decimal::rescale`は両方向(不足はゼロ埋め、超過は丸め)で厳密に目標スケールへ
+/// 揃えるため、精度の強制にはこちらを使う。
+fn normalize_amount(mut amount: Decimal) -> Decimal {
+    amount.rescale(AMOUNT_DECIMAL_PLACES);
+    amount
 }
 
 /// DBラウンドトリップ由来のスケールのブレ(例: `900.000000`)を許さない——`scale()`は
@@ -389,7 +399,7 @@ mod tests {
     /// docs/adr/0006決定5: 金額は常に小数点以下ちょうど2桁に正規化される。DBラウンドトリップ
     /// 由来のスケールのブレ(実デプロイで発見——保存済みbalanceが`900.000000`のような形で
     /// 読み戻された)が起きても、次にDeposit/Withdrawが適用された時点で自己修復する
-    /// (`round_dp`)ことをスケールそのもの(`scale()`)で確認する——値の一致だけでは
+    /// (`rescale`)ことをスケールそのもの(`scale()`)で確認する——値の一致だけでは
     /// rust_decimalが`900.000000 == 900`を等価とみなすため、このバグを検知できない。
     #[test]
     fn new_balance_is_normalized_to_two_decimal_places_even_if_the_read_balance_had_drifted_scale() {
@@ -400,6 +410,28 @@ mod tests {
         let event = account.apply(Command::Withdraw { amount: dec!(100) }, now()).unwrap();
         let Event::Withdrawn { new_balance, .. } = event else { panic!("expected Withdrawn") };
         assert_eq!(new_balance, dec!(900));
+        assert_eq!(new_balance.scale(), 2, "expected exactly 2 decimal places, got scale {}", new_balance.scale());
+    }
+
+    /// 逆方向の回帰: 桁が足りない入力(整数の"1000"、scale=0)は、実デプロイで
+    /// `Decimal::round_dp`を使っていた際に正規化されず`1000`のまま返っていた(`round_dp`は
+    /// `old_scale <= dp`なら値をそのまま返す実装のため)。`rescale`への切り替えでゼロ埋めされ、
+    /// 常にちょうど2桁になることを確認する。
+    #[test]
+    fn balances_with_fewer_than_two_decimal_places_are_padded_to_exactly_two() {
+        let initial_balance = dec!(1000);
+        assert_eq!(initial_balance.scale(), 0);
+
+        let event =
+            Account::apply_to_absent(AccountId::new(), Command::Open { initial_balance }, now()).unwrap();
+        let Event::Opened { balance, .. } = event else { panic!("expected Opened") };
+        assert_eq!(balance, dec!(1000));
+        assert_eq!(balance.scale(), 2, "expected exactly 2 decimal places, got scale {}", balance.scale());
+
+        let account = Account::rehydrate(AccountId::new(), AccountState::Active { balance });
+        let event = account.apply(Command::Deposit { amount: dec!(50) }, now()).unwrap();
+        let Event::Deposited { new_balance, .. } = event else { panic!("expected Deposited") };
+        assert_eq!(new_balance, dec!(1050));
         assert_eq!(new_balance.scale(), 2, "expected exactly 2 decimal places, got scale {}", new_balance.scale());
     }
 
