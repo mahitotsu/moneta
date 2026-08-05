@@ -57,6 +57,22 @@ describe("AccountPipelineStack", () => {
     });
   });
 
+  // dynamodb.TableのデフォルトはRemovalPolicy.RETAINで、これを明示しないと変更セットの
+  // ロールバック時にもテーブルが削除されない。実際にこれが原因で、スキーマ移行失敗による
+  // ロールバック後の再デプロイが「テーブルは既に存在する」で失敗した(TransferSagaTable)。
+  // 3つ全てのDynamoDBテーブルがこの落とし穴を回避できているかを固定する回帰テスト。
+  test("all three DynamoDB tables are set to DESTROY on stack/changeset rollback, not the RETAIN default", () => {
+    const tables = template.findResources("AWS::DynamoDB::Table");
+    const tableNames = Object.values(tables).map((table) => table.Properties.TableName);
+    expect(tableNames.sort()).toEqual(
+      ["moneta-account-history", "moneta-account-views", "moneta-transfer-sagas"].sort(),
+    );
+    for (const table of Object.values(tables)) {
+      expect(table.DeletionPolicy).toBe("Delete");
+      expect(table.UpdateReplacePolicy).toBe("Delete");
+    }
+  });
+
   test("creates a separate FIFO queue (with its own DLQ) for transfer commands, distinct from the account command queue", () => {
     template.hasResourceProperties("AWS::SQS::Queue", {
       QueueName: "moneta-transfer-commands-main.fifo",

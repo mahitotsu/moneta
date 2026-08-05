@@ -299,6 +299,12 @@ export class AccountPipelineStack extends cdk.Stack {
       tableName: "moneta-account-views",
       partitionKey: { name: "accountId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      // PoCスタックのため自由に壊せるようにする(DSQLクラスタのdeletionProtectionEnabled:
+      // falseと同じ方針)。dynamodb.TableのデフォルトはRemovalPolicy.RETAINであり、
+      // 明示しないと変更セットのロールバック時にも削除されず、同名テーブルの再作成が
+      // 「already exists」で失敗する(実デプロイで発見——TransferSagaTableの同種の事故を
+      // 修正した際にこちらも同じ問題を抱えていることに気づいた)。
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
     // 取引履歴(docs/adr/0009) — accountViewTableとは別の第二のread model。1アイテム=
@@ -309,6 +315,7 @@ export class AccountPipelineStack extends cdk.Stack {
       partitionKey: { name: "accountId", type: dynamodb.AttributeType.STRING },
       sortKey: { name: "sk", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
     // --- [Query Service所有] Query Projector: イベント→view変換 ---------------
@@ -678,6 +685,11 @@ export class AccountPipelineStack extends cdk.Stack {
       tableName: "moneta-transfer-sagas",
       partitionKey: { name: "transferId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      // PoCスタックのため自由に壊せるようにする(DSQLクラスタのdeletionProtectionEnabled:
+      // falseと同じ方針)。省略するとRemovalPolicy.RETAINになり、変更セットのロールバック時にも
+      // 削除されない——実際にこれが原因で、スキーマ移行失敗によるロールバック後の再デプロイが
+      // 「moneta-transfer-sagasは既に存在する」で失敗した。
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
     // --- [Transfer service所有] 送金受付のSQS FIFOキュー -----------------------
