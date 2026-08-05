@@ -81,6 +81,22 @@ DSQLクラスタ自体がスタック削除時に一緒に削除されるため�
 リトライに委ね、移行完了後に自然に解消させる。Query Projector・照会APIはDSQLに一切触れないため
 この考慮自体が不要。
 
+### 6. DDL自体もAurora DSQLのOCC競合(SQLSTATE `OC001`)でリトライが必要
+
+[[0010-transfer-service-saga]]で`account_events`に列を追加した際の実デプロイで、
+`AccountSchemaMigration`が「schema has been updated by another transaction (OC001)」で
+FAILEDになる不具合を実際に起こした。[[0002-sqs-message-lifecycle-and-error-classification]]の
+コンテキストで触れている通り、Aurora DSQLのOCC競合はデータ競合(`OC000`)だけでなくスキーマ競合
+(`OC001`)も含む——本ADR起草時点では書き込みパス(決定6の`retry_on_occ`)にしかこの対処を
+入れておらず、複数のDDL文を連続実行する`schema_migrator.rs`の`run_idempotent`にはリトライが
+一切無かった。これが原因だった。
+
+`aurora-dsql-sqlx-connector`の`retry_on_occ`は行レベルのトランザクションに限らず、任意の
+`Result<T, sqlx::Error>`を返す非同期クロージャを対象にできるため、`run_idempotent`の
+DDL実行(「既に適用済み」の判定を含む)全体を同じ`retry_on_occ`(デフォルト設定: 最大3回、
+指数バックオフ+ジッター)でラップした。書き込みパスと同じ機構を、DDLという別の文脈にも
+そのまま再利用できた。
+
 ## 却下した代替案
 
 - **手動スクリプトのまま(現状維持)**: 今回の不具合そのものであり、不採用。

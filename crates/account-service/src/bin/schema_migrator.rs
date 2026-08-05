@@ -1,3 +1,4 @@
+use aurora_dsql_sqlx_connector::{retry_on_occ, OCCRetryConfig};
 use lambda_runtime::{run, service_fn, Error, LambdaEvent};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -113,15 +114,31 @@ async fn grant_iam_role(pool: &PgPool, role_arn: &str) -> Result<(), Error> {
 /// `AssertSqlSafe`: sqlxはSQLインジェクション対策として動的な文字列を`query()`にそのまま
 /// 渡すことをコンパイル時に禁じている。ここで組み立てるDDL/DCL文はDBスキーマ定義(schema.sql)
 /// とCDKの構築物(role_arn)由来であり、利用者からの入力を一切含まないため安全であると判断する。
+/// DDL自体がAurora DSQLのスキーマOCC競合(SQLSTATE OC001、docs/adr/0002のコンテキスト参照)で
+/// 失敗することが実デプロイで確認された——このLambdaは複数のDDL文を連続実行するため、
+/// 書き込みパス(決定6の`retry_on_occ`)と同じ機構をここでも使う。クロージャ内で
+/// 「既に適用済み」を先にOkへ吸収するため、`retry_on_occ`に渡るErrは真のOCC競合か、
+/// それ以外の想定外のエラーのどちらかになる——後者は`is_occ_error`が`None`を返すため、
+/// リトライされず即座に伝播しCustom ResourceをFAILEDにする。
 async fn run_idempotent(pool: &PgPool, statement: String) -> Result<(), Error> {
-    match sqlx::query(sqlx::AssertSqlSafe(statement.clone())).execute(pool).await {
-        Ok(_) => Ok(()),
-        Err(sqlx::Error::Database(db_err)) if is_already_applied(db_err.as_ref()) => {
-            tracing::info!(statement, "already applied, skipping");
-            Ok(())
+    let config = OCCRetryConfig::default(); // max_attempts: 3, exponential backoff + jitter
+    let pool = pool.clone();
+    retry_on_occ(&config, || {
+        let pool = pool.clone();
+        let statement = statement.clone();
+        async move {
+            match sqlx::query(sqlx::AssertSqlSafe(statement.clone())).execute(&pool).await {
+                Ok(_) => Ok(()),
+                Err(sqlx::Error::Database(db_err)) if is_already_applied(db_err.as_ref()) => {
+                    tracing::info!(statement, "already applied, skipping");
+                    Ok(())
+                }
+                Err(err) => Err(err),
+            }
         }
-        Err(err) => Err(err.into()),
-    }
+    })
+    .await?;
+    Ok(())
 }
 
 fn is_already_applied(err: &dyn sqlx::error::DatabaseError) -> bool {
