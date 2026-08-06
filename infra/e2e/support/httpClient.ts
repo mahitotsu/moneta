@@ -43,7 +43,9 @@ function jsonHeaders(idempotencyKey?: string): Record<string, string> {
 }
 
 export interface CommandApi {
-  openAccount(accountId: string, initialBalance: string, idempotencyKey?: string): Promise<RawResponse>;
+  // ownerId: docs/adr/0011。省略時は固定のダミー顧客名を使う(このハーネスはowner_idの
+  // 中身自体を検証対象にしていないシナリオが大半のため、既存の呼び出し箇所を壊さない)。
+  openAccount(accountId: string, initialBalance: string, ownerId?: string, idempotencyKey?: string): Promise<RawResponse>;
   deposit(accountId: string, amount: string, idempotencyKey?: string): Promise<RawResponse>;
   withdraw(accountId: string, amount: string, idempotencyKey?: string): Promise<RawResponse>;
   freeze(accountId: string, reason: FreezeReasonRequest, idempotencyKey?: string): Promise<RawResponse>;
@@ -56,11 +58,11 @@ export interface CommandApi {
 // to force a specific dedup/omission case (C1/C2 in docs/e2e-scenarios.md).
 export function createCommandApi(baseUrl: string): CommandApi {
   return {
-    openAccount: (accountId, initialBalance, idempotencyKey = crypto.randomUUID()) =>
+    openAccount: (accountId, initialBalance, ownerId = "e2e-test-customer", idempotencyKey = crypto.randomUUID()) =>
       rawRequest(`${baseUrl}/accounts/${accountId}`, {
         method: "PUT",
         headers: jsonHeaders(idempotencyKey),
-        body: JSON.stringify({ initial_balance: initialBalance }),
+        body: JSON.stringify({ owner_id: ownerId, initial_balance: initialBalance }),
       }),
     deposit: (accountId, amount, idempotencyKey = crypto.randomUUID()) =>
       rawRequest(`${baseUrl}/accounts/${accountId}/deposits`, {

@@ -72,8 +72,13 @@ async function postCommand(path: string, body?: unknown): Promise<CommandAccepte
   return response.json() as Promise<CommandAcceptedResponse>;
 }
 
-/** 口座IDはクライアント側で生成し、PUTで開設する(ADR-0006決定2)。 */
-export async function openAccount(initialBalance: string): Promise<CommandAcceptedResponse> {
+/**
+ * 口座IDはクライアント側で生成し、PUTで開設する(ADR-0006決定2)。
+ * ownerIdはサインイン済み顧客名(customerSession.tsのgetSignedInCustomer)をそのまま渡す——
+ * 振替(同一名義間)/振込(名義不一致)をサーバ側で判定するための実データ(docs/adr/0011)。
+ * ダミーサインインの値をそのまま使うだけで、新しい入力項目や認証機構を追加するものではない。
+ */
+export async function openAccount(ownerId: string, initialBalance: string): Promise<CommandAcceptedResponse> {
   const accountId = crypto.randomUUID();
   const response = await fetchOrThrow(
     `${COMMAND_API_BASE}/accounts/${accountId}`,
@@ -83,7 +88,7 @@ export async function openAccount(initialBalance: string): Promise<CommandAccept
         "Content-Type": "application/json",
         "Idempotency-Key": crypto.randomUUID(),
       },
-      body: JSON.stringify({ initial_balance: initialBalance }),
+      body: JSON.stringify({ owner_id: ownerId, initial_balance: initialBalance }),
     },
     COMMAND_FAILURE_MESSAGE,
     "openAccount",

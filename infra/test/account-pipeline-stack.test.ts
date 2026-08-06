@@ -60,12 +60,18 @@ describe("AccountPipelineStack", () => {
   // dynamodb.TableのデフォルトはRemovalPolicy.RETAINで、これを明示しないと変更セットの
   // ロールバック時にもテーブルが削除されない。実際にこれが原因で、スキーマ移行失敗による
   // ロールバック後の再デプロイが「テーブルは既に存在する」で失敗した(TransferSagaTable)。
-  // 3つ全てのDynamoDBテーブルがこの落とし穴を回避できているかを固定する回帰テスト。
-  test("all three DynamoDB tables are set to DESTROY on stack/changeset rollback, not the RETAIN default", () => {
+  // 4つ全てのDynamoDBテーブルがこの落とし穴を回避できているかを固定する回帰テスト
+  // (docs/adr/0011でTransferAccountOwnersTableを追加)。
+  test("all four DynamoDB tables are set to DESTROY on stack/changeset rollback, not the RETAIN default", () => {
     const tables = template.findResources("AWS::DynamoDB::Table");
     const tableNames = Object.values(tables).map((table) => table.Properties.TableName);
     expect(tableNames.sort()).toEqual(
-      ["moneta-account-history", "moneta-account-views", "moneta-transfer-sagas"].sort(),
+      [
+        "moneta-account-history",
+        "moneta-account-views",
+        "moneta-transfer-account-owners",
+        "moneta-transfer-sagas",
+      ].sort(),
     );
     for (const table of Object.values(tables)) {
       expect(table.DeletionPolicy).toBe("Delete");
@@ -116,8 +122,8 @@ describe("AccountPipelineStack", () => {
     }
   });
 
-  test("creates exactly nine Lambda functions: write path, outbox relay, query projector, schema migrator, the two transfer-service functions (command intake, saga step), the schema Provider framework's own handler, and the two Web UI hosting custom-resource handlers (S3 auto-delete-objects, BucketDeployment sync)", () => {
-    template.resourceCountIs("AWS::Lambda::Function", 9);
+  test("creates exactly ten Lambda functions: write path, outbox relay, query projector, schema migrator, the three transfer-service functions (command intake, saga step, owner projector), the schema Provider framework's own handler, and the two Web UI hosting custom-resource handlers (S3 auto-delete-objects, BucketDeployment sync)", () => {
+    template.resourceCountIs("AWS::Lambda::Function", 10);
   });
 
   test("applies the schema via a Custom Resource, granting only the two DSQL-connecting Lambdas' roles", () => {

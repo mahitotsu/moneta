@@ -135,6 +135,7 @@ export function AccountListScreen({ customerName, onSelectAccount, onSignedOut }
         {addOpen && (
           <>
             <OpenAccountForm
+              customerName={customerName}
               onOpened={(accountId) => {
                 addAccountFor(customerName, accountId);
                 refresh();

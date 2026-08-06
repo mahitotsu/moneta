@@ -43,7 +43,12 @@ mod tests {
     #[test]
     fn opened_event_yields_opened_entry_with_no_amount() {
         let (occurred_at, event_id) = envelope_fields();
-        let event = Event::Opened { account_id: AccountId::new(), balance: dec!(1000), opened_at: occurred_at };
+        let event = Event::Opened {
+            account_id: AccountId::new(),
+            owner_id: "customer-1".to_string(),
+            balance: dec!(1000),
+            opened_at: occurred_at,
+        };
         let entry = history_entry_from_event(&event, occurred_at, event_id);
         assert_eq!(entry["type"], "opened");
         assert_eq!(entry["amount"], Value::Null);

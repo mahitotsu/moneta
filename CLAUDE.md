@@ -56,6 +56,13 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
   which the ADR-0004 outbox already publishes for both `account.event.*` and `account.rejection.*`
   today (ADR-0002 decision 7 was corrected to reflect this — no dedicated rejection-publishing
   mechanism needed). No customer-facing API Gateway/UI yet — submission is SQS-only for now.
+- `0011`: 振替(furikae, same-owner)/振込(furikomi, different-owner) distinction — adds
+  real `owner_id` data to the `Account` aggregate (`Command::Open`/`Event::Opened`), a
+  transfer-service-owned account-owner index projection for server-side kind classification,
+  a confirmation step (`PendingConfirmation`/`Cancelled` saga states) required only for
+  furikomi, a per-transfer amount limit for furikomi, and recall (組戻し) modeled as a fresh
+  `kind = Recall` saga rather than a new terminal state. Customer-facing API Gateway/UI remains
+  out of scope, same as `0010` decision 6.
 
 ## Commands
 

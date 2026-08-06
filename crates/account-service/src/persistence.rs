@@ -19,6 +19,9 @@ pub struct AccountCommandEnvelope {
 
 #[derive(sqlx::FromRow)]
 struct AccountRow {
+    /// NULL許容(docs/adr/0011): owner_id列追加より前に作成された既存行はNULLのままになりうる。
+    /// `apply_command`側で空文字列にフォールバックする。
+    owner_id: Option<String>,
     status: String,
     balance: Decimal,
     frozen_reason: Option<String>,
@@ -134,7 +137,7 @@ pub async fn apply_command(
     }
 
     let existing: Option<AccountRow> = sqlx::query_as(
-        "SELECT status, balance, frozen_reason, frozen_at, closed_at FROM accounts WHERE id = $1",
+        "SELECT owner_id, status, balance, frozen_reason, frozen_at, closed_at FROM accounts WHERE id = $1",
     )
     .bind(envelope.account_id)
     .fetch_optional(&mut **tx)
@@ -145,10 +148,13 @@ pub async fn apply_command(
     let is_new_account = existing.is_none();
 
     // 口座がまだ存在しない場合のプレースホルダー。`evolve`の`Event::Opened`
-    // 分岐は自身の状態を見ないため、状態の中身は使われない。
+    // 分岐は自身の状態(owner_idも含む)を見ないため、中身は使われない。
     let base_account = match existing {
-        Some(row) => Account::rehydrate(account_id, row_to_state(&row)),
-        None => Account::rehydrate(account_id, AccountState::Active { balance: Decimal::ZERO }),
+        Some(row) => {
+            let owner_id = row.owner_id.clone().unwrap_or_default();
+            Account::rehydrate(account_id, owner_id, row_to_state(&row))
+        }
+        None => Account::rehydrate(account_id, String::new(), AccountState::Active { balance: Decimal::ZERO }),
     };
 
     let outcome = if is_new_account {
@@ -164,10 +170,11 @@ pub async fn apply_command(
 
             if is_new_account {
                 sqlx::query(
-                    "INSERT INTO accounts (id, status, balance, frozen_reason, frozen_at, closed_at) \
-                     VALUES ($1, $2, $3, $4, $5, $6)",
+                    "INSERT INTO accounts (id, owner_id, status, balance, frozen_reason, frozen_at, closed_at) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
                 )
                 .bind(envelope.account_id)
+                .bind(new_account.owner_id())
                 .bind(columns.status)
                 .bind(columns.balance)
                 .bind(columns.frozen_reason)

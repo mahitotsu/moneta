@@ -515,13 +515,22 @@ export class AccountPipelineStack extends cdk.Stack {
       pattern: "^-?\\d+(\\.\\d{1,2})?$",
     };
 
+    // owner_id: 口座の名義(顧客識別子)。docs/adr/0011で、振替(同一名義間)/振込(名義不一致)を
+    // サーバ側で判定するための実データとしてAccount aggregateに追加した。空文字列は拒否する
+    // (Web UIは常にサインイン済み顧客名を送る——ダミーサインインであり認証ではない、
+    // ADR-0007/0009の「認証UIなし」は撤回しない)。
+    const ownerIdSchema: apigateway.JsonSchema = {
+      type: apigateway.JsonSchemaType.STRING,
+      minLength: 1,
+    };
+
     const openModel = commandApi.addModel("OpenCommandModel", {
       contentType: "application/json",
       schema: {
         schema: apigateway.JsonSchemaVersion.DRAFT4,
         type: apigateway.JsonSchemaType.OBJECT,
-        required: ["initial_balance"],
-        properties: { initial_balance: decimalStringSchema },
+        required: ["owner_id", "initial_balance"],
+        properties: { owner_id: ownerIdSchema, initial_balance: decimalStringSchema },
         additionalProperties: false,
       },
     });
@@ -611,7 +620,7 @@ export class AccountPipelineStack extends cdk.Stack {
         },
       });
 
-    const openCommandJson = `{\${q}Open\${q}:{\${q}initial_balance\${q}:\${q}$util.escapeJavaScript($input.path('$.initial_balance'))\${q}}}`;
+    const openCommandJson = `{\${q}Open\${q}:{\${q}owner_id\${q}:\${q}$util.escapeJavaScript($input.path('$.owner_id'))\${q},\${q}initial_balance\${q}:\${q}$util.escapeJavaScript($input.path('$.initial_balance'))\${q}}}`;
     const depositCommandJson = `{\${q}Deposit\${q}:{\${q}amount\${q}:\${q}$util.escapeJavaScript($input.path('$.amount'))\${q}}}`;
     const withdrawCommandJson = `{\${q}Withdraw\${q}:{\${q}amount\${q}:\${q}$util.escapeJavaScript($input.path('$.amount'))\${q}}}`;
     const freezeCommandJson = `{\${q}Freeze\${q}:{\${q}reason\${q}:\${q}$util.escapeJavaScript($input.path('$.reason'))\${q}}}`;
@@ -695,6 +704,17 @@ export class AccountPipelineStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
+    // --- [Transfer service所有] 口座名義インデックス(DynamoDB、docs/adr/0011) ---
+    // 振替(同一名義間)/振込(名義不一致)の判定に使う accountId→ownerId のインデックス。
+    // query-serviceのAccountViewTableとは別に持つ(理由はowner_projector.rsのコメント参照:
+    // 名義は`Opened`一度きりで不変なので、洗い替え方式の投影とは相性が悪い)。
+    const transferAccountOwnersTable = new dynamodb.Table(this, "TransferAccountOwnersTable", {
+      tableName: "moneta-transfer-account-owners",
+      partitionKey: { name: "accountId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
     // --- [Transfer service所有] 送金受付のSQS FIFOキュー -----------------------
     // account-serviceのcommandQueueと同じFIFO+DLQの形だが、API Gatewayは経由しない
     // (docs/adr/0010決定6)。呼び出し元は`aws sqs send-message`等で
@@ -723,6 +743,7 @@ export class AccountPipelineStack extends cdk.Stack {
       code: rustLambdaCode("transfer-service", "transfer-command-intake"),
       environment: {
         SAGA_TABLE_NAME: transferSagaTable.tableName,
+        OWNER_TABLE_NAME: transferAccountOwnersTable.tableName,
         ACCOUNT_COMMAND_QUEUE_URL: commandQueue.queueUrl,
       },
     });
@@ -733,6 +754,7 @@ export class AccountPipelineStack extends cdk.Stack {
       }),
     );
     transferSagaTable.grantReadWriteData(transferCommandIntakeFn);
+    transferAccountOwnersTable.grantReadData(transferCommandIntakeFn);
     commandQueue.grantSendMessages(transferCommandIntakeFn);
 
     // --- [Transfer service所有] transfer-saga-step: 補償トリガーの観測とサガ進行 ---
@@ -765,6 +787,31 @@ export class AccountPipelineStack extends cdk.Stack {
         detail: { correlation_id: [{ exists: true }] },
       },
       targets: [new targets.LambdaFunction(transferSagaStepFn)],
+    });
+
+    // --- [Transfer service所有] transfer-owner-projector: 口座名義インデックスの投影 ---
+    // docs/adr/0011。`account.event.Opened`だけを購読する(名義は不変なのでOpened以外は
+    // 無関係——query-serviceのAccountQueryProjectorFunctionのようにaccount.event.*全体を
+    // 購読する必要はない)。
+    const transferOwnerProjectorFn = new lambda.Function(this, "TransferOwnerProjectorFunction", {
+      runtime: lambda.Runtime.PROVIDED_AL2023,
+      architecture: lambda.Architecture.X86_64,
+      handler: "bootstrap",
+      timeout: cdk.Duration.seconds(30),
+      code: rustLambdaCode("transfer-service", "transfer-owner-projector"),
+      environment: {
+        OWNER_TABLE_NAME: transferAccountOwnersTable.tableName,
+      },
+    });
+    transferAccountOwnersTable.grantWriteData(transferOwnerProjectorFn);
+
+    new events.Rule(this, "TransferOwnerObservationRule", {
+      eventBus: domainEventBus,
+      eventPattern: {
+        source: [EVENT_SOURCE],
+        detailType: ["account.event.Opened"],
+      },
+      targets: [new targets.LambdaFunction(transferOwnerProjectorFn)],
     });
 
     // --- スキーマ適用(CDK Custom Resource、docs/adr/0005) ----------------------
@@ -934,9 +981,11 @@ export class AccountPipelineStack extends cdk.Stack {
     new cdk.CfnOutput(this, "CommandApiUrl", { value: commandApi.url });
     new cdk.CfnOutput(this, "WebUiUrl", { value: `https://${webUiDistribution.domainName}` });
     new cdk.CfnOutput(this, "TransferSagaTableName", { value: transferSagaTable.tableName });
+    new cdk.CfnOutput(this, "TransferAccountOwnersTableName", { value: transferAccountOwnersTable.tableName });
     new cdk.CfnOutput(this, "TransferCommandQueueUrl", { value: transferCommandQueue.queueUrl });
     new cdk.CfnOutput(this, "TransferCommandDeadLetterQueueUrl", { value: transferCommandDlq.queueUrl });
     new cdk.CfnOutput(this, "TransferCommandIntakeFunctionName", { value: transferCommandIntakeFn.functionName });
     new cdk.CfnOutput(this, "TransferSagaStepFunctionName", { value: transferSagaStepFn.functionName });
+    new cdk.CfnOutput(this, "TransferOwnerProjectorFunctionName", { value: transferOwnerProjectorFn.functionName });
   }
 }

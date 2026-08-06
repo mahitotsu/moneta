@@ -243,10 +243,11 @@ Then `maxReceiveCount`超過後にFIFO DLQに到達し、CloudWatchアラーム�
 
 ## J. Transfer service(口座間送金のサガ)
 
-顧客向けUI/API Gatewayがまだ無い([[0010-transfer-service-saga]]決定6)ため、現時点では
-「外部から見て何を保証するか」の記述のみで、自動E2E化は次の増分(API Gateway追加)以降に
-持ち越す。それまでは`aws sqs send-message`でTransfer受付キューへ直接投入し、照会APIで
-送金元・送金先双方の残高を確認する形の手動確認が対象になる。
+顧客向けUI/API Gatewayがまだ無い([[0010-transfer-service-saga]]決定6、[[0011-furikae-furikomi-distinction]]でも据え置いたまま)ため、現時点では「外部から見て何を保証するか」の記述のみで、
+自動E2E化は次の増分(API Gateway追加)以降に持ち越す。それまでは`aws sqs send-message`で
+Transfer受付キューへ`TransferCommand`(`{"Start":{...}}`/`{"Confirm":{...}}`/
+`{"Cancel":{...}}`/`{"Recall":{...}}`のいずれか、[[0011-furikae-furikomi-distinction]])を
+直接投入し、照会APIで送金元・送金先双方の残高を確認する形の手動確認が対象になる。
 
 **J1. 正常な送金は送金元の減少・送金先の増加として反映される**
 Given 送金元・送金先とも有効な口座
@@ -272,6 +273,44 @@ Given 送金元と送金先が同じ口座
 When 送金を要求する
 Then 何も実行されない(残高は変化しない)
 → [[0010-transfer-service-saga]]`start`の入力検証 — **P2**(仕様の意図的な割り切りとして記録価値がある)
+
+**J5. 振込(名義不一致)は確認前は出金されない**
+Given 送金元・送金先の名義が異なる(口座名義インデックスに双方が反映済み)
+When `Start`で送金を要求する
+Then サガは`pending_confirmation`のまま停止し、送金元・送金先とも残高は変化しない
+(account-serviceには何も発行されていない)
+→ [[0011-furikae-furikomi-distinction]]決定3 — **P1**(API Gateway追加後にP0へ格上げ予定)
+
+**J6. 振込を確認すると出金→着金が進む**
+Given J5の状態(`pending_confirmation`)
+When 同じ`transfer_id`で`Confirm`を要求する
+Then 最終的に送金元の残高が減り、送金先の残高が同額増える(J1と同じ最終結果)
+→ [[0011-furikae-furikomi-distinction]]決定3 — **P1**
+
+**J7. 振替(名義一致)は確認不要で即座に開始される**
+Given 送金元・送金先の名義が同じ
+When `Start`で送金を要求する
+Then `Confirm`を待たずに出金コマンドが発行され、J1と同じ結果に至る
+→ [[0011-furikae-furikomi-distinction]]決定1・決定3 — **P1**
+
+**J8. Furikomiの上限額超過は受付時点で却下される**
+Given 送金元・送金先の名義が異なる
+When 上限額を超える金額で`Start`を要求する
+Then サガは作成されず、送金元・送金先とも残高は変化しない
+→ [[0011-furikae-furikomi-distinction]]決定4 — **P2**
+
+**J9. Credited済みFurikomiを期限内にrecallすると組戻しされる**
+Given J6が完了した(`credited`)振込のサガ
+When 期限内に`Recall`(新しい`transfer_id`・元の`transfer_id`を指定)を要求する
+Then 最終的に送金先の残高が減り、送金元の残高が同額戻る(逆方向の送金として実行される)
+→ [[0011-furikae-furikomi-distinction]]決定5 — **P2**
+
+**J10. 期限超過または受取人の残高不足でのrecallはFailedになる**
+Given J9の状態で、時間窓を過ぎている、または送金先の残高が送金額未満
+When `Recall`を要求する
+Then 期限超過の場合は却下されサガは作成されない/残高不足の場合は組戻し用サガが
+`failed`になり、送金先の残高は変化しない
+→ [[0011-furikae-furikomi-distinction]]決定5 — **P2**
 
 ---
 

@@ -1,4 +1,4 @@
-use account_domain::EventEnvelope;
+use account_domain::{EventEnvelope, OffsetDateTime};
 use aws_lambda_events::eventbridge::EventBridgeEvent;
 use lambda_runtime::{run, service_fn, Error, LambdaEvent};
 use serde_json::Value;
@@ -100,7 +100,9 @@ async fn step_one(
     // 発行する。逆順(先に発行してから状態を書く)だと、同じイベントが並行して2回処理された
     // 際に同じコマンドを2回発行しうる——CASで「この遷移を行う権利」を獲得した1回の実行だけが
     // 発行する、という単一化の役割をDynamoDB側の条件付き書き込みに持たせている。
-    let advanced = persistence::advance_saga_state(dynamodb, saga_table_name, &transfer_id, &saga.state, &next_state).await?;
+    let advanced =
+        persistence::advance_saga_state(dynamodb, saga_table_name, &transfer_id, &saga.state, &next_state, OffsetDateTime::now_utc())
+            .await?;
     if !advanced {
         tracing::info!(%transfer_id, "saga state already advanced by a concurrent/duplicate delivery; not issuing a command");
         return Ok(());

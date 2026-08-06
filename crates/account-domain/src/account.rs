@@ -34,7 +34,7 @@ pub enum AccountState {
 /// 口座に対する操作要求。まだ受理されるかどうかは決まっていない。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Command {
-    Open { initial_balance: Decimal },
+    Open { owner_id: String, initial_balance: Decimal },
     Deposit { amount: Decimal },
     Withdraw { amount: Decimal },
     Freeze { reason: FreezeReason },
@@ -47,6 +47,7 @@ pub enum Command {
 pub enum Event {
     Opened {
         account_id: AccountId,
+        owner_id: String,
         balance: Decimal,
         opened_at: OffsetDateTime,
     },
@@ -102,13 +103,19 @@ pub enum DomainError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Account {
     id: AccountId,
+    /// 口座の名義(顧客識別子)。`AccountState`の各バリアントと違い、凍結/解約といった
+    /// 状態遷移とは無関係に開設時から不変なので、`id`と同じ扱いで`Account`側に持つ
+    /// (`AccountState`には入れない)。振替(同一名義間)/振込(名義不一致)の判定に使う
+    /// (docs/adr/0011)。
+    owner_id: String,
     state: AccountState,
 }
 
 impl Account {
-    pub fn open(id: AccountId, initial_balance: Decimal) -> Self {
+    pub fn open(id: AccountId, owner_id: String, initial_balance: Decimal) -> Self {
         Self {
             id,
+            owner_id,
             state: AccountState::Active {
                 balance: initial_balance,
             },
@@ -116,12 +123,16 @@ impl Account {
     }
 
     /// 永続化された状態からaggregateを復元する（リポジトリ実装が使う）。
-    pub fn rehydrate(id: AccountId, state: AccountState) -> Self {
-        Self { id, state }
+    pub fn rehydrate(id: AccountId, owner_id: String, state: AccountState) -> Self {
+        Self { id, owner_id, state }
     }
 
     pub fn id(&self) -> AccountId {
         self.id
+    }
+
+    pub fn owner_id(&self) -> &str {
+        &self.owner_id
     }
 
     pub fn state(&self) -> &AccountState {
@@ -134,13 +145,14 @@ impl Account {
     /// 存在する場合は`Account::apply`を使う。
     pub fn apply_to_absent(id: AccountId, cmd: Command, now: OffsetDateTime) -> Result<Event, DomainError> {
         match cmd {
-            Command::Open { initial_balance } => {
+            Command::Open { owner_id, initial_balance } => {
                 if initial_balance < Decimal::ZERO {
                     return Err(DomainError::InvalidAmount(initial_balance));
                 }
                 ensure_at_most_two_decimal_places(initial_balance)?;
                 Ok(Event::Opened {
                     account_id: id,
+                    owner_id,
                     balance: normalize_amount(initial_balance),
                     opened_at: now,
                 })
@@ -232,6 +244,18 @@ impl Account {
     /// `Event` を状態に畳み込む（イベントソーシングの evolve/fold 相当）。
     /// リプレイ時にはこの関数だけを使って状態を再構築する。
     pub fn evolve(&self, event: &Event) -> Account {
+        // owner_idは開設時から不変。`Opened`だけが真実源(コマンドが運んできた値)を持ち、
+        // それ以外のイベントは既存の`self.owner_id`をそのまま引き継ぐ。ここもワイルドカード
+        // (`_ =>`)を使わず全バリアントを列挙する(CLAUDE.mdの規約通り、新バリアント追加時に
+        // ここも強制的にコンパイルエラーにするため)。
+        let owner_id = match event {
+            Event::Opened { owner_id, .. } => owner_id.clone(),
+            Event::Deposited { .. }
+            | Event::Withdrawn { .. }
+            | Event::Frozen { .. }
+            | Event::Unfrozen { .. }
+            | Event::Closed { .. } => self.owner_id.clone(),
+        };
         let state = match event {
             Event::Opened { balance, .. } => AccountState::Active { balance: *balance },
             Event::Deposited { new_balance, .. } | Event::Withdrawn { new_balance, .. } => {
@@ -259,7 +283,7 @@ impl Account {
                 closed_at: *closed_at,
             },
         };
-        Account { id: self.id, state }
+        Account { id: self.id, owner_id, state }
     }
 }
 
@@ -308,6 +332,10 @@ mod tests {
         OffsetDateTime::UNIX_EPOCH
     }
 
+    fn owner() -> String {
+        "customer-1".to_string()
+    }
+
     #[test]
     fn event_serializes_amount_as_string_not_float() {
         let event = Event::Deposited {
@@ -334,7 +362,7 @@ mod tests {
 
     #[test]
     fn deposit_increases_balance() {
-        let account = Account::open(AccountId::new(), dec!(1000));
+        let account = Account::open(AccountId::new(), owner(), dec!(1000));
         let event = account.apply(Command::Deposit { amount: dec!(500) }, now()).unwrap();
         assert_eq!(
             event,
@@ -350,7 +378,7 @@ mod tests {
 
     #[test]
     fn withdraw_more_than_balance_fails() {
-        let account = Account::open(AccountId::new(), dec!(100));
+        let account = Account::open(AccountId::new(), owner(), dec!(100));
         let err = account
             .apply(Command::Withdraw { amount: dec!(200) }, now())
             .unwrap_err();
@@ -365,7 +393,7 @@ mod tests {
 
     #[test]
     fn deposit_zero_or_negative_is_rejected() {
-        let account = Account::open(AccountId::new(), dec!(100));
+        let account = Account::open(AccountId::new(), owner(), dec!(100));
         assert_eq!(
             account.apply(Command::Deposit { amount: dec!(0) }, now()).unwrap_err(),
             DomainError::InvalidAmount(dec!(0))
@@ -380,7 +408,7 @@ mod tests {
 
     #[test]
     fn amounts_with_more_than_two_decimal_places_are_rejected() {
-        let account = Account::open(AccountId::new(), dec!(1000));
+        let account = Account::open(AccountId::new(), owner(), dec!(1000));
         assert_eq!(
             account.apply(Command::Deposit { amount: dec!(10.123) }, now()).unwrap_err(),
             DomainError::InvalidAmountPrecision(dec!(10.123))
@@ -390,7 +418,7 @@ mod tests {
             DomainError::InvalidAmountPrecision(dec!(10.001))
         );
         assert_eq!(
-            Account::apply_to_absent(AccountId::new(), Command::Open { initial_balance: dec!(1.005) }, now())
+            Account::apply_to_absent(AccountId::new(), Command::Open { owner_id: owner(), initial_balance: dec!(1.005) }, now())
                 .unwrap_err(),
             DomainError::InvalidAmountPrecision(dec!(1.005))
         );
@@ -405,7 +433,7 @@ mod tests {
     fn new_balance_is_normalized_to_two_decimal_places_even_if_the_read_balance_had_drifted_scale() {
         let drifted_balance = dec!(1000.000000);
         assert_eq!(drifted_balance.scale(), 6);
-        let account = Account::rehydrate(AccountId::new(), AccountState::Active { balance: drifted_balance });
+        let account = Account::rehydrate(AccountId::new(), owner(), AccountState::Active { balance: drifted_balance });
 
         let event = account.apply(Command::Withdraw { amount: dec!(100) }, now()).unwrap();
         let Event::Withdrawn { new_balance, .. } = event else { panic!("expected Withdrawn") };
@@ -423,12 +451,12 @@ mod tests {
         assert_eq!(initial_balance.scale(), 0);
 
         let event =
-            Account::apply_to_absent(AccountId::new(), Command::Open { initial_balance }, now()).unwrap();
+            Account::apply_to_absent(AccountId::new(), Command::Open { owner_id: owner(), initial_balance }, now()).unwrap();
         let Event::Opened { balance, .. } = event else { panic!("expected Opened") };
         assert_eq!(balance, dec!(1000));
         assert_eq!(balance.scale(), 2, "expected exactly 2 decimal places, got scale {}", balance.scale());
 
-        let account = Account::rehydrate(AccountId::new(), AccountState::Active { balance });
+        let account = Account::rehydrate(AccountId::new(), owner(), AccountState::Active { balance });
         let event = account.apply(Command::Deposit { amount: dec!(50) }, now()).unwrap();
         let Event::Deposited { new_balance, .. } = event else { panic!("expected Deposited") };
         assert_eq!(new_balance, dec!(1050));
@@ -437,7 +465,7 @@ mod tests {
 
     #[test]
     fn frozen_account_rejects_deposit_and_withdraw() {
-        let account = Account::open(AccountId::new(), dec!(100));
+        let account = Account::open(AccountId::new(), owner(), dec!(100));
         let frozen_event = account
             .apply(
                 Command::Freeze {
@@ -464,7 +492,7 @@ mod tests {
 
     #[test]
     fn unfreeze_restores_active_state_with_same_balance() {
-        let account = Account::open(AccountId::new(), dec!(100));
+        let account = Account::open(AccountId::new(), owner(), dec!(100));
         let frozen_event = account
             .apply(
                 Command::Freeze {
@@ -482,7 +510,7 @@ mod tests {
 
     #[test]
     fn unfreeze_on_active_account_fails() {
-        let account = Account::open(AccountId::new(), dec!(100));
+        let account = Account::open(AccountId::new(), owner(), dec!(100));
         assert_eq!(
             account.apply(Command::Unfreeze, now()).unwrap_err(),
             DomainError::AlreadyActive
@@ -491,7 +519,7 @@ mod tests {
 
     #[test]
     fn closed_account_rejects_all_commands() {
-        let account = Account::open(AccountId::new(), dec!(100));
+        let account = Account::open(AccountId::new(), owner(), dec!(100));
         let closed_event = account.apply(Command::Close, now()).unwrap();
         let account = account.evolve(&closed_event);
 
@@ -511,23 +539,24 @@ mod tests {
     #[test]
     fn opening_a_new_account_produces_opened_event() {
         let id = AccountId::new();
-        let event = Account::apply_to_absent(id, Command::Open { initial_balance: dec!(100) }, now()).unwrap();
+        let event = Account::apply_to_absent(id, Command::Open { owner_id: owner(), initial_balance: dec!(100) }, now()).unwrap();
         assert_eq!(
             event,
             Event::Opened {
                 account_id: id,
+                owner_id: owner(),
                 balance: dec!(100),
                 opened_at: now(),
             }
         );
 
-        let account = Account::rehydrate(id, AccountState::Active { balance: dec!(0) }).evolve(&event);
+        let account = Account::rehydrate(id, owner(), AccountState::Active { balance: dec!(0) }).evolve(&event);
         assert_eq!(account.state(), &AccountState::Active { balance: dec!(100) });
     }
 
     #[test]
     fn opening_with_negative_initial_balance_is_rejected() {
-        let err = Account::apply_to_absent(AccountId::new(), Command::Open { initial_balance: dec!(-1) }, now())
+        let err = Account::apply_to_absent(AccountId::new(), Command::Open { owner_id: owner(), initial_balance: dec!(-1) }, now())
             .unwrap_err();
         assert_eq!(err, DomainError::InvalidAmount(dec!(-1)));
     }
@@ -552,10 +581,10 @@ mod tests {
 
     #[test]
     fn opening_an_existing_account_fails() {
-        let account = Account::open(AccountId::new(), dec!(100));
+        let account = Account::open(AccountId::new(), owner(), dec!(100));
         assert_eq!(
             account
-                .apply(Command::Open { initial_balance: dec!(50) }, now())
+                .apply(Command::Open { owner_id: owner(), initial_balance: dec!(50) }, now())
                 .unwrap_err(),
             DomainError::AccountAlreadyExists
         );

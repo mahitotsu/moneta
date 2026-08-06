@@ -14,7 +14,9 @@ pub(crate) fn format_timestamp(dt: OffsetDateTime) -> String {
 /// ため、呼び出し前の状態を持つ必要はない——プレースホルダーの`Account`を経由して`evolve`を再利用し、
 /// 状態遷移ロジックの複製を避ける。
 pub fn view_from_event(account_id: AccountId, event: &Event) -> Value {
-    let placeholder = Account::rehydrate(account_id, AccountState::Active { balance: Decimal::ZERO });
+    // owner_idはこのプレースホルダーでは使われない(Query Serviceのview/state_to_viewは
+    // owner_idを一切参照しない、docs/adr/0011)——空文字列で十分。
+    let placeholder = Account::rehydrate(account_id, String::new(), AccountState::Active { balance: Decimal::ZERO });
     state_to_view(placeholder.evolve(event).state())
 }
 

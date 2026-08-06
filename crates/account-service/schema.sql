@@ -8,6 +8,10 @@
 
 CREATE TABLE IF NOT EXISTS accounts (
     id UUID PRIMARY KEY,
+    -- 口座の名義(顧客識別子)。NULL許容——DSQLでは既存デプロイに後からNOT NULLを
+    -- 追加できない(既存行が値を持たない)ため、強制はアプリケーション層
+    -- (Command::Openが常に必須で要求する)に委ねる(docs/adr/0011)。
+    owner_id TEXT,
     status TEXT NOT NULL,
     balance NUMERIC NOT NULL,
     frozen_reason TEXT,
@@ -33,6 +37,9 @@ CREATE TABLE IF NOT EXISTS account_events (
 -- account_eventsが先に(published_at/correlation_id列なしで)作られていた既存デプロイ向け。
 ALTER TABLE account_events ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ;
 ALTER TABLE account_events ADD COLUMN IF NOT EXISTS correlation_id TEXT;
+
+-- accountsがowner_id列なしで作られていた既存デプロイ向け(docs/adr/0011)。
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS owner_id TEXT;
 
 -- CREATE INDEX ASYNCがIF NOT EXISTSをサポートするか公式ドキュメントで確認が取れなかったため
 -- (CREATE TABLE/ALTER TABLE ADD COLUMNは確認済み)、あえて付けていない。再実行時の重複エラーは
