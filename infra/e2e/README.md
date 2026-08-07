@@ -93,6 +93,13 @@ Lambdaを直接Invokeする(`relay_once`はイベントの中身を見ないた�
 | F3 | `web-ui/src/components/AccountView.test.tsx`(このinfra/e2eではなくweb-ui側、Vitest+React Testing Library) | 実装済み(表示ロジックの主張であり、実AWS環境やブラウザ自動化を要さずコンポーネント単体で検証できるため、このハーネスとは別建て) |
 | A4/A5のUI固有部分(顧客セッションと無関係であること・表示用ラベルがバックエンドに送られないこと)、H1-H3 | (未実装) | このハーネスは生HTTP呼び出しのみで、実際のWeb UI(ブラウザ)は駆動していない。ブラウザ自動化(Playwright等)が別途必要 — `docs/e2e-scenarios.md`参照 |
 | I1 | (未実装、手動確認のみ) | 持続的なインフラ障害の再現にはフォルトインジェクション(実環境への意図的な障害注入)が要り、このPoCの規模には過大。デプロイ済み環境に対する破壊的操作を伴うため、自動化するなら別途合意が必要 |
+| J1, J2, J7 | `scenarios/transfer-furikae.e2e.test.ts` | 実装済み(docs/adr/0011。同一owner_idの2口座間送金=furikaeとして、確認不要の即時開始・残高反映・残高不足を検証) |
+| J3 | `scenarios/transfer-furikae.e2e.test.ts` | 実装済み(送金先を凍結した状態でfurikaeを実行し、補償まで確認) |
+| J4 | `scenarios/transfer-furikae.e2e.test.ts` | 実装済み(却下系のため`settle`パターン、Bカテゴリと同じ考え方) |
+| J5, J6 | `scenarios/transfer-furikomi.e2e.test.ts` | 実装済み(異なるowner_idの2口座間送金=furikomiとして、`Confirm`前後の状態を検証) |
+| J8 | `scenarios/transfer-furikomi.e2e.test.ts` | 実装済み(却下系。上限額超過はStart時点で却下されサガが作られない) |
+| J9 | `scenarios/transfer-recall.e2e.test.ts` | 実装済み(credited直後=時間窓内でのrecallを検証、実時間待ちは不要) |
+| J10 | `scenarios/transfer-recall.e2e.test.ts` | 実装済み(残高不足パターンは操作のみで再現可能。期限超過パターンは`support/sagaState.ts`の`backdateSagaUpdatedAt`で`updatedAt`を直接書き換えて模擬——実時間24時間待つ代わりの、この検証専用の裏口) |
 
 ## 実装上の注意
 
@@ -111,3 +118,20 @@ Lambdaを直接Invokeする(`relay_once`はイベントの中身を見ないた�
   グループごとに分けているのは、Jestがテスト
   ファイル単位でしか並列実行しない(1ファイル内の`it`は直列実行される)ため。新しい却下系
   シナリオを追加する際は、既存のフィクスチャ(Active/Frozen)を使い回せないか先に検討する。
+- **Transfer service(J、docs/adr/0010・0011)は顧客向けAPI Gatewayがまだ無く、受付が
+  Transfer受付キューへの直接`SendMessage`のみ**(ADR-0010決定6)。`support/transferClient.ts`
+  が`httpClient.ts`のHTTPラッパーと同じ役割をSQS向けに提供する(`TransferCommand`の
+  `Start`/`Confirm`/`Cancel`/`Recall`)。サガ状態はDynamoDB(`moneta-transfer-sagas`)に
+  あり照会APIが無いため、`support/sagaState.ts`の`waitForSagaState`/`getSaga`が直接
+  `GetItem`する——`waitFor`(`support/poll.ts`)を内部で再利用しているため、outbox relay
+  直接Invokeによる加速も自動的に効く(account.event.OpenedやWithdrawn/Depositedの発行が
+  outbox経由なのはaccount-serviceの他のイベントと同じ)。furikae/furikomiの判定も同じ
+  outbox発行に依存する口座名義インデックス(`moneta-transfer-account-owners`)の反映待ちが
+  要るため、`waitForOwnerIndexed`も同様に`waitFor`を再利用する。
+- **組戻し(recall)の時間窓(J10、24時間)は実時間を待たずに検証する。**
+  `recall_eligibility`(saga.rs)は`now`を明示的な引数に取る純粋関数なのでユニットテストは
+  元々実時間非依存だが、この実デプロイE2Eでも同様に、`support/sagaState.ts`の
+  `backdateSagaUpdatedAt`でサガの`updatedAt`を直接過去へ書き換えることで期限切れを模擬する。
+  アプリケーションの通常の書き込み経路(`advance_saga_state`のCAS)を経由しない、この検証
+  専用の裏口であることを明示するため、他のヘルパーとは違う直接`UpdateItem`という形にして
+  ある(`support/dlq.ts`がDLQを直接操作するのと同じ位置づけ)。

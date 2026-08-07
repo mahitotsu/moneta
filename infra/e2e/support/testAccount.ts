@@ -19,9 +19,18 @@ export async function waitForStatus(
 // account with a known balance. Account IDs are client-generated (docs/adr/0006決定2), so
 // each test gets its own never-before-used UUID -- tests don't need shared fixtures or a
 // data reset between runs to stay isolated from each other.
-export async function openFreshAccount(commandApi: CommandApi, queryApi: QueryApi, initialBalance: string): Promise<string> {
+//
+// `ownerId` defaults to a fixed dummy customer name shared by most scenarios (they don't care
+// whose account it is). Transfer service scenarios (docs/adr/0011) that need to distinguish
+// furikae(同一名義)/furikomi(名義不一致) pass distinct owner ids explicitly.
+export async function openFreshAccount(
+  commandApi: CommandApi,
+  queryApi: QueryApi,
+  initialBalance: string,
+  ownerId = "e2e-test-customer",
+): Promise<string> {
   const accountId = crypto.randomUUID();
-  const response = await commandApi.openAccount(accountId, initialBalance);
+  const response = await commandApi.openAccount(accountId, initialBalance, ownerId);
   if (response.status !== 202) {
     throw new Error(`openAccount(${accountId}) unexpected status ${response.status}: ${JSON.stringify(response.body)}`);
   }

@@ -17,6 +17,10 @@ export interface StackOutputs {
   commandApiUrl: string;
   queryApiUrl: string;
   outboxRelayFunctionName: string;
+  // Transfer service(docs/adr/0010・0011)。
+  transferCommandQueueUrl: string;
+  transferSagaTableName: string;
+  transferAccountOwnersTableName: string;
 }
 
 const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
@@ -28,6 +32,9 @@ const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
   commandApiUrl: "CommandApiUrl",
   queryApiUrl: "QueryApiUrl",
   outboxRelayFunctionName: "OutboxRelayFunctionName",
+  transferCommandQueueUrl: "TransferCommandQueueUrl",
+  transferSagaTableName: "TransferSagaTableName",
+  transferAccountOwnersTableName: "TransferAccountOwnersTableName",
 };
 
 export async function fetchStackOutputs(): Promise<StackOutputs> {
