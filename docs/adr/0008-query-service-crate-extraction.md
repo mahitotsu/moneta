@@ -20,16 +20,17 @@ Query Serviceのコード(`projection.rs`・`bin/query_projector.rs`)が
 これは見た目の問題だけでなく実害があった:
 
 - `account-query-projector`(DynamoDBへの書き込みのみ行うLambda)が、同一クレートである
-  以上`account-service`のCargo.tomlに書かれた全依存関係
-  (`aurora-dsql-sqlx-connector`・`sqlx`(postgres機能)・`aws-sdk-eventbridge`)を巻き
-  込んでビルドされていた。Query Serviceは元々DSQLに一切触れない設計
-  ([[0004-query-service-event-driven-projection]]:「account-serviceのDSQLクラスタへ
-  は一切アクセスしない」)なのに、それを保証する仕組みがコード上に無かった。
+  以上`account-service`のCargo.tomlに書かれた全依存関係(account-service自身の永続化・
+  EventBridge発行に使うクレート一式)を巻き込んでビルドされていた。Query Serviceは
+  元々account-serviceの書き込み側ストアには一切アクセスしない設計
+  ([[0004-query-service-event-driven-projection]]:「account-serviceの内部ストアへは
+  一切アクセスしない」)なのに、それを保証する仕組みがコード上に無かった。
 - 境界がコンパイラで強制されていなかった。同一クレート内である以上、Query Service側の
-  コードが`persistence.rs`(DSQL固有コード)へ誤って依存することをRustの型システムは
-  防げない。これは[[0003-domain-service-crate-boundary]]が`account-domain`/
-  `account-service`の境界について採用した論拠(「Rustの型システムによって強制される
-  境界であり、規約ではない」)と同じ理由で、Query Serviceにはまだ適用されていなかった。
+  コードが`persistence.rs`(account-service固有の書き込み側コード)へ誤って依存することを
+  Rustの型システムは防げない。これは[[0003-domain-service-crate-boundary]]が
+  `account-domain`/`account-service`の境界について採用した論拠(「Rustの型システムに
+  よって強制される境界であり、規約ではない」)と同じ理由で、Query Serviceにはまだ
+  適用されていなかった。
 
 ## 決定
 
@@ -39,10 +40,12 @@ Query Serviceのコード(`projection.rs`・`bin/query_projector.rs`)が
 移動できた)と`bin/query_projector.rs`(Lambdaバイナリ`account-query-projector`)を移動
 する。`Cargo.toml`の依存は`account-domain`・`aws-config`・`aws-sdk-dynamodb`・
 `aws_lambda_events`・`lambda_runtime`・`serde_json`・`tokio`・`tracing`系のみとし、
-**`sqlx`・`aurora-dsql-sqlx-connector`・`aws-sdk-eventbridge`を含めない**。これにより
-「Query ServiceはDSQLに一切触れない」という主張がCargo.tomlの記述そのものによって
-コンパイル時に保証されるようになった(`cargo tree -p query-service`でこれらが依存グラフ
-に一切現れないことを確認済み)。
+**`aws-sdk-eventbridge`を含めない**。これにより「Query Serviceはイベントの購読しかできず、
+自分でEventBridgeへ発行することはできない」という主張がCargo.tomlの記述そのものによって
+コンパイル時に保証されるようになった(`cargo tree -p query-service`でこれが依存グラフに
+一切現れないことを確認済み)。account-service固有の永続化コード(`persistence.rs`)への
+依存も、query-serviceが`account-service`クレート自体に依存していないことで構造的に
+防がれる。
 
 ### 2. `EventEnvelope`を`account-domain`へ移す
 

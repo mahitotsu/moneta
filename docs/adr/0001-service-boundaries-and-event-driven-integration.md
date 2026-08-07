@@ -66,9 +66,8 @@ aggregateに適用する」という骨格設計は、この4サービス構想�
 Transfer/Notificationを先取りした特別な作り込みは現時点で不要。
 
 Query serviceについては[[0004-query-service-event-driven-projection]]で実装した。account-service
-からのイベント発行はEventBridgeへの直接PutEventsではなく、DSQLのアウトボックステーブル
-（`account_events.published_at`）をポーリングして発行するトランザクショナルアウトボックス方式を
-採る（DSQLのCDC機能はコスト方針と非互換のため不採用）。Query service側はDynamoDBへの読み取り
-モデル投影と、API Gateway+DynamoDB直接統合による照会APIまでを実装し、上記のセルフサービス方式
-（発行側はスキーマ登録のみ、購読側がRuleを定義する）を実証した。Notification serviceは引き続き
-未実装。
+からのイベント発行はEventBridgeへの直接PutEventsではなく、`account_events`テーブル(追記専用の
+イベントログ)へのDynamoDB Streamsを起点とするトランザクショナルアウトボックス方式を採る。
+Query service側はDynamoDBへの読み取りモデル投影と、API Gateway+DynamoDB直接統合による照会APIまでを
+実装し、上記のセルフサービス方式（発行側はスキーマ登録のみ、購読側がRuleを定義する）を実証した。
+Notification serviceは引き続き未実装。

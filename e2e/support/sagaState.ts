@@ -38,9 +38,9 @@ export async function getSaga(sagaTableName: string, transferId: string): Promis
   return (result.Item as SagaItem | undefined) ?? null;
 }
 
-// outbox relay(support/relay.ts経由でwaitForが直接Invokeする)がaccount-serviceのイベントを
-// EventBridgeへ発行して初めてtransfer-saga-step/transfer-owner-projectorが動くため、サガ状態の
-// 収束もaccount残高の収束と同じ「outbox relayを叩きながらポーリングする」パターンで加速できる
+// account-serviceのイベントがDynamoDB Streams駆動のoutbox(docs/adr/0004・0013)経由で
+// EventBridgeへ発行されて初めてtransfer-saga-step/transfer-owner-projectorが動くため、
+// サガ状態の収束もaccount残高の収束と同じ`waitFor`ポーリングで待てる
 // (docs/adr/0004・0010・0011、e2e/README.md)。
 export async function waitForSagaState(
   sagaTableName: string,
@@ -58,8 +58,8 @@ export async function waitForSagaState(
 }
 
 // 口座名義インデックス(`crates/transfer-service/src/bin/owner_projector.rs`、docs/adr/0011)への
-// 反映待ち。`account.event.Opened`のoutbox発行を経て投影されるため、これもoutbox relayを
-// 叩きながらポーリングして加速する。
+// 反映待ち。`account.event.Opened`のoutbox発行を経て投影されるため、これも`waitFor`で
+// ポーリングする。
 export async function waitForOwnerIndexed(
   ownerTableName: string,
   accountId: string,

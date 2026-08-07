@@ -2,57 +2,53 @@
 
 ## ステータス
 
-Accepted。account-service側のアウトボックス(`persistence.rs`の`fetch_unpublished_events`/
-`mark_published`、`outbox.rs`、`src/bin/outbox_relay.rs`)とQuery Service側(`projection.rs`、
+Accepted。account-service側のアウトボックス(`persistence.rs`・`outbox.rs`・
+`src/bin/account-outbox-projector.rs`)とQuery Service側(`projection.rs`、
 `src/bin/query_projector.rs`)の実装、および`infra/lib/account-pipeline-stack.ts`の
-EventBridge/DynamoDB/API Gateway定義に直接反映する。
+EventBridge/DynamoDB/API Gateway定義に直接反映する。永続化層はDynamoDBを前提とする
+([[0013-migrate-account-service-off-aurora-dsql]])。
 
 ## コンテキスト
 
-milestone 1(SQS FIFO + Lambda + Aurora DSQL)は実AWSで検証済みだが、
 [[0001-service-boundaries-and-event-driven-integration]]が提案した「イベント駆動でのサービス間
-連携」は一度も実装・検証されていなかった。書き込み経路へのAPI Gateway追加(ADR-0002の設計図)は
-枯れたAWSパターンで技術的リスクが低く後回しにしても損失が小さい一方、イベント駆動連携はこのPoC
-全体の核心的な主張であるため、こちらを先に検証する優先順位に切り替えた。
-
-照会についても「マイクロサービス前提でDSQL直接照会は不可、すべてAPI経由」という方針のもと、
-Query serviceを実装し、それを本来の照会経路とする(milestone 1の検証時に使っていたpsql直接照会は
-この方針と矛盾するため終了する)。
+連携」を実装・検証する。照会は「マイクロサービス前提で他サービスのストアへの直接照会は不可、
+すべてAPI経由」という方針のもと、Query serviceを実装し、それを唯一の照会経路とする。
 
 ## 決定
 
-### 1. DSQLのCDC(Kinesis配信)は不採用、ポーリングベースのアウトボックスを採る
+### 1. トランザクショナルアウトボックスをDynamoDB Streams駆動で実現する
 
-Aurora DSQLは2026年7月にCDC(Change Data Capture)がGAしたが、配信先は現状Kinesis Data Streams
-のみである([CreateStream APIリファレンス](https://docs.aws.amazon.com/aurora-dsql/latest/APIReference/API_CreateStream.html)の
-`TargetDefinition`)。Kinesisは稼働の有無に関わらず$0.040/stream-hourの固定費が発生し
-([Kinesis料金ページ](https://aws.amazon.com/kinesis/data-streams/pricing/))、
-「稼働していないときは課金されない」という本PoCのコスト方針と非互換と判断した。
+`account_events`テーブル(追記専用のイベントログ、[[0013]])にDynamoDB Streamsを有効化し、
+`account-outbox-projector`Lambdaがストリームをトリガーに直接`PutEvents`する、業務レベルの
+トランザクショナルアウトボックスを採る。
 
-代わりに、`account_events`に`published_at`列を追加し、EventBridge Scheduler(1分間隔、
-Schedulerの下限)で起動する`account-outbox-relay`Lambdaが未発行行(`published_at IS NULL`)を
-ポーリングして`PutEvents`する、業務レベルのトランザクショナルアウトボックスを採る。
-Lambda・Scheduler・EventBridge・DynamoDB(on-demand)はいずれもアイドル時の固定費がない。
+DynamoDB Streamsは稼働の有無に関わらない時間課金を持たず、Lambdaトリガー経由の読み取りは
+無料である([AWS公式ドキュメント](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Streams.html)で
+確認済み)。「稼働していないときは課金されない」という本PoCのコスト方針とも合致する。
+同一アイテムへの変更順序が保証されるため([[0012-transfer-customer-api-and-status-query]]決定1で
+確認済みの内容と同じ)、ポーリング間隔に起因する反映遅延も生じない。
 
-なお別途調べたところAurora DSQL自体はアイドル時DPU課金ゼロ・時間最低料金なしだった
-([Aurora DSQL料金ページ](https://aws.amazon.com/rds/aurora/dsql/pricing/))。コストの観点では
-Query serviceの読み取りストアを別のDSQLクラスタにする案も排除されないが、決定4の理由により
-今回はDynamoDBを採用した。
+### 2. `PutEvents`失敗時はストリームレコードを再試行させ、成功するまでイベントを失わない
 
-### 2. 発行は「PutEvents成功 → published_at更新」の順序を守る
+`account-outbox-projector`は`PutEvents`が失敗したイベントについて例外を投げてLambda呼び出し
+自体を失敗させる。DynamoDB Streamsのevent source mappingは、関数呼び出しが失敗すれば
+（設定した再試行回数の範囲で）同じストリームレコードを再試行するため、「処理済みにする」操作は
+Lambda呼び出しの成功と結びついたままになり、`PutEvents`が失敗した状態のままイベントが
+失われることはない。[[0002-sqs-message-lifecycle-and-error-classification]]が確立した
+「サイレントなデータロスを許さない」という設計思想をここでも踏襲する。`PutEvents`はエントリ
+単位で成否を返すため、バッチ中の一部だけが失敗した場合は、失敗したエントリだけを再試行対象
+として例外を投げる。
 
-逆順(先にpublished_atを更新してからPutEvents)だと、その後のPutEventsが失敗した際にイベントが
-永久に失われる。[[0002-sqs-message-lifecycle-and-error-classification]]が確立した「サイレントな
-データロスを許さない」という設計思想をここでも踏襲する。この順序により、`account-outbox-relay`が
-どのタイミングで落ちても最悪の帰結は重複発行(at-least-once)であり、消失ではない。
-`PutEvents`はエントリ単位で成否を返すため、成功したエントリだけ`published_at`を更新し、
-失敗したエントリは次回ポーリングで自然に再試行される。
+再試行回数を使い切ってなお解消しない持続的な障害に対しては、event source mappingの
+`onFailure`送信先を設定し、運用側の検知に委ねる。event source mappingの再試行設定・
+`onFailure`送信先の具体的な値は実装時にAWS公式ドキュメントで確認する
+([[verify_aws_specs_before_implementing]])。
 
 ### 3. サービス境界とOwnershipは「Viewスキーマへのwill」を起点に決める
 
-- **account-serviceの所有物**: コマンド処理・DSQL書き込み・Outbox Relay(Scheduler+Lambda)・
-  EventBridgeへの`PutEvents`とドメインイベントスキーマ(`Event`/`DomainError`)のSchema Registry
-  への登録。
+- **account-serviceの所有物**: コマンド処理・DynamoDB書き込み・Outbox投影(DynamoDB Streams+
+  Lambda)・EventBridgeへの`PutEvents`とドメインイベントスキーマ(`Event`/`DomainError`)の
+  Schema Registryへの登録。
 - **Query Serviceの所有物**: EventBridge Rule(購読条件)・Query Projector(イベント→view変換)・
   DynamoDB(view格納)・照会API・Viewスキーマそのもの。
 
@@ -84,18 +80,19 @@ Viewを要求するのはWeb/モバイルアプリであり、それに応える
 経由して`evolve`を呼び出し、状態遷移ロジックを複製しない(`projection::view_from_event`)。
 
 DynamoDBのアイテムは`accountId`(PK)・`view`(JSON文字列、Query APIのレスポンスそのもの)・
-`lastEventAt`/`lastEventId`(決定5の冪等性チェック用)を持つ。DynamoDBを選ぶ理由は「キーバリュー
-だから」ではなく、「DSQL側の正規化された行をそのまま複製するのではなく、Query APIが返すべき形に
-変換してから格納する」ことが目的だからという位置づけにする。
+`lastEventAt`/`lastEventId`(決定5の冪等性チェック用)を持つ。account-service側の`accounts`
+テーブル(正規化された1口座1アイテム、[[0013-migrate-account-service-off-aurora-dsql]])を
+そのまま複製するのではなく、Query APIが返すべき形に変換してから格納することが目的である。
 
 ### 5. 冪等な適用はlast-writer-wins方式を採る
 
-アウトボックスはat-least-once配信かつ順序を保証しない。
-[DSQL CDCの公式ガイダンス](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/cdc-streams.html)
-が推奨する方式(受信側が保持するタイムスタンプより新しい場合のみ上書きする)をそのまま踏襲し、
-DynamoDBの`ConditionExpression`(`attribute_not_exists(accountId) OR lastEventAt < :occurredAt`)
-で実現する。条件不成立(古い/重複したイベント)はエラーではなく正常系として扱う——最終的に
-last-writer-winsで正しい状態に収束する。
+EventBridgeへの発行はat-least-once配信であり、また`account_events`テーブルの複数の項目
+(=複数のイベント)がDynamoDB Streamsの別々のシャードで並行に処理されうるため、Query
+Projectorへの到達順序はイベントの発生順序と一致するとは限らない。そのため、受信側が保持する
+タイムスタンプより新しい場合のみ上書きする、という方式を採る。DynamoDBの`ConditionExpression`
+(`attribute_not_exists(accountId) OR lastEventAt < :occurredAt`)で実現する。条件不成立
+(古い/重複したイベント)はエラーではなく正常系として扱う——最終的にlast-writer-winsで
+正しい状態に収束する。
 
 ### 6. Query APIはLambdaを介さず、API Gateway REST APIからDynamoDBへ直接統合する
 
@@ -124,20 +121,19 @@ API Gateway→SQS直接統合は枯れたAWSパターンで技術的リスクが
 
 ## 結果整合性のトレードオフ
 
-EventBridge Schedulerの下限が1分であるため、コマンドがDSQLへコミットされてからQuery Serviceの
-viewに反映されるまで最大約1分の遅延が生じる。これは[[0001-service-boundaries-and-event-driven-integration]]
-が元々認めていた結果整合性のトレードオフ(「口座に反映されたはずの取引がまだ照会に出ない」という
-UXへの説明責任)の実測値である。
+DynamoDB Streams駆動のため、コマンドが`accounts`/`account_events`へコミットされてから
+Query Serviceのviewに反映されるまでの遅延は近リアルタイム(概ね秒未満〜数秒)になる見込みで
+あり、正確な値は実装・実測で確定させる([[0013-migrate-account-service-off-aurora-dsql]])。
+遅延がゼロになるわけではなく、[[0001-service-boundaries-and-event-driven-integration]]が
+元々認めていた結果整合性のトレードオフ(「口座に反映されたはずの取引がまだ照会に出ない」という
+UXへの説明責任)自体は引き続き成立する。
 
 ## 却下した代替案
 
-- **DSQL CDC(Kinesis配信)**: コスト方針と非互換のため不採用(決定1)。
 - **コミット直後に直接PutEvents(アウトボックスなし)**: `PutEvents`失敗時にイベントが永久に
   失われるリスクがあり、ADR-0002の「サイレントなデータロスを許さない」方針に反するため不採用。
-- **account-service自身の同期GET**(`GET /accounts/{id}`がDSQLを直接SELECTする): 「すべて
-  API経由、DSQL直接照会は不可」という方針のもとQuery serviceに一本化し、廃止した。
-- **別のDSQLクラスタを読み取りモデルに使う**: コスト的には排除されないが、境界づけられた
-  コンテキストごとに適切なデータ形状のストアを選ぶという対比を見せる意図でDynamoDBを採用した
-  (決定4)。
+- **account-service自身の同期GET**(`GET /accounts/{id}`がaccount-serviceのテーブルを直接
+  読む): 「すべてAPI経由、他サービスのストアへの直接照会は不可」という方針のもとQuery
+  serviceに一本化し、廃止した。
 - **EventBridge Pipes**: 決定7の理由により不採用。
 - **GraphQL/AppSync**: 決定6の理由により今回は見送り。

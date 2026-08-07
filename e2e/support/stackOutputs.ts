@@ -4,19 +4,21 @@
 import { CloudFormationClient, DescribeStacksCommand } from "@aws-sdk/client-cloudformation";
 
 export const STACK_NAME = "MonetaAccountPipelineStack";
-// Aurora DSQL availability and this PoC's AWS session are both scoped to ap-northeast-1
-// (Tokyo) -- see infra/bin/infra.ts.
+// This PoC's AWS session is scoped to ap-northeast-1 (Tokyo) -- see infra/bin/infra.ts.
 export const REGION = "ap-northeast-1";
 
 export interface StackOutputs {
-  clusterEndpoint: string;
+  // account-service自身の永続化(docs/adr/0013)。
+  accountsTableName: string;
+  accountEventsTableName: string;
+  processedMessagesTableName: string;
   commandQueueUrl: string;
   deadLetterQueueUrl: string;
   accountViewTableName: string;
   accountHistoryTableName: string;
   commandApiUrl: string;
   queryApiUrl: string;
-  outboxRelayFunctionName: string;
+  outboxProjectorFunctionName: string;
   // Transfer service(docs/adr/0010・0011)。
   transferCommandQueueUrl: string;
   transferSagaTableName: string;
@@ -24,14 +26,16 @@ export interface StackOutputs {
 }
 
 const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
-  clusterEndpoint: "ClusterEndpoint",
+  accountsTableName: "AccountsTableName",
+  accountEventsTableName: "AccountEventsTableName",
+  processedMessagesTableName: "ProcessedMessagesTableName",
   commandQueueUrl: "CommandQueueUrl",
   deadLetterQueueUrl: "DeadLetterQueueUrl",
   accountViewTableName: "AccountViewTableName",
   accountHistoryTableName: "AccountHistoryTableName",
   commandApiUrl: "CommandApiUrl",
   queryApiUrl: "QueryApiUrl",
-  outboxRelayFunctionName: "OutboxRelayFunctionName",
+  outboxProjectorFunctionName: "OutboxProjectorFunctionName",
   transferCommandQueueUrl: "TransferCommandQueueUrl",
   transferSagaTableName: "TransferSagaTableName",
   transferAccountOwnersTableName: "TransferAccountOwnersTableName",

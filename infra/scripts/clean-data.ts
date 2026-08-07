@@ -11,66 +11,10 @@ import {
   ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { PurgeQueueCommand, PurgeQueueInProgress, SQSClient } from "@aws-sdk/client-sqs";
-import { DsqlSigner } from "@aws-sdk/dsql-signer";
-import { Client as PgClient } from "pg";
 import { fetchStackOutputs, REGION, STACK_NAME, StackOutputs } from "../support/stackOutputs";
 
 export { fetchStackOutputs };
 export type { StackOutputs };
-
-// crates/account-service/schema.sql. No FK relationships between these, so delete order
-// doesn't matter, but processed_messages (the idempotency-key dedup table) must be cleared
-// too or replaying an Idempotency-Key after a reset silently no-ops.
-const DSQL_TABLES = ["account_events", "processed_messages", "accounts"] as const;
-
-// SQLSTATEs Aurora DSQL uses for optimistic-concurrency conflicts (docs/adr/0002).
-const OCC_SQLSTATES = new Set(["OC000", "OC001", "40001"]);
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function execWithOccRetry(client: PgClient, sql: string, maxAttempts = 3): Promise<number> {
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      const result = await client.query(sql);
-      return result.rowCount ?? 0;
-    } catch (err) {
-      const code = (err as { code?: string }).code;
-      if (code && OCC_SQLSTATES.has(code) && attempt < maxAttempts) {
-        await sleep(200 * attempt);
-        continue;
-      }
-      throw err;
-    }
-  }
-}
-
-// Deletes require the DSQL *admin* role: the runtime app role (account_service_app) only
-// has SELECT/INSERT/UPDATE granted, not DELETE (crates/account-service/src/bin/schema_migrator.rs).
-export async function cleanDsql(outputs: StackOutputs): Promise<Record<string, number>> {
-  const signer = new DsqlSigner({ hostname: outputs.clusterEndpoint, region: REGION });
-  const token = await signer.getDbConnectAdminAuthToken();
-  const client = new PgClient({
-    host: outputs.clusterEndpoint,
-    port: 5432,
-    database: "postgres",
-    user: "admin",
-    password: token,
-    ssl: true,
-  });
-
-  await client.connect();
-  try {
-    const counts: Record<string, number> = {};
-    for (const table of DSQL_TABLES) {
-      counts[table] = await execWithOccRetry(client, `DELETE FROM ${table}`);
-    }
-    return counts;
-  } finally {
-    await client.end();
-  }
-}
 
 interface DynamoTableSpec {
   tableName: string;
@@ -124,9 +68,14 @@ async function clearDynamoTable(doc: DynamoDBDocumentClient, spec: DynamoTableSp
 
 export async function cleanDynamoDb(outputs: StackOutputs): Promise<Record<string, number>> {
   const doc = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
-  // infra/lib/account-pipeline-stack.ts: AccountViewTable's key is accountId only;
-  // AccountHistoryTable's key is accountId + sk (docs/adr/0009).
+  // infra/lib/account-pipeline-stack.ts: account-service自身の3テーブル(docs/adr/0013)。
+  // processedMessages(冪等性キーの重複排除テーブル)もクリアしないと、リセット後に
+  // 同じIdempotency-Keyを再送してもサイレントにno-opしてしまう。AccountViewTable's key is
+  // accountId only; AccountHistoryTable's key is accountId + sk (docs/adr/0009)。
   const specs: DynamoTableSpec[] = [
+    { tableName: outputs.accountsTableName, keyAttributes: ["accountId"] },
+    { tableName: outputs.accountEventsTableName, keyAttributes: ["eventId"] },
+    { tableName: outputs.processedMessagesTableName, keyAttributes: ["messageId"] },
     { tableName: outputs.accountViewTableName, keyAttributes: ["accountId"] },
     { tableName: outputs.accountHistoryTableName, keyAttributes: ["accountId", "sk"] },
   ];
@@ -155,7 +104,7 @@ export async function cleanSqs(outputs: StackOutputs): Promise<void> {
   }
 }
 
-const CLEAN_TARGETS = ["dsql", "dynamodb", "sqs"] as const;
+const CLEAN_TARGETS = ["dynamodb", "sqs"] as const;
 type CleanTarget = (typeof CLEAN_TARGETS)[number];
 
 function parseArgs(argv: string[]): { yes: boolean; only: CleanTarget[] } {
@@ -201,11 +150,11 @@ async function main(): Promise<void> {
   const outputs = await fetchStackOutputs();
 
   console.log("\nThis will permanently delete data from:");
-  if (only.includes("dsql")) {
-    console.log(`  - DSQL cluster ${outputs.clusterEndpoint}: tables ${DSQL_TABLES.join(", ")}`);
-  }
   if (only.includes("dynamodb")) {
-    console.log(`  - DynamoDB tables: ${outputs.accountViewTableName}, ${outputs.accountHistoryTableName}`);
+    console.log(
+      `  - DynamoDB tables: ${outputs.accountsTableName}, ${outputs.accountEventsTableName}, ` +
+        `${outputs.processedMessagesTableName}, ${outputs.accountViewTableName}, ${outputs.accountHistoryTableName}`,
+    );
   }
   if (only.includes("sqs")) {
     console.log(`  - SQS queues: ${outputs.commandQueueUrl}, ${outputs.deadLetterQueueUrl}`);
@@ -216,12 +165,6 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (only.includes("dsql")) {
-    const counts = await cleanDsql(outputs);
-    for (const [table, count] of Object.entries(counts)) {
-      console.log(`[dsql] deleted ${count} row(s) from ${table}`);
-    }
-  }
   if (only.includes("dynamodb")) {
     const counts = await cleanDynamoDb(outputs);
     for (const [table, count] of Object.entries(counts)) {

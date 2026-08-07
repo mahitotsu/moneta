@@ -3,7 +3,8 @@ import { Match, Template } from "aws-cdk-lib/assertions";
 import { AccountPipelineStack } from "../lib/account-pipeline-stack";
 
 // cdk synthをそのまま走らせるテスト(Rust Lambdaのビルドを含む)。docs/adr/0004のQuery service
-// 追加分(DynamoDB/EventBridge/Scheduler/REST API直接統合)が期待通り合成されることを確認する。
+// 追加分(DynamoDB/EventBridge/REST API直接統合)、docs/adr/0013のaccount-service自身の
+// DynamoDB移行が期待通り合成されることを確認する。
 describe("AccountPipelineStack", () => {
   const app = new App();
   const stack = new AccountPipelineStack(app, "TestStack", {
@@ -27,9 +28,16 @@ describe("AccountPipelineStack", () => {
     template.resourceCountIs("AWS::EventSchemas::Schema", 1);
   });
 
-  test("schedules the outbox relay at the EventBridge Scheduler's 1-minute minimum interval", () => {
-    template.hasResourceProperties("AWS::Scheduler::Schedule", {
-      ScheduleExpression: "rate(1 minute)",
+  // docs/adr/0013: ポーリング(EventBridge Scheduler)ではなく、accountEventsTableの
+  // DynamoDB Streamsが直接outbox projectorをトリガーする。
+  test("account_events table has a stream, and the outbox projector is wired to it via an event source mapping", () => {
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      TableName: "moneta-account-events",
+      StreamSpecification: { StreamViewType: "NEW_IMAGE" },
+    });
+    template.hasResourceProperties("AWS::Lambda::EventSourceMapping", {
+      StartingPosition: "TRIM_HORIZON",
+      FunctionResponseTypes: ["ReportBatchItemFailures"],
     });
   });
 
@@ -58,17 +66,21 @@ describe("AccountPipelineStack", () => {
   });
 
   // dynamodb.TableのデフォルトはRemovalPolicy.RETAINで、これを明示しないと変更セットの
-  // ロールバック時にもテーブルが削除されない。実際にこれが原因で、スキーマ移行失敗による
+  // ロールバック時にもテーブルが削除されない。実際にこれが原因で、テーブル作成失敗による
   // ロールバック後の再デプロイが「テーブルは既に存在する」で失敗した(TransferSagaTable)。
-  // 4つ全てのDynamoDBテーブルがこの落とし穴を回避できているかを固定する回帰テスト
-  // (docs/adr/0011でTransferAccountOwnersTableを追加)。
-  test("all four DynamoDB tables are set to DESTROY on stack/changeset rollback, not the RETAIN default", () => {
+  // 全てのDynamoDBテーブルがこの落とし穴を回避できているかを固定する回帰テスト
+  // (docs/adr/0011でTransferAccountOwnersTableを、docs/adr/0013でaccount-service自身の
+  // 3テーブルを追加)。
+  test("all DynamoDB tables are set to DESTROY on stack/changeset rollback, not the RETAIN default", () => {
     const tables = template.findResources("AWS::DynamoDB::Table");
     const tableNames = Object.values(tables).map((table) => table.Properties.TableName);
     expect(tableNames.sort()).toEqual(
       [
+        "moneta-account-events",
         "moneta-account-history",
         "moneta-account-views",
+        "moneta-accounts",
+        "moneta-processed-messages",
         "moneta-transfer-account-owners",
         "moneta-transfer-sagas",
       ].sort(),
@@ -99,7 +111,7 @@ describe("AccountPipelineStack", () => {
     });
   });
 
-  test("transfer-service functions may send to the account command queue but never get dsql:DbConnect", () => {
+  test("transfer-service functions may send to the account command queue (docs/adr/0010決定1: account-serviceへは公開インターフェース経由でしか関わらない)", () => {
     template.hasResourceProperties("AWS::IAM::Policy", {
       PolicyDocument: {
         Statement: Match.arrayWith([
@@ -109,42 +121,34 @@ describe("AccountPipelineStack", () => {
         ]),
       },
     });
-    // account-serviceの命令経路と同じく、transfer-serviceもDSQLへは一切触れない
-    // (docs/adr/0010決定1: account-serviceへは公開インターフェース経由でしか関わらない)。
+  });
+
+  test("creates exactly eight Lambda functions: write path, outbox projector, query projector, the three transfer-service functions (command intake, saga step, owner projector), and the two Web UI hosting custom-resource handlers (S3 auto-delete-objects, BucketDeployment sync)", () => {
+    template.resourceCountIs("AWS::Lambda::Function", 8);
+  });
+
+  // docs/adr/0013: grantReadWriteData()はdynamodb:TransactWriteItemsを含まないため
+  // (AWS公式ドキュメントで確認済み)、明示的に別途grantしている。account-serviceの3テーブル
+  // 全てに対してこの権限が付与されていることを固定する回帰テスト。CDKは同一プリンシパルへの
+  // 複数grantを1つのIAM::Policyリソースにまとめるため、ステートメント数(リソースARN単位)で
+  // 数える。
+  test("account-service gets an explicit dynamodb:TransactWriteItems grant covering all three of its own tables (not covered by grantReadWriteData)", () => {
     const policies = template.findResources("AWS::IAM::Policy");
-    const transferPolicies = Object.entries(policies).filter(([id]) => id.includes("Transfer"));
-    for (const [, policy] of transferPolicies) {
-      const statements = policy.Properties.PolicyDocument.Statement as Array<{ Action: string | string[] }>;
+    const transactWriteResources = new Set<string>();
+    for (const policy of Object.values(policies)) {
+      const statements = policy.Properties.PolicyDocument.Statement as Array<{
+        Action: string | string[];
+        Resource: unknown;
+      }>;
       for (const statement of statements) {
         const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
-        expect(actions).not.toContain("dsql:DbConnect");
+        if (actions.includes("dynamodb:TransactWriteItems")) {
+          const resources = Array.isArray(statement.Resource) ? statement.Resource : [statement.Resource];
+          resources.forEach((r) => transactWriteResources.add(JSON.stringify(r)));
+        }
       }
     }
-  });
-
-  test("creates exactly ten Lambda functions: write path, outbox relay, query projector, schema migrator, the three transfer-service functions (command intake, saga step, owner projector), the schema Provider framework's own handler, and the two Web UI hosting custom-resource handlers (S3 auto-delete-objects, BucketDeployment sync)", () => {
-    template.resourceCountIs("AWS::Lambda::Function", 10);
-  });
-
-  test("applies the schema via a Custom Resource, granting only the two DSQL-connecting Lambdas' roles", () => {
-    template.hasResourceProperties("AWS::CloudFormation::CustomResource", {
-      LambdaRoleArns: [
-        { "Fn::GetAtt": Match.arrayWith(["AccountServiceFunctionServiceRole41347123"]) },
-        { "Fn::GetAtt": Match.arrayWith(["AccountOutboxRelayFunctionServiceRoleC6C7598E"]) },
-      ],
-    });
-  });
-
-  test("the schema migrator gets dsql:DbConnectAdmin, not the regular dsql:DbConnect", () => {
-    template.resourcePropertiesCountIs(
-      "AWS::IAM::Policy",
-      {
-        PolicyDocument: Match.objectLike({
-          Statement: Match.arrayWith([Match.objectLike({ Action: "dsql:DbConnectAdmin" })]),
-        }),
-      },
-      1,
-    );
+    expect(transactWriteResources.size).toBe(3);
   });
 
   test("exposes GET /accounts/{accountId} as a direct DynamoDB integration, not a Lambda proxy", () => {
@@ -196,16 +200,18 @@ describe("AccountPipelineStack", () => {
     });
   });
 
-  test("only account-service and the outbox relay get dsql:DbConnect (query projector never touches DSQL)", () => {
-    template.resourcePropertiesCountIs(
-      "AWS::IAM::Policy",
-      {
-        PolicyDocument: Match.objectLike({
-          Statement: Match.arrayWith([Match.objectLike({ Action: "dsql:DbConnect" })]),
-        }),
-      },
-      2,
-    );
+  // docs/adr/0004・0013: query projectorはEventBridgeのdetailだけで完結し、
+  // account-serviceの内部ストア(accountsTable等)への読み取り権限を一切持たない。
+  test("query projector never gets IAM access to account-service's own tables (accountsTable/accountEventsTable/processedMessagesTable)", () => {
+    const policies = template.findResources("AWS::IAM::Policy");
+    const queryProjectorPolicies = Object.entries(policies).filter(([id]) => id.includes("QueryProjector"));
+    for (const [, policy] of queryProjectorPolicies) {
+      const statements = policy.Properties.PolicyDocument.Statement as Array<{ Resource: unknown }>;
+      for (const statement of statements) {
+        const resources = JSON.stringify(statement.Resource);
+        expect(resources).not.toMatch(/AccountsTable|AccountEventsTable|ProcessedMessagesTable/);
+      }
+    }
   });
 
   // docs/adr/0006決定5: 金額の精度は小数点以下2桁まで(実デプロイでDBラウンドトリップ由来の

@@ -1,34 +1,26 @@
-import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import * as cdk from "aws-cdk-lib/core";
 import { Construct } from "constructs";
 import * as apigateway from "aws-cdk-lib/aws-apigateway";
-import * as customResources from "aws-cdk-lib/custom-resources";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
-import * as dsql from "aws-cdk-lib/aws-dsql";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
 import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as eventschemas from "aws-cdk-lib/aws-eventschemas";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as lambda from "aws-cdk-lib/aws-lambda";
-import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
+import { SqsDestination } from "aws-cdk-lib/aws-lambda-destinations";
+import { DynamoEventSource, SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
-import * as scheduler from "aws-cdk-lib/aws-scheduler";
 import * as sqs from "aws-cdk-lib/aws-sqs";
 
-// ADR-0002: maxReceiveCount is kept low. The two-stage retry (in-Lambda retry_on_occ,
-// then SQS-level redelivery) means only failures that survive 3 in-process OCC retries
-// ever reach SQS, so a long SQS-level retry budget isn't needed.
+// ADR-0002: maxReceiveCount is kept low. The two-stage retry (in-Lambda retry loop on
+// optimistic-lock conflicts, then SQS-level redelivery) means only failures that survive
+// 3 in-process retries ever reach SQS, so a long SQS-level retry budget isn't needed.
 const MAX_RECEIVE_COUNT = 3;
-
-// DSQL runtime connections must use a non-admin custom role (dsql:DbConnect), not the
-// admin role (dsql:DbConnectAdmin, reserved for schema setup -- see the
-// AccountSchemaMigratorFunction custom resource below, docs/adr/0005).
-const APP_DB_ROLE = "account_service_app";
 
 // EventBridge (docs/adr/0004): account-serviceが発行するドメインイベントスキーマの契約名。
 const EVENT_SOURCE = "account-service";
@@ -51,10 +43,11 @@ export class AccountPipelineStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    // Rust製4バイナリ(account-service, account-outbox-relay, account-schema-migratorは
-    // account-serviceパッケージ、account-query-projectorはquery-serviceパッケージ——
-    // docs/adr/0008でクレートを分離した)は全て同じワークスペースルート・同じ手順でビルド
-    // するため、パッケージ名・バイナリ名だけを差し替えられるヘルパーに切り出して重複を避ける。
+    // Rust製6バイナリ(account-service・account-outbox-projectorはaccount-serviceパッケージ、
+    // account-query-projectorはquery-serviceパッケージ——docs/adr/0008でクレートを分離した、
+    // transfer-command-intake・transfer-saga-step・transfer-owner-projectorはtransfer-service
+    // パッケージ)は全て同じワークスペースルート・同じ手順でビルドするため、パッケージ名・
+    // バイナリ名だけを差し替えられるヘルパーに切り出して重複を避ける。
     //
     // このビルドは(ホストもLambdaターゲットもx86_64なので)CPUアーキテクチャの変換ではなく、
     // glibcバージョンの互換性のために必要——このリポジトリの開発ホストはLambdaのprovided.al2023
@@ -115,13 +108,35 @@ export class AccountPipelineStack extends cdk.Stack {
         },
       });
 
-    // --- Aurora DSQL cluster -------------------------------------------------
-    // No L2 construct exists yet for DSQL (aws/aws-cdk#34593), so this uses the L1
-    // CfnCluster directly. Single-Region cluster; deletion protection is off because
-    // this is a PoC stack that needs to be torn down freely, not a production cluster.
-    const cluster = new dsql.CfnCluster(this, "AccountCluster", {
-      deletionProtectionEnabled: false,
-      tags: [{ key: "Project", value: "moneta-poc" }],
+    // --- [account-service所有] 永続化ストア(DynamoDB、docs/adr/0013) ----------
+    // account-serviceの書き込み側は3テーブルで完結する: 1口座1アイテムのaccounts、
+    // 追記専用のイベントログ(アウトボックス)であるaccountEvents、冪等性ログの
+    // processedMessages。1メッセージにつき1回のTransactWriteItemsでこの3テーブルへ
+    // 原子的に書き込む(persistence.rsのapply_command)。
+    const accountsTable = new dynamodb.Table(this, "AccountsTable", {
+      tableName: "moneta-accounts",
+      partitionKey: { name: "accountId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      // PoCスタックのため自由に壊せるようにする(他のDynamoDBテーブルと同じ方針)。
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    // account_eventsはDynamoDB Streamsでaccount-outbox-projectorへ配信する
+    // (トランザクショナルアウトボックス、docs/adr/0004・0013)。NEW_IMAGEのみで足りる
+    // (追記専用ログであり、更新前の値を見る必要がない)。
+    const accountEventsTable = new dynamodb.Table(this, "AccountEventsTable", {
+      tableName: "moneta-account-events",
+      partitionKey: { name: "eventId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      stream: dynamodb.StreamViewType.NEW_IMAGE,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    const processedMessagesTable = new dynamodb.Table(this, "ProcessedMessagesTable", {
+      tableName: "moneta-processed-messages",
+      partitionKey: { name: "messageId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
     // --- SQS FIFO queue + DLQ -------------------------------------------------
@@ -158,9 +173,9 @@ export class AccountPipelineStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(30),
       code: rustLambdaCode("account-service", "account-service"),
       environment: {
-        // No password: aurora-dsql-sqlx-connector generates and injects a short-lived
-        // IAM auth token per connection using the Lambda execution role's credentials.
-        DATABASE_URL: `postgres://${APP_DB_ROLE}@${cluster.attrEndpoint}:5432/postgres?sslmode=require`,
+        ACCOUNTS_TABLE_NAME: accountsTable.tableName,
+        EVENTS_TABLE_NAME: accountEventsTable.tableName,
+        PROCESSED_MESSAGES_TABLE_NAME: processedMessagesTable.tableName,
       },
     });
 
@@ -172,13 +187,22 @@ export class AccountPipelineStack extends cdk.Stack {
       }),
     );
 
-    // --- IAM: DSQL DbConnect (non-admin) for the Lambda execution role --------
-    fn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["dsql:DbConnect"],
-        resources: [cluster.attrResourceArn],
-      }),
-    );
+    // --- IAM: DynamoDB(docs/adr/0013) ------------------------------------------
+    // grantReadWriteData()はdynamodb:TransactWriteItemsを含まない(AWS公式ドキュメントで
+    // 確認済み)ため、TransactWriteItemsを使う3テーブルには明示的に別途grantする。
+    //
+    // 実機検証で判明: dynamodb:TransactWriteItemsを許可するだけでは不十分で、AWSのIAM認可は
+    // TransactWriteItems自体に加えて、各TransactItemが実際に行う個別アクション(Put→PutItem、
+    // Update→UpdateItem、ConditionCheck→ConditionCheckItem)も要求する(実デプロイで
+    // AccessDeniedExceptionとして発見: 「no identity-based policy allows the
+    // dynamodb:PutItem action」)。公式ドキュメントの一般的な記述だけでは気づけなかった挙動で、
+    // CLAUDE.mdの「AWS/ライブラリの挙動は推測せず検証する」を地で行く形になった。
+    accountsTable.grantReadWriteData(fn); // GetItem(読み込み) + PutItem/UpdateItem(新規/既存の書き込み)
+    accountsTable.grant(fn, "dynamodb:TransactWriteItems", "dynamodb:ConditionCheckItem");
+    accountEventsTable.grantWriteData(fn); // PutItem(イベント追記)
+    accountEventsTable.grant(fn, "dynamodb:TransactWriteItems");
+    processedMessagesTable.grantWriteData(fn); // PutItem(冪等性ログ)
+    processedMessagesTable.grant(fn, "dynamodb:TransactWriteItems");
 
     // ==========================================================================
     // Query service (docs/adr/0004) — ADR-0001のイベント駆動連携の実証。
@@ -250,57 +274,46 @@ export class AccountPipelineStack extends cdk.Stack {
       }),
     });
 
-    // --- [account-service所有] Outbox Relay: DSQLをポーリングしてEventBridgeへ発行 ---
-    // account_events.published_atがNULLの行を1分間隔でポーリングし、EventBridgeへ発行する
-    // トランザクショナルアウトボックス(docs/adr/0004)。DSQLのCDC(Kinesis配信)はアイドル時も
-    // 固定費が発生するためコスト方針と非互換と判断し不採用、代わりにこの方式を採る。
-    const outboxRelayFn = new lambda.Function(this, "AccountOutboxRelayFunction", {
+    // --- [account-service所有] Outbox Projector: DynamoDB StreamsでEventBridgeへ発行 ---
+    // accountEventsTableのDynamoDB Streams(NEW_IMAGE)をトリガーに、直接PutEventsする
+    // トランザクショナルアウトボックス(docs/adr/0004・0013)。DynamoDB Streams自体には
+    // 稼働の有無によらない時間課金がなく、Lambdaトリガー経由の読み取りは無料(AWS公式
+    // ドキュメントで確認済み)なので、ポーリングを挟む理由がない。
+    const outboxProjectorDlq = new sqs.Queue(this, "AccountOutboxProjectorDlq");
+
+    const outboxProjectorFn = new lambda.Function(this, "AccountOutboxProjectorFunction", {
       runtime: lambda.Runtime.PROVIDED_AL2023,
       architecture: lambda.Architecture.X86_64,
       handler: "bootstrap",
       timeout: cdk.Duration.seconds(30),
-      code: rustLambdaCode("account-service", "account-outbox-relay"),
+      code: rustLambdaCode("account-service", "account-outbox-projector"),
       environment: {
-        DATABASE_URL: `postgres://${APP_DB_ROLE}@${cluster.attrEndpoint}:5432/postgres?sslmode=require`,
         EVENT_BUS_NAME: domainEventBus.eventBusName,
       },
     });
 
-    domainEventBus.grantPutEventsTo(outboxRelayFn);
+    domainEventBus.grantPutEventsTo(outboxProjectorFn);
 
-    outboxRelayFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["dsql:DbConnect"],
-        resources: [cluster.attrResourceArn],
+    outboxProjectorFn.addEventSource(
+      new DynamoEventSource(accountEventsTable, {
+        startingPosition: lambda.StartingPosition.TRIM_HORIZON,
+        batchSize: 10, // EventBridge PutEventsの1リクエストあたり上限と揃える
+        retryAttempts: 3,
+        reportBatchItemFailures: true,
+        onFailure: new SqsDestination(outboxProjectorDlq),
       }),
     );
 
-    const outboxRelaySchedulerRole = new iam.Role(this, "OutboxRelaySchedulerRole", {
-      assumedBy: new iam.ServicePrincipal("scheduler.amazonaws.com"),
-    });
-    outboxRelayFn.grantInvoke(outboxRelaySchedulerRole);
-
-    // EventBridge Schedulerの下限は1分。約1分の反映遅延は、ADR-0001が元々許容していた
-    // 結果整合性のトレードオフとして受け入れる(docs/adr/0004)。
-    new scheduler.CfnSchedule(this, "OutboxRelaySchedule", {
-      scheduleExpression: "rate(1 minute)",
-      flexibleTimeWindow: { mode: "OFF" },
-      target: {
-        arn: outboxRelayFn.functionArn,
-        roleArn: outboxRelaySchedulerRole.roleArn,
-      },
-    });
-
     // --- [Query Service所有] 読み取りモデル(DynamoDB) -------------------------
-    // 「キーバリューだから」ではなく、DSQL側の正規化された行をQuery APIがそのまま返せる
-    // view(JSON)に変換して格納する場所として選んでいる(docs/adr/0004)。on-demand課金
-    // なのでアイドル時の固定費はない。
+    // account-serviceのaccountsテーブル(正規化された1口座1アイテム)をそのまま複製するの
+    // ではなく、Query APIがそのまま返せるview(JSON)に変換して格納する場所として選んでいる
+    // (docs/adr/0004)。on-demand課金なのでアイドル時の固定費はない。
     const accountViewTable = new dynamodb.Table(this, "AccountViewTable", {
       tableName: "moneta-account-views",
       partitionKey: { name: "accountId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      // PoCスタックのため自由に壊せるようにする(DSQLクラスタのdeletionProtectionEnabled:
-      // falseと同じ方針)。dynamodb.TableのデフォルトはRemovalPolicy.RETAINであり、
+      // PoCスタックのため自由に壊せるようにする(他のリソースと同じ方針)。
+      // dynamodb.TableのデフォルトはRemovalPolicy.RETAINであり、
       // 明示しないと変更セットのロールバック時にも削除されず、同名テーブルの再作成が
       // 「already exists」で失敗する(実デプロイで発見——TransferSagaTableの同種の事故を
       // 修正した際にこちらも同じ問題を抱えていることに気づいた)。
@@ -333,7 +346,8 @@ export class AccountPipelineStack extends cdk.Stack {
 
     accountViewTable.grantWriteData(queryProjectorFn);
     accountHistoryTable.grantWriteData(queryProjectorFn);
-    // account-serviceのDSQLクラスタへは一切アクセスしない(EventBridgeのdetailだけで完結)。
+    // account-serviceの内部ストア(accountsTable等)へは一切アクセスしない(EventBridgeの
+    // detailだけで完結)。
 
     // --- [Query Service所有] EventBridge Rule(購読条件) -----------------------
     // 「どのイベント種別がview構築に必要か」はQuery Service自身の関心事なので、Ruleは
@@ -691,14 +705,14 @@ export class AccountPipelineStack extends cdk.Stack {
 
     // --- [Transfer service所有] サガ状態(DynamoDB) ----------------------------
     // Query serviceと同じ技術選択だが理由は別(docs/adr/0010決定2): サガの状態更新は常に
-    // 「1つのtransferIdにつき1アイテム」の読み書きで完結し、DSQLのリレーショナル・
-    // トランザクション機構は不要なため。
+    // 「1つのtransferIdにつき1アイテム」の読み書きで完結し、リレーショナル・トランザクション
+    // 機構は不要なため。
     const transferSagaTable = new dynamodb.Table(this, "TransferSagaTable", {
       tableName: "moneta-transfer-sagas",
       partitionKey: { name: "transferId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      // PoCスタックのため自由に壊せるようにする(DSQLクラスタのdeletionProtectionEnabled:
-      // falseと同じ方針)。省略するとRemovalPolicy.RETAINになり、変更セットのロールバック時にも
+      // PoCスタックのため自由に壊せるようにする(他のリソースと同じ方針)。省略すると
+      // RemovalPolicy.RETAINになり、変更セットのロールバック時にも
       // 削除されない——実際にこれが原因で、スキーマ移行失敗によるロールバック後の再デプロイが
       // 「moneta-transfer-sagasは既に存在する」で失敗した。
       removalPolicy: cdk.RemovalPolicy.DESTROY,
@@ -814,59 +828,6 @@ export class AccountPipelineStack extends cdk.Stack {
       targets: [new targets.LambdaFunction(transferOwnerProjectorFn)],
     });
 
-    // --- スキーマ適用(CDK Custom Resource、docs/adr/0005) ----------------------
-    // かつては`infra/scripts/apply-schema.sh`をデプロイ後に手動実行する運用だったが、
-    // outbox relay用のロール追加をスクリプト更新し忘れたまま実AWSにデプロイし、DSQLへの接続が
-    // access deniedになる不具合を実際に起こした。デプロイ自体にスキーマ適用を組み込み、
-    // 手動手順を無くす。CREATE TABLE IF NOT EXISTS / ALTER TABLE ADD COLUMN IF NOT EXISTSは
-    // 公式ドキュメントでべき等性を確認済み(schema.sql参照)。CREATE ROLE・AWS IAM GRANTは
-    // べき等な構文が無いため、Lambda側で「既に存在する」系のエラーを捕捉して無視する。
-    const schemaMigratorFn = new lambda.Function(this, "AccountSchemaMigratorFunction", {
-      runtime: lambda.Runtime.PROVIDED_AL2023,
-      architecture: lambda.Architecture.X86_64,
-      handler: "bootstrap",
-      timeout: cdk.Duration.seconds(30),
-      code: rustLambdaCode("account-service", "account-schema-migrator"),
-    });
-    schemaMigratorFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        // 通常のdsql:DbConnectとは別のIAMアクション(admin接続専用)。
-        actions: ["dsql:DbConnectAdmin"],
-        resources: [cluster.attrResourceArn],
-      }),
-    );
-
-    const schemaMigrationProvider = new customResources.Provider(this, "AccountSchemaMigrationProvider", {
-      onEventHandler: schemaMigratorFn,
-    });
-
-    // schema.sqlの内容またはグラント対象ロールの一覧が変わるたびに、CloudFormationが
-    // ResourceProperties変更とみなしUpdateイベントを発火させる(=再適用される)ようにする
-    // ためだけのトリガー値。値そのものにLambda側では意味を持たせていない。
-    const schemaSqlPath = path.join(repoRoot, "crates", "account-service", "schema.sql");
-    const lambdaRoleArnsNeedingDsqlAccess = [fn.role!.roleArn, outboxRelayFn.role!.roleArn];
-    const migrationTrigger = crypto
-      .createHash("sha256")
-      .update(fs.readFileSync(schemaSqlPath, "utf8"))
-      .update(lambdaRoleArnsNeedingDsqlAccess.join(","))
-      .digest("hex");
-
-    const schemaMigration = new cdk.CustomResource(this, "AccountSchemaMigration", {
-      serviceToken: schemaMigrationProvider.serviceToken,
-      properties: {
-        ClusterEndpoint: cluster.attrEndpoint,
-        LambdaRoleArns: lambdaRoleArnsNeedingDsqlAccess,
-        Trigger: migrationTrigger,
-      },
-    });
-
-    // account-serviceとoutbox relayは、スキーマ適用・IAM GRANTが完了して初めてDSQLへの接続に
-    // 成功する。fn/outboxRelayFnのコンストラクト全体(CDKが自動生成するIAM Roleを含む)に
-    // 明示的な依存を張ろうとすると、そのRoleのARNをschemaMigration自身がLambdaRoleArnsとして
-    // 参照しているため循環依存になる(試して実際に検出された)。そのため明示的な順序付けは
-    // 行わず、同時にデプロイされてこの2つのLambdaが先に呼ばれた場合はADR-0002の分類通り
-    // インフラ起因の失敗としてリトライに委ね、移行完了後に自然に解消させる。
-
     // ==========================================================================
     // Web UIホスティング + CloudFrontによるオリジン統合(docs/adr/0007)
     //
@@ -886,8 +847,7 @@ export class AccountPipelineStack extends cdk.Stack {
       // 出力しない(アカウントレベルの既定に委ねる)。CloudFront(OAC)経由でのみ読み取り
       // 可能にする意図を明示するため、バケット側でも明示的にBLOCK_ALLにする。
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-      // PoCスタックのため自由に壊せるようにする(DSQLクラスタのdeletionProtectionEnabled:
-      // falseと同じ方針)。
+      // PoCスタックのため自由に壊せるようにする(他のリソースと同じ方針)。
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
     });
@@ -964,15 +924,16 @@ export class AccountPipelineStack extends cdk.Stack {
     });
 
     // --- Outputs ---------------------------------------------------------------
-    new cdk.CfnOutput(this, "ClusterEndpoint", { value: cluster.attrEndpoint });
-    new cdk.CfnOutput(this, "ClusterResourceArn", { value: cluster.attrResourceArn });
+    new cdk.CfnOutput(this, "AccountsTableName", { value: accountsTable.tableName });
+    new cdk.CfnOutput(this, "AccountEventsTableName", { value: accountEventsTable.tableName });
+    new cdk.CfnOutput(this, "ProcessedMessagesTableName", { value: processedMessagesTable.tableName });
     new cdk.CfnOutput(this, "CommandQueueUrl", { value: commandQueue.queueUrl });
     new cdk.CfnOutput(this, "DeadLetterQueueUrl", { value: deadLetterQueue.queueUrl });
     new cdk.CfnOutput(this, "AccountServiceFunctionName", { value: fn.functionName });
     new cdk.CfnOutput(this, "LambdaExecutionRoleArn", { value: fn.role!.roleArn });
-    new cdk.CfnOutput(this, "OutboxRelayFunctionName", { value: outboxRelayFn.functionName });
-    new cdk.CfnOutput(this, "OutboxRelayExecutionRoleArn", { value: outboxRelayFn.role!.roleArn });
-    new cdk.CfnOutput(this, "SchemaMigratorFunctionName", { value: schemaMigratorFn.functionName });
+    new cdk.CfnOutput(this, "OutboxProjectorFunctionName", { value: outboxProjectorFn.functionName });
+    new cdk.CfnOutput(this, "OutboxProjectorExecutionRoleArn", { value: outboxProjectorFn.role!.roleArn });
+    new cdk.CfnOutput(this, "OutboxProjectorDlqUrl", { value: outboxProjectorDlq.queueUrl });
     new cdk.CfnOutput(this, "DomainEventBusName", { value: domainEventBus.eventBusName });
     new cdk.CfnOutput(this, "AccountViewTableName", { value: accountViewTable.tableName });
     new cdk.CfnOutput(this, "AccountHistoryTableName", { value: accountHistoryTable.tableName });

@@ -61,9 +61,9 @@ serviceを実装し、本物の顧客-口座関係が必要になった時点で
 
 ### 3. 取引履歴: Query Serviceに第二のread modelを追加する
 
-`schema.sql`確認の結果、DSQLの`account_events`テーブルは既に追記専用(INSERT-only)で
-実質的な取引履歴を持っていたが、[[0004-query-service-event-driven-projection]]の
-「DSQL直接照会は不可、すべてAPI経由」方針に従い、既存のcurrent-state view
+`account_events`テーブルは既に追記専用(INSERT-only)で実質的な取引履歴を持っていたが、
+[[0004-query-service-event-driven-projection]]の「他サービスのストアへの直接照会は不可、
+すべてAPI経由」方針に従い、既存のcurrent-state view
 (`AccountViewTable`、last-writer-wins)とは別に、新しいDynamoDBテーブル
 `AccountHistoryTable`(PK `accountId`、SK `sk` = ゼロパディングしたナノ秒タイムスタンプ
 + `event_id`)を追加した。これは新しいアーキテクチャパターンではなく、ADR-0004が確立した
@@ -93,5 +93,5 @@ serviceを実装し、本物の顧客-口座関係が必要になった時点で
 - **顧客-口座関係をバックエンドに実装する(`customer_id`をAccount aggregateに追加)**:
   `account-domain`のCommand::Open変更・スキーマ変更・投影ロジック変更を伴う相応の規模の
   変更になり、今回のスコープ(顧客体験の再現)に対して重すぎると判断し見送った。
-- **DSQLの`account_events`を直接照会するAPIを新設する**: ADR-0004が既に「DSQL直接照会は
-  不可、すべてAPI経由」と決定しており、この方針に反するため不採用。
+- **`account_events`を直接照会するAPIを新設する**: ADR-0004が既に「他サービスのストアへの
+  直接照会は不可、すべてAPI経由」と決定しており、この方針に反するため不採用。

@@ -8,7 +8,7 @@ This is a technology-validation PoC for a blog article, not a reference architec
 organizational rollout. Prioritize technical validity over organizational realism (review
 processes, team ownership, governance) — those are left as discussion points for the article,
 not implemented. Write path: Web UI (`web-ui/`, React) → CloudFront → API Gateway → SQS FIFO →
-Lambda (Rust) → Aurora DSQL. Read path: DSQL outbox → EventBridge → Query service
+Lambda (Rust) → DynamoDB. Read path: DynamoDB Streams outbox → EventBridge → Query service
 (Lambda + DynamoDB) → CloudFront → API Gateway → caller. CloudFront unifies the static UI and
 both APIs under one origin so the browser never needs CORS — see `0007`.
 
@@ -22,15 +22,12 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
   service integration — Notification service remains proposed/out of scope; Query service is
   implemented, see `0004`; Transfer service is implemented, see `0010`.
 - `0002`: SQS FIFO message lifecycle, error classification (`DomainError` vs. infra failure),
-  transaction granularity, DLQ design, Aurora DSQL constraints — directly reflected in
-  `account-service`'s code.
+  transaction granularity, DLQ design — directly reflected in `account-service`'s code.
 - `0003`: why `account-domain` and `account-service` are separate crates, and the boundary
   between them.
-- `0004`: Query service — transactional outbox (DSQL → EventBridge), the account-service/Query
-  service ownership boundary, DynamoDB read model, and the DynamoDB-direct-integration query API.
-- `0005`: schema/role/IAM-grant setup is applied automatically on every deploy via a CDK Custom
-  Resource, not a manually-run script — `schema.sql` is the idempotent single source of truth,
-  embedded directly into the migrator Lambda.
+- `0004`: Query service — transactional outbox (DynamoDB Streams → EventBridge), the
+  account-service/Query service ownership boundary, DynamoDB read model, and the
+  DynamoDB-direct-integration query API.
 - `0006`: write-path API Gateway — Lambda-less APIGW→SQS `SendMessage` direct integration,
   client-generated account IDs, `Idempotency-Key` header, per-command REST resources.
 - `0007`: Web UI — React/TypeScript/Vite + TanStack Query, no auth UI (explicit scope
@@ -38,8 +35,8 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
   under one origin (prefix-routed via CloudFront Functions) so CORS is never needed, in prod or
   local dev.
 - `0008`: Query service extracted into its own crate (`crates/query-service`) — its
-  Cargo.toml deliberately excludes `sqlx`/`aurora-dsql-sqlx-connector`/`aws-sdk-eventbridge`,
-  so "Query service never touches DSQL" is now compiler-enforced, not just a comment.
+  Cargo.toml deliberately excludes `aws-sdk-eventbridge`, so "Query service can only subscribe
+  to events, never publish them" is compiler-enforced, not just a comment.
 - `0009`: Web UI reworked into a customer persona (dummy sign-in, localStorage-only
   account list, balance/history, self-service freeze/unfreeze/close) and a separate
   external-channel-emulator persona (ATM/incoming transfer/bill payment) that reuses the
@@ -63,6 +60,27 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
   furikomi, a per-transfer amount limit for furikomi, and recall (組戻し) modeled as a fresh
   `kind = Recall` saga rather than a new terminal state. Customer-facing API Gateway/UI remains
   out of scope, same as `0010` decision 6.
+- `0012`: Transfer service's customer-facing increment (proposed, not yet implemented) — a
+  status-query API Gateway direct-integrated to a new `TransferStatusView` table, kept
+  deliberately separate from the operational `TransferSagaTable` and populated via DynamoDB
+  Streams → a new `transfer-status-projector` Lambda (same shape as the existing
+  `transfer-owner-projector`, not a new query-service/transfer-service coupling); a command API
+  Gateway mirroring `0006`'s Lambda-less SQS pattern for `Start`/`Confirm`/`Cancel`/`Recall`;
+  and web-ui screens where the customer's own transfer history lives in localStorage only (same
+  choice `0009` made for account ownership) rather than a new server-side per-account index.
+- `0013`: account-service's persistence store is DynamoDB, not Aurora DSQL — account-service's
+  data-access pattern (single-partition-key reads/writes, one atomic multi-item write per
+  message covering account state + outbox event + idempotency log, optimistic concurrency)
+  needs none of a relational engine's distinguishing features (JOINs, CHECK/FK constraints,
+  direct SQL query access), so it's met by `TransactWriteItems` + `ConditionExpression` the same
+  way `0004`/`0010` already do. `accounts` uses AWS's documented version-attribute
+  optimistic-locking pattern; the outbox is DynamoDB Streams → a projector Lambda (same shape as
+  `0012`'s `transfer-status-projector`) instead of a polling relay; `0005`'s schema-migration
+  Custom Resource has no counterpart (DynamoDB is schemaless) and is deleted. Deployed and
+  verified against the live stack (`e2e/`, 20 suites/35 tests green) — real-deployment gotcha:
+  `dynamodb:TransactWriteItems` alone doesn't authorize a transaction; IAM also requires the
+  per-item action (`PutItem`/`UpdateItem`/`ConditionCheckItem`) granted separately, discovered
+  via `AccessDeniedException` on first deploy (ADR-0013 decision 5).
 
 ## Commands
 
@@ -77,9 +95,9 @@ cargo test -p account-domain <name>  # run a single test by name (substring matc
 cargo clippy --workspace --all-targets   # must be warning-free before considering work done
 ```
 
-There is no live Aurora DSQL instance in this environment. `account-service`'s persistence code
-(`src/persistence.rs`) is exercised only indirectly — it cannot be integration-tested here.
-Rust is installed via `rustup`; if a fresh environment lacks it, `source "$HOME/.cargo/env"`
+There are no live AWS resources in this environment. `account-service`'s persistence code
+(`src/persistence.rs`, DynamoDB) is exercised only indirectly — it cannot be integration-tested
+here. Rust is installed via `rustup`; if a fresh environment lacks it, `source "$HOME/.cargo/env"`
 after install.
 
 ```bash
@@ -128,18 +146,18 @@ backstop in case the hook isn't set up or was bypassed.
 
 `account-domain` has zero AWS/DB/async dependencies — enforced by what's absent from its
 `Cargo.toml`, not just convention. All business rules live there as pure functions.
-`account-service` holds everything else on the write path (Lambda/SQS glue, DSQL persistence
+`account-service` holds everything else on the write path (Lambda/SQS glue, DynamoDB persistence
 mapping, orchestration) and is deliberately not further split into a repository-trait layer
 (ADR-0003 explains why not, given this PoC's current scope). `query-service` is a third crate
-(ADR-0008) holding the DynamoDB projection Lambda; its Cargo.toml has no DSQL/SQS/EventBridge
-dependencies, so it cannot reach into account-service's write-path internals even accidentally.
-`transfer-service` (ADR-0010) is a fourth crate holding the cross-account transfer saga; like
-`query-service` it depends only on `account-domain` (not `account-service`) and has no DSQL
-dependency — it talks to account-service exclusively through the same public interface any
-other caller would use (SQS `SendMessage` against account-service's command queue, EventBridge
-subscription for the results), never through shared code or a shared database. If you're about
-to add a non-domain dependency to `account-domain`, or a DSQL dependency to `query-service` or
-`transfer-service`, stop — it belongs elsewhere.
+(ADR-0008) holding the DynamoDB projection Lambda; its Cargo.toml has no SQS/EventBridge-publish
+dependencies, so it cannot reach into account-service's write-path internals or independently
+publish events even accidentally. `transfer-service` (ADR-0010) is a fourth crate holding the
+cross-account transfer saga; like `query-service` it depends only on `account-domain` (not
+`account-service`) — it talks to account-service exclusively through the same public interface
+any other caller would use (SQS `SendMessage` against account-service's command queue,
+EventBridge subscription for the results), never through shared code or a shared database. If
+you're about to add a non-domain dependency to `account-domain`, or reach into another crate's
+persistence internals from `query-service` or `transfer-service`, stop — it belongs elsewhere.
 
 ### Domain model conventions (`account-domain`)
 
@@ -164,19 +182,21 @@ summary:
    When a group fails, every message in it from the failure point onward must be reported —
    never a gap.
 
-### Aurora DSQL constraints
+### DynamoDB persistence conventions
 
-The full constraint list (no `SAVEPOINT`, limited SQL surface, OCC conflict handling,
-DDL-per-transaction, etc.) lives in ADR-0002's context section — treat that as the single
-source of truth rather than copying specifics here, since at least one of them (`SELECT FOR
-UPDATE` support) was already found to be more nuanced than first assumed after checking official
-docs. `persistence.rs`'s `row_to_state`/`state_to_columns` are the only place the
-`AccountState` ⇄ DB-row mapping should live.
+`account-service` persists `AccountState` in DynamoDB: optimistic concurrency via a `version`
+attribute and `ConditionExpression` (not auto-retried by DynamoDB — the retry loop is
+application code), and one `TransactWriteItems` call per message covering the account item,
+the outbox event item, and the idempotency-log item. Full rationale lives in ADR-0002 and
+ADR-0013 — treat those as the single source of truth rather than copying specifics here.
+`persistence.rs`'s `item_to_state`/`state_to_item` are the only place the `AccountState` ⇄
+DynamoDB-item mapping should live.
 
 ### Verify AWS/library behavior before assuming it
 
 This codebase's design went through several rounds of correction where an initial assumption
 about AWS behavior (FIFO batch ordering guarantees, `ReportBatchItemFailures` default scope,
-whether an official DSQL retry helper already existed) turned out to be wrong or incomplete on
-inspection. Check current official docs and existing libraries before implementing new
-AWS-integration behavior rather than relying on general knowledge.
+whether `dynamodb:TransactWriteItems` alone authorizes a transaction's per-item actions — it
+doesn't, see ADR-0013 decision 5) turned out to be wrong or incomplete on inspection. Check
+current official docs and existing libraries before implementing new AWS-integration behavior
+rather than relying on general knowledge.

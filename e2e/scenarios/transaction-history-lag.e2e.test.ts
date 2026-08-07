@@ -1,12 +1,8 @@
 // Covers docs/e2e-scenarios.md F2 -- the transaction-history read model (AccountHistoryTable,
 // docs/adr/0009) goes through the same outbox -> EventBridge -> DynamoDB path as the current-
-// state view (docs/adr/0004), so it has the same ~90s convergence bound. Also confirms that
-// querying before the new entry lands is a normal (shorter) response, not an error.
-//
-// Like F1, the final wait passes `triggerRelay: false` -- not to measure the natural cadence
-// precisely (ADR-0004's claim is an upper bound, so converging faster, even via some unrelated
-// concurrent test's relay invocation, doesn't violate it), but so this test can't force its own
-// success by invoking the relay itself (support/relay.ts).
+// state view (docs/adr/0004・0013), so it has the same near-real-time convergence bound (DynamoDB
+// Streams, not the old EventBridge Scheduler's ~1-minute floor). Also confirms that querying
+// before the new entry lands is a normal (shorter) response, not an error.
 import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { waitFor } from "../support/poll";
@@ -14,7 +10,7 @@ import { openFreshAccount } from "../support/testAccount";
 
 describe("F2: 取引履歴も結果整合性の遅延窓を持つ", () => {
   it(
-    "入金直後の取引履歴は反映されないことがあるが、最大150秒以内に新しいエントリが現れる",
+    "入金直後の取引履歴は反映されないことがあるが、まもなく新しいエントリが現れる",
     async () => {
       const outputs = await fetchStackOutputs();
       const commandApi = createCommandApi(outputs.commandApiUrl);
@@ -35,11 +31,11 @@ describe("F2: 取引履歴も結果整合性の遅延窓を持つ", () => {
           const entries = await queryApi.getTransactionHistory(accountId);
           return entries.some((e) => e.type === "deposited" && Number(e.amount) === 10) ? entries : undefined;
         },
-        { description: `account ${accountId} history to include the new deposit`, triggerRelay: false },
+        { intervalMs: 500, description: `account ${accountId} history to include the new deposit` },
       );
 
       expect(history.length).toBe(2);
     },
-    240_000,
+    60_000,
   );
 });

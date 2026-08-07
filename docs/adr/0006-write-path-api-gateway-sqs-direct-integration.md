@@ -6,7 +6,7 @@ Accepted。`infra/lib/account-pipeline-stack.ts`の`AccountCommandApi`に直接�
 
 ## コンテキスト
 
-書き込み経路（`Web UI → API Gateway → SQS FIFO → Lambda(Rust) → Aurora DSQL`）は、API
+書き込み経路（`Web UI → API Gateway → SQS FIFO → Lambda(Rust) → DynamoDB`）は、API
 Gateway自体を除いてエンドツーエンドで実装済みだった。SQS FIFOキュー
 （`moneta-account-commands-main.fifo`）には、このマイルストーンまで実質的なプロデューサーが
 存在せず（`aws sqs send-message`を手動実行するのみ）、書き込み経路は一度も実クライアントから

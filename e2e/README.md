@@ -10,8 +10,9 @@
   ap-northeast-1にデプロイ済みであること。
 - 実行環境にそのスタックを呼び出せるAWS認証情報が設定されていること
   (`CommandApiUrl`/`QueryApiUrl`等をCloudFormationのDescribeStacksで解決する)。
-- ローカルにAurora DSQLの正確なエミュレーションが存在しないため、このE2Eはローカル
-  スタック(LocalStack等)ではなく実デプロイ環境に対してのみ実行する前提としている。
+- API GatewayのVTL直接統合・CloudFront・DynamoDB Streamsの実際の配信タイミングをローカルで
+  正確にエミュレートする手段がないため、このE2Eはローカルスタック(LocalStack等)ではなく
+  実デプロイ環境に対してのみ実行する前提としている。
 
 このディレクトリは`infra`/`web-ui`と同じく独立したTSプロジェクト(自前の`package.json`)
 であり、CDKアプリそのもの(`infra/`)には依存しない——デプロイ済みスタックのCloudFormation
@@ -35,43 +36,26 @@ npm test                     # 3. 今デプロイされている断面に対し�
 `infra`の`npm test`(CDK synthテスト、`infra/test/`)とは別プロジェクト・別Jest設定
 (`jest.config.js`)。実AWS環境を叩くため、CDK synthテストの延長では実行しない。
 
-**outbox relayの直接Invokeによる高速化(`support/relay.ts`)。** outbox relay
-(`AccountOutboxRelayFunction`)は本番ではEventBridge Schedulerで1分に1回だけ起動する
-(ADR-0004)。この1分という値はEventBridgeのrate式の仕様上のハード下限であり、本番の
-アーキテクチャ・コスト方針を変えずに縮めることはできない。そこで**本番のスケジュールは
-一切変更せず**、`support/poll.ts`の`waitFor`はデフォルトでポーリングの毎回、outbox relay
-Lambdaを直接Invokeする(`relay_once`はイベントの中身を見ないため、呼び出し元を問わない)。
-これにより、大半のシナリオの待ち時間は1分間隔ではなくrelayの実行時間程度まで縮む。
+**加速用のフックは不要になった(docs/adr/0013)。** account-serviceの永続化はAurora DSQLから
+DynamoDBへ移行し、アウトボックスもEventBridge Schedulerの1分間隔ポーリング
+(`AccountOutboxRelayFunction`)ではなく、`account_events`テーブルのDynamoDB Streamsが
+`AccountOutboxProjectorFunction`を直接トリガーする方式に変わった(ADR-0004・0013)。
+これにより結果整合性の反映は近リアルタイム(概ね秒未満〜数秒)になり、かつて存在した
+「relay Lambdaを直接Invokeして1分間隔のポーリングを迂回する」加速フック(`support/relay.ts`、
+`waitFor`の`triggerRelay`オプション)は不要になったため削除した。F1/F2
+(`scenarios/eventual-consistency.e2e.test.ts`/`scenarios/transaction-history-lag.e2e.test.ts`)
+がかつて`triggerRelay: false`で行っていた「自己成就的なテストにしない」という配慮も、
+加速フック自体が無くなったことで自動的に成立する。
 
-**例外はF1/F2だけ。** ADR-0004の主張は「最大約1分」という**上限**であり、正確な自然発生の
-遅延時間を測定する必要はない——何秒で収束したかに関わらず、上限内に収束しさえすれば主張は
-満たされる。`triggerRelay: false`(`scenarios/eventual-consistency.e2e.test.ts`/
-`scenarios/transaction-history-lag.e2e.test.ts`)が防いでいるのは「F1/F2自身がrelayを
-叩いて自分の成功を作り出してしまう(自己成就的なテストになる)」ことだけである。
-
-`relay_once`は呼び出し元を問わず未発行の行を全部処理するため、他のシナリオファイルと
-並行実行すると、他のテストが自分のポーリングで起こしたrelayのInvokeに、F1/F2のイベントも
-ついでに乗って発行されることがある(実際、フルスイート実行でF1/F2が数秒〜十数秒で終わる
-ことがある)。これは合否判定上まったく問題ない——「誰かが偶然relayを起こしてくれて上限内に
-収束した」も「上限約1分以内に収束する」という主張の反証にはならない。F1/F2が保証している
-のは「収束すること」「中間状態が壊れていないこと」「タイムアウト(上限)を超えて放置され
-ないこと」であり、収束にかかった正確な秒数そのものではないため、他のテストとの並行実行は
-問題にならない。
-
-新しいシナリオを追加する際、待ちが「上限内に収束するかどうか」の検証でない限りは、
-デフォルトの加速(`triggerRelay`を指定しない)のままでよい。
-
-**`--maxWorkers=3`について。** シナリオファイル数が増えた際にJestのデフォルト並列度
-(CPU数に応じて自動)で実行したところ、テストスイート自身が生む同時書き込みのバーストが
-1分間隔の固定容量リレーを詰まらせ、ほぼ全てのシナリオがタイムアウトしたことがあった
-(relay直接Invoke導入前の話)。直接Invoke導入後はこの詰まりは起きにくくなっているはずだが、
-`--maxWorkers`を上げる場合は一度様子を見ながら行うこと。
+`support/poll.ts`の`waitFor`は既定で30秒のタイムアウト・1秒間隔でポーリングする
+(`DEFAULT_TIMEOUT_MS`/`DEFAULT_INTERVAL_MS`)。実測値は実行のたびに変わりうるため、
+正確な収束時間を主張に組み込みたい場合は実行結果を都度確認すること。
 
 ## テストの独立性(クリーンアップ不要)
 
 口座IDはクライアント生成(ADR-0006決定2)であるため、各テストは`crypto.randomUUID()`で
 毎回新しい口座を使う。これによりテスト間の依存やクリーンアップは不要で、`clean-data.ts`
-(`infra/scripts/`)を都度実行する必要はない。`clean-data.ts`は開発中のDSQL/DynamoDBの
+(`infra/scripts/`)を都度実行する必要はない。`clean-data.ts`は開発中のDynamoDBの
 データ量を定期的にリセットする運用スクリプトという位置づけのまま残し、E2E実行の前提には
 していない。
 
@@ -131,8 +115,8 @@ Lambdaを直接Invokeする(`relay_once`はイベントの中身を見ないた�
 - 却下系シナリオはどれも定義上「状態を変えない」ため、同じ前提条件(Active/Frozen等)を
   必要とする複数シナリオは`beforeAll`で1つのフィクスチャ口座を共有してよい
   (`domain-errors-active-account.e2e.test.ts`/`domain-errors-frozen-account.e2e.test.ts`)。
-  開設・凍結・解約のたびに発生する結果整合性待ち(relay直接Invokeで通常は数秒〜数十秒、
-  詰まった場合の上限は150秒)を、シナリオの数だけ重複して払わずに済む。ファイルもシナリオの
+  開設・凍結・解約のたびに発生する結果整合性待ち(DynamoDB Streams駆動で通常は数秒、
+  `waitFor`の既定タイムアウトは30秒)を、シナリオの数だけ重複して払わずに済む。ファイルもシナリオの
   グループごとに分けているのは、Jestがテスト
   ファイル単位でしか並列実行しない(1ファイル内の`it`は直列実行される)ため。新しい却下系
   シナリオを追加する際は、既存のフィクスチャ(Active/Frozen)を使い回せないか先に検討する。
@@ -141,11 +125,11 @@ Lambdaを直接Invokeする(`relay_once`はイベントの中身を見ないた�
   が`httpClient.ts`のHTTPラッパーと同じ役割をSQS向けに提供する(`TransferCommand`の
   `Start`/`Confirm`/`Cancel`/`Recall`)。サガ状態はDynamoDB(`moneta-transfer-sagas`)に
   あり照会APIが無いため、`support/sagaState.ts`の`waitForSagaState`/`getSaga`が直接
-  `GetItem`する——`waitFor`(`support/poll.ts`)を内部で再利用しているため、outbox relay
-  直接Invokeによる加速も自動的に効く(account.event.OpenedやWithdrawn/Depositedの発行が
-  outbox経由なのはaccount-serviceの他のイベントと同じ)。furikae/furikomiの判定も同じ
-  outbox発行に依存する口座名義インデックス(`moneta-transfer-account-owners`)の反映待ちが
-  要るため、`waitForOwnerIndexed`も同様に`waitFor`を再利用する。
+  `GetItem`する——`waitFor`(`support/poll.ts`)を内部で再利用している(account.event.Opened
+  やWithdrawn/Depositedの発行がoutbox経由なのはaccount-serviceの他のイベントと同じ)。
+  furikae/furikomiの判定も同じoutbox発行に依存する口座名義インデックス
+  (`moneta-transfer-account-owners`)の反映待ちが要るため、`waitForOwnerIndexed`も同様に
+  `waitFor`を再利用する。
 - **組戻し(recall)の時間窓(J10、24時間)は実時間を待たずに検証する。**
   `recall_eligibility`(saga.rs)は`now`を明示的な引数に取る純粋関数なのでユニットテストは
   元々実時間非依存だが、この実デプロイE2Eでも同様に、`support/sagaState.ts`の

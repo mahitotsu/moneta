@@ -1,7 +1,13 @@
-use account_domain::{Account, AccountId, AccountState, Command, Decimal, FreezeReason, OffsetDateTime, Uuid};
+use std::collections::HashMap;
+use std::str::FromStr;
+
+use account_domain::{Account, AccountId, AccountState, Command, Decimal, FreezeReason, OffsetDateTime, Rfc3339, Uuid};
+use aws_sdk_dynamodb::error::SdkError;
+use aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError;
+use aws_sdk_dynamodb::types::{AttributeValue, ConditionCheck, Put, TransactWriteItem, Update};
+use aws_sdk_dynamodb::Client;
 use serde::Deserialize;
 use serde_json::Value;
-use sqlx::{PgPool, Postgres, Transaction};
 
 /// SQSメッセージ本文の形式。`MessageGroupId`（=口座ID）はSQS属性側にも
 /// 重複して載るが、ここでは本文からドメイン層に渡す値として直接持つ。
@@ -17,17 +23,41 @@ pub struct AccountCommandEnvelope {
     pub correlation_id: Option<String>,
 }
 
-#[derive(sqlx::FromRow)]
-struct AccountRow {
-    /// NULL許容(docs/adr/0011): owner_id列追加より前に作成された既存行はNULLのままになりうる。
-    /// `apply_command`側で空文字列にフォールバックする。
-    owner_id: Option<String>,
-    status: String,
-    balance: Decimal,
-    frozen_reason: Option<String>,
-    frozen_at: Option<OffsetDateTime>,
-    closed_at: Option<OffsetDateTime>,
+/// account-serviceが書き込む3テーブルの名前(docs/adr/0013)。
+#[derive(Debug, Clone)]
+pub struct AccountTables {
+    pub accounts: String,
+    pub events: String,
+    pub processed_messages: String,
 }
+
+/// 1メッセージの処理で起こりうる失敗(docs/adr/0002決定1・docs/adr/0013決定2)。
+pub enum ApplyCommandError {
+    /// 楽観ロックの競合(`accounts`項目の`version`条件不成立)。呼び出し側でリトライする。
+    OptimisticLockConflict,
+    /// それ以外のインフラ起因の失敗(スロットリング・接続断等)。
+    Infra(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl std::fmt::Debug for ApplyCommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OptimisticLockConflict => write!(f, "OptimisticLockConflict"),
+            Self::Infra(err) => write!(f, "Infra({err:?})"),
+        }
+    }
+}
+
+impl std::fmt::Display for ApplyCommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OptimisticLockConflict => write!(f, "optimistic lock conflict"),
+            Self::Infra(err) => write!(f, "infra failure: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for ApplyCommandError {}
 
 fn freeze_reason_to_str(reason: &FreezeReason) -> &'static str {
     match reason {
@@ -42,35 +72,60 @@ fn freeze_reason_from_str(value: &str) -> FreezeReason {
         "suspected_fraud" => FreezeReason::SuspectedFraud,
         "court_order" => FreezeReason::CourtOrder,
         "customer_request" => FreezeReason::CustomerRequest,
-        other => unreachable!("unknown frozen_reason persisted in DB: {other}"),
+        other => unreachable!("unknown frozen_reason persisted in DynamoDB: {other}"),
     }
 }
 
-fn row_to_state(row: &AccountRow) -> AccountState {
-    match row.status.as_str() {
-        "active" => AccountState::Active { balance: row.balance },
+fn parse_rfc3339(value: &str) -> OffsetDateTime {
+    OffsetDateTime::parse(value, &Rfc3339).unwrap_or_else(|_| unreachable!("stored timestamp is not valid RFC3339: {value}"))
+}
+
+fn format_rfc3339(value: OffsetDateTime) -> String {
+    value.format(&Rfc3339).expect("OffsetDateTime always formats as RFC3339")
+}
+
+fn get_s(item: &HashMap<String, AttributeValue>, key: &str) -> Option<String> {
+    item.get(key).and_then(|v| v.as_s().ok()).cloned()
+}
+
+/// `accounts`アイテム(`ownerId`/`status`/`balance`/...)⇔`AccountState`の変換
+/// (docs/adr/0003決定2、docs/adr/0013決定2)。`version`(楽観ロック用)も併せて返す。
+fn item_to_state(item: &HashMap<String, AttributeValue>) -> (String, AccountState, i64) {
+    let owner_id = get_s(item, "ownerId").unwrap_or_default();
+    let status = get_s(item, "status").unwrap_or_else(|| unreachable!("account item missing status"));
+    let balance = Decimal::from_str(
+        &get_s(item, "balance").unwrap_or_else(|| unreachable!("account item missing balance")),
+    )
+    .unwrap_or_else(|_| unreachable!("account item balance is not a valid decimal"));
+    let version: i64 = item
+        .get("version")
+        .and_then(|v| v.as_n().ok())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| unreachable!("account item missing version"));
+
+    let state = match status.as_str() {
+        "active" => AccountState::Active { balance },
         "frozen" => AccountState::Frozen {
-            balance: row.balance,
+            balance,
             reason: freeze_reason_from_str(
-                row.frozen_reason
-                    .as_deref()
-                    .unwrap_or_else(|| unreachable!("frozen account row missing frozen_reason")),
+                &get_s(item, "frozenReason").unwrap_or_else(|| unreachable!("frozen account item missing frozenReason")),
             ),
-            frozen_at: row
-                .frozen_at
-                .unwrap_or_else(|| unreachable!("frozen account row missing frozen_at")),
+            frozen_at: parse_rfc3339(
+                &get_s(item, "frozenAt").unwrap_or_else(|| unreachable!("frozen account item missing frozenAt")),
+            ),
         },
         "closed" => AccountState::Closed {
-            final_balance: row.balance,
-            closed_at: row
-                .closed_at
-                .unwrap_or_else(|| unreachable!("closed account row missing closed_at")),
+            final_balance: balance,
+            closed_at: parse_rfc3339(
+                &get_s(item, "closedAt").unwrap_or_else(|| unreachable!("closed account item missing closedAt")),
+            ),
         },
-        other => unreachable!("unknown status persisted in DB: {other}"),
-    }
+        other => unreachable!("unknown status persisted in DynamoDB: {other}"),
+    };
+    (owner_id, state, version)
 }
 
-struct StateColumns {
+struct StateAttributes {
     status: &'static str,
     balance: Decimal,
     frozen_reason: Option<&'static str>,
@@ -78,30 +133,23 @@ struct StateColumns {
     closed_at: Option<OffsetDateTime>,
 }
 
-fn state_to_columns(state: &AccountState) -> StateColumns {
+fn state_to_attributes(state: &AccountState) -> StateAttributes {
     match state {
-        AccountState::Active { balance } => StateColumns {
+        AccountState::Active { balance } => StateAttributes {
             status: "active",
             balance: *balance,
             frozen_reason: None,
             frozen_at: None,
             closed_at: None,
         },
-        AccountState::Frozen {
-            balance,
-            reason,
-            frozen_at,
-        } => StateColumns {
+        AccountState::Frozen { balance, reason, frozen_at } => StateAttributes {
             status: "frozen",
             balance: *balance,
             frozen_reason: Some(freeze_reason_to_str(reason)),
             frozen_at: Some(*frozen_at),
             closed_at: None,
         },
-        AccountState::Closed {
-            final_balance,
-            closed_at,
-        } => StateColumns {
+        AccountState::Closed { final_balance, closed_at } => StateAttributes {
             status: "closed",
             balance: *final_balance,
             frozen_reason: None,
@@ -111,37 +159,203 @@ fn state_to_columns(state: &AccountState) -> StateColumns {
     }
 }
 
-/// 1メッセージの処理本体：冪等性チェック → 現在の状態のロード（存在しなければ
-/// `apply_to_absent`、存在すれば`apply`） → 結果（イベントor却下記録）の永続化、
-/// を1つのトランザクション内で行う。
+fn account_key(account_id: Uuid) -> HashMap<String, AttributeValue> {
+    HashMap::from([("accountId".to_string(), AttributeValue::S(account_id.to_string()))])
+}
+
+async fn get_account_item(
+    client: &Client,
+    table: &str,
+    account_id: Uuid,
+) -> Result<Option<HashMap<String, AttributeValue>>, aws_sdk_dynamodb::Error> {
+    let output = client.get_item().table_name(table).set_key(Some(account_key(account_id))).send().await?;
+    Ok(output.item)
+}
+
+/// `processed_messages`への冪等性チェック用Put。`messageId`が既に存在すれば
+/// `ConditionalCheckFailed`で失敗する——at-least-once配信による重複を検出する
+/// (docs/adr/0002決定4)。
+fn processed_message_put(table: &str, message_id: &str, account_id: Uuid, now: OffsetDateTime) -> TransactWriteItem {
+    let put = Put::builder()
+        .table_name(table)
+        .item("messageId", AttributeValue::S(message_id.to_string()))
+        .item("accountId", AttributeValue::S(account_id.to_string()))
+        .item("processedAt", AttributeValue::S(format_rfc3339(now)))
+        .condition_expression("attribute_not_exists(messageId)")
+        .build()
+        .expect("Put is fully populated");
+    TransactWriteItem::builder().put(put).build()
+}
+
+/// `accounts`への書き込み(コマンドが受理された場合)。新規口座は`attribute_not_exists`、
+/// 既存口座は`version`の等値条件で楽観ロックする(docs/adr/0013決定2)。
+fn account_write(
+    table: &str,
+    account_id: Uuid,
+    owner_id: &str,
+    state: &AccountState,
+    current_version: Option<i64>,
+) -> TransactWriteItem {
+    let attrs = state_to_attributes(state);
+    let next_version = current_version.unwrap_or(0) + 1;
+
+    match current_version {
+        None => {
+            let mut builder = Put::builder()
+                .table_name(table)
+                .item("accountId", AttributeValue::S(account_id.to_string()))
+                .item("ownerId", AttributeValue::S(owner_id.to_string()))
+                .item("status", AttributeValue::S(attrs.status.to_string()))
+                .item("balance", AttributeValue::S(attrs.balance.to_string()))
+                .item("version", AttributeValue::N(next_version.to_string()))
+                .condition_expression("attribute_not_exists(accountId)");
+            if let Some(reason) = attrs.frozen_reason {
+                builder = builder.item("frozenReason", AttributeValue::S(reason.to_string()));
+            }
+            if let Some(t) = attrs.frozen_at {
+                builder = builder.item("frozenAt", AttributeValue::S(format_rfc3339(t)));
+            }
+            if let Some(t) = attrs.closed_at {
+                builder = builder.item("closedAt", AttributeValue::S(format_rfc3339(t)));
+            }
+            TransactWriteItem::builder().put(builder.build().expect("Put is fully populated")).build()
+        }
+        Some(expected_version) => {
+            let mut set_parts = vec![
+                "#status = :status".to_string(),
+                "balance = :balance".to_string(),
+                "#version = :nextVersion".to_string(),
+            ];
+            let mut remove_parts = Vec::new();
+            let mut values: HashMap<String, AttributeValue> = HashMap::from([
+                (":status".to_string(), AttributeValue::S(attrs.status.to_string())),
+                (":balance".to_string(), AttributeValue::S(attrs.balance.to_string())),
+                (":nextVersion".to_string(), AttributeValue::N(next_version.to_string())),
+                (":expectedVersion".to_string(), AttributeValue::N(expected_version.to_string())),
+            ]);
+
+            match attrs.frozen_reason {
+                Some(reason) => {
+                    set_parts.push("frozenReason = :frozenReason".to_string());
+                    values.insert(":frozenReason".to_string(), AttributeValue::S(reason.to_string()));
+                }
+                None => remove_parts.push("frozenReason".to_string()),
+            }
+            match attrs.frozen_at {
+                Some(t) => {
+                    set_parts.push("frozenAt = :frozenAt".to_string());
+                    values.insert(":frozenAt".to_string(), AttributeValue::S(format_rfc3339(t)));
+                }
+                None => remove_parts.push("frozenAt".to_string()),
+            }
+            match attrs.closed_at {
+                Some(t) => {
+                    set_parts.push("closedAt = :closedAt".to_string());
+                    values.insert(":closedAt".to_string(), AttributeValue::S(format_rfc3339(t)));
+                }
+                None => remove_parts.push("closedAt".to_string()),
+            }
+
+            let mut update_expression = format!("SET {}", set_parts.join(", "));
+            if !remove_parts.is_empty() {
+                update_expression.push_str(&format!(" REMOVE {}", remove_parts.join(", ")));
+            }
+
+            let update = Update::builder()
+                .table_name(table)
+                .set_key(Some(account_key(account_id)))
+                .update_expression(update_expression)
+                .condition_expression("#version = :expectedVersion")
+                .expression_attribute_names("#status", "status")
+                .expression_attribute_names("#version", "version")
+                .set_expression_attribute_values(Some(values))
+                .build()
+                .expect("Update is fully populated");
+            TransactWriteItem::builder().update(update).build()
+        }
+    }
+}
+
+/// `accounts`への書き込みなしにOCC条件だけを検証する(コマンドが却下された場合)。
+/// DomainErrorの判定は読み込んだ時点のスナップショットに基づくため、その後に別の
+/// メッセージが同じ口座を変更していないことを確認してから却下を確定する——確認できなければ
+/// 楽観ロックの競合としてリトライする(docs/adr/0013決定2)。
+fn account_condition_check(table: &str, account_id: Uuid, current_version: Option<i64>) -> TransactWriteItem {
+    let mut builder = ConditionCheck::builder().table_name(table).set_key(Some(account_key(account_id)));
+    builder = match current_version {
+        None => builder.condition_expression("attribute_not_exists(accountId)"),
+        Some(expected_version) => builder
+            .condition_expression("#version = :expectedVersion")
+            .expression_attribute_names("#version", "version")
+            .expression_attribute_values(":expectedVersion", AttributeValue::N(expected_version.to_string())),
+    };
+    TransactWriteItem::builder().condition_check(builder.build().expect("ConditionCheck is fully populated")).build()
+}
+
+/// `account_events`への追記(docs/adr/0013決定3のアウトボックス)。`eventId`は毎回新規の
+/// UUIDであり、他の項目と主キーが衝突しないため条件式は不要。
+fn event_put(
+    table: &str,
+    account_id: Uuid,
+    kind: &str,
+    payload: &Value,
+    now: OffsetDateTime,
+    correlation_id: Option<&str>,
+) -> TransactWriteItem {
+    let mut builder = Put::builder()
+        .table_name(table)
+        .item("eventId", AttributeValue::S(Uuid::new_v4().to_string()))
+        .item("accountId", AttributeValue::S(account_id.to_string()))
+        .item("kind", AttributeValue::S(kind.to_string()))
+        .item("payload", AttributeValue::S(payload.to_string()))
+        .item("createdAt", AttributeValue::S(format_rfc3339(now)));
+    if let Some(correlation_id) = correlation_id {
+        builder = builder.item("correlationId", AttributeValue::S(correlation_id.to_string()));
+    }
+    TransactWriteItem::builder().put(builder.build().expect("Put is fully populated")).build()
+}
+
+/// `TransactWriteItems`の失敗を分類する(docs/adr/0013決定2)。DynamoDBは条件不成立を
+/// `ConditionalCheckFailedException`としてではなく、`TransactionCanceledException`の
+/// `CancellationReasons`(`TransactItems`と同じ並び)として返す
+/// ([AWS公式ドキュメント](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_TransactWriteItems.html)で確認済み)。
+/// `TransactItems`は常に[冪等性チェック, accounts書き込み/条件チェック, イベント挿入]の順に
+/// 積んでいるため、reasons[0]が条件不成立なら「重複配信」(却下ではなく正常系、
+/// docs/adr/0002決定1と同じ考え方)、reasons[1]が条件不成立なら楽観ロックの競合として
+/// リトライ対象にする。
+fn classify_transact_error(
+    err: SdkError<TransactWriteItemsError, aws_smithy_runtime_api::http::Response>,
+) -> Result<(), ApplyCommandError> {
+    const CONDITIONAL_CHECK_FAILED: &str = "ConditionalCheckFailed";
+
+    if let Some(TransactWriteItemsError::TransactionCanceledException(cancel)) = err.as_service_error() {
+        let reasons = cancel.cancellation_reasons();
+        if reasons.first().and_then(|r| r.code()) == Some(CONDITIONAL_CHECK_FAILED) {
+            tracing::info!("duplicate message delivery detected via processed_messages condition; treating as no-op");
+            return Ok(());
+        }
+        if reasons.get(1).and_then(|r| r.code()) == Some(CONDITIONAL_CHECK_FAILED) {
+            return Err(ApplyCommandError::OptimisticLockConflict);
+        }
+    }
+    Err(ApplyCommandError::Infra(Box::new(err)))
+}
+
+/// 1メッセージの処理本体：現在の状態のロード（存在しなければ`apply_to_absent`、存在すれば
+/// `apply`） → 結果（イベントor却下記録）の永続化を1回の`TransactWriteItems`で行う
+/// (docs/adr/0002・0013)。
 ///
-/// 全てDB操作のみで副作用はない（OCC競合で`transaction_with_retry`から
-/// 複数回呼ばれても安全 — docs/adr/0002 決定6）。
+/// 全てDB操作のみで副作用はない（楽観ロック競合で呼び出し側から複数回呼ばれても安全
+/// — docs/adr/0002決定6・0013決定2）。
 pub async fn apply_command(
-    tx: &mut Transaction<'_, Postgres>,
+    client: &Client,
+    tables: &AccountTables,
     message_id: &str,
     envelope: &AccountCommandEnvelope,
-) -> Result<(), sqlx::Error> {
-    let inserted = sqlx::query(
-        "INSERT INTO processed_messages (message_id, account_id) VALUES ($1, $2) \
-         ON CONFLICT (message_id) DO NOTHING",
-    )
-    .bind(message_id)
-    .bind(envelope.account_id)
-    .execute(&mut **tx)
-    .await?;
-
-    if inserted.rows_affected() == 0 {
-        // at-least-once配信による重複。既に適用済みなので何もしない。
-        return Ok(());
-    }
-
-    let existing: Option<AccountRow> = sqlx::query_as(
-        "SELECT owner_id, status, balance, frozen_reason, frozen_at, closed_at FROM accounts WHERE id = $1",
-    )
-    .bind(envelope.account_id)
-    .fetch_optional(&mut **tx)
-    .await?;
+) -> Result<(), ApplyCommandError> {
+    let existing = get_account_item(client, &tables.accounts, envelope.account_id)
+        .await
+        .map_err(|err| ApplyCommandError::Infra(Box::new(err)))?;
 
     let account_id = AccountId::from(envelope.account_id);
     let now = OffsetDateTime::now_utc();
@@ -149,12 +363,12 @@ pub async fn apply_command(
 
     // 口座がまだ存在しない場合のプレースホルダー。`evolve`の`Event::Opened`
     // 分岐は自身の状態(owner_idも含む)を見ないため、中身は使われない。
-    let base_account = match existing {
-        Some(row) => {
-            let owner_id = row.owner_id.clone().unwrap_or_default();
-            Account::rehydrate(account_id, owner_id, row_to_state(&row))
+    let (base_account, current_version) = match &existing {
+        Some(item) => {
+            let (owner_id, state, version) = item_to_state(item);
+            (Account::rehydrate(account_id, owner_id, state), Some(version))
         }
-        None => Account::rehydrate(account_id, String::new(), AccountState::Active { balance: Decimal::ZERO }),
+        None => (Account::rehydrate(account_id, String::new(), AccountState::Active { balance: Decimal::ZERO }), None),
     };
 
     let outcome = if is_new_account {
@@ -163,72 +377,43 @@ pub async fn apply_command(
         base_account.apply(envelope.command.clone(), now)
     };
 
-    match outcome {
-        Ok(event) => {
-            let new_account = base_account.evolve(&event);
-            let columns = state_to_columns(new_account.state());
-
-            if is_new_account {
-                sqlx::query(
-                    "INSERT INTO accounts (id, owner_id, status, balance, frozen_reason, frozen_at, closed_at) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                )
-                .bind(envelope.account_id)
-                .bind(new_account.owner_id())
-                .bind(columns.status)
-                .bind(columns.balance)
-                .bind(columns.frozen_reason)
-                .bind(columns.frozen_at)
-                .bind(columns.closed_at)
-                .execute(&mut **tx)
-                .await?;
-            } else {
-                sqlx::query(
-                    "UPDATE accounts SET status = $1, balance = $2, frozen_reason = $3, \
-                     frozen_at = $4, closed_at = $5 WHERE id = $6",
-                )
-                .bind(columns.status)
-                .bind(columns.balance)
-                .bind(columns.frozen_reason)
-                .bind(columns.frozen_at)
-                .bind(columns.closed_at)
-                .bind(envelope.account_id)
-                .execute(&mut **tx)
-                .await?;
-            }
-
-            let payload = serde_json::to_value(&event).expect("Event serialization is infallible");
-            sqlx::query(
-                "INSERT INTO account_events (account_id, kind, payload, correlation_id) \
-                 VALUES ($1, 'event', $2, $3)",
-            )
-            .bind(envelope.account_id)
-            .bind(payload)
-            .bind(&envelope.correlation_id)
-            .execute(&mut **tx)
-            .await?;
-        }
+    let (kind, payload) = match &outcome {
+        Ok(event) => ("event", serde_json::to_value(event).expect("Event serialization is infallible")),
         Err(domain_error) => {
-            let payload =
-                serde_json::to_value(&domain_error).expect("DomainError serialization is infallible");
-            sqlx::query(
-                "INSERT INTO account_events (account_id, kind, payload, correlation_id) \
-                 VALUES ($1, 'rejection', $2, $3)",
-            )
-            .bind(envelope.account_id)
-            .bind(payload)
-            .bind(&envelope.correlation_id)
-            .execute(&mut **tx)
-            .await?;
+            ("rejection", serde_json::to_value(domain_error).expect("DomainError serialization is infallible"))
+        }
+    };
+
+    let mut items = Vec::with_capacity(3);
+    items.push(processed_message_put(&tables.processed_messages, message_id, envelope.account_id, now));
+
+    match &outcome {
+        Ok(event) => {
+            let new_account = base_account.evolve(event);
+            items.push(account_write(
+                &tables.accounts,
+                envelope.account_id,
+                new_account.owner_id(),
+                new_account.state(),
+                current_version,
+            ));
+        }
+        Err(_) => {
+            items.push(account_condition_check(&tables.accounts, envelope.account_id, current_version));
         }
     }
 
-    Ok(())
+    items.push(event_put(&tables.events, envelope.account_id, kind, &payload, now, envelope.correlation_id.as_deref()));
+
+    match client.transact_write_items().set_transact_items(Some(items)).send().await {
+        Ok(_) => Ok(()),
+        Err(err) => classify_transact_error(err),
+    }
 }
 
-/// account_eventsの1行（アウトボックスリレー用）。`kind`は'event'または'rejection'、
-/// `payload`は対応する`Event`/`DomainError`のJSON表現(account-domainのシリアライズ形式そのもの)。
-#[derive(Debug, Clone, sqlx::FromRow)]
+/// `account_events`の1件(アウトボックス用)。DynamoDB Streamsが配信するNEW_IMAGEから
+/// 組み立てる(docs/adr/0013決定3、`bin/account_outbox_projector.rs`)。
+#[derive(Debug, Clone)]
 pub struct UnpublishedEvent {
     pub id: Uuid,
     pub account_id: Uuid,
@@ -236,27 +421,4 @@ pub struct UnpublishedEvent {
     pub payload: Value,
     pub created_at: OffsetDateTime,
     pub correlation_id: Option<String>,
-}
-
-/// まだEventBridgeへ発行していない行を古い順に取得する（アウトボックスのポーリング対象）。
-pub async fn fetch_unpublished_events(pool: &PgPool, limit: i64) -> Result<Vec<UnpublishedEvent>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, account_id, kind, payload, created_at, correlation_id FROM account_events \
-         WHERE published_at IS NULL ORDER BY created_at LIMIT $1",
-    )
-    .bind(limit)
-    .fetch_all(pool)
-    .await
-}
-
-/// EventBridgeへの発行が成功した行にpublished_atを記録する。呼び出し順序
-/// （PutEvents成功後に呼ぶこと）はoutbox_relay側の責務——先にこちらを呼ぶと、
-/// PutEventsが失敗した際にイベントが発行されないまま「発行済み」扱いになり、
-/// サイレントなデータロスを起こす（docs/adr/0002と同じ設計思想）。
-pub async fn mark_published(pool: &PgPool, event_id: Uuid) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE account_events SET published_at = now() WHERE id = $1")
-        .bind(event_id)
-        .execute(pool)
-        .await?;
-    Ok(())
 }

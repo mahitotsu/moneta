@@ -41,9 +41,9 @@ Transfer serviceセクション(`TransferAccountOwnersTable`/`TransferOwnerProje
 (確認要否・組戻し可否・限度額)が変わるため、クライアントが誤って(または意図的に)申告した
 場合に業務ルールを回避できてしまう設計は金融ドメインのPoCとして避けるべきと判断した。
 
-`schema.sql`の`accounts`テーブルに`owner_id TEXT`列を追加(NULL許容)。DSQLでは既存デプロイに
-後からNOT NULL制約を追加できない(既存行が値を持たない)ため、必須性の強制はアプリケーション
-層(`Command::Open`が常に必須で要求する)に委ねる。
+`accounts`テーブル(DynamoDB)のアイテムに`ownerId`属性を追加。DynamoDBはスキーマレスであり
+必須属性を強制する仕組みを持たない(既存デプロイの既存アイテムはこの属性を持たないまま
+残る)ため、必須性の強制はアプリケーション層(`Command::Open`が常に必須で要求する)に委ねる。
 
 ### 2. 振替/振込の判定は、Transfer service専用の口座名義インデックス投影で行う
 
@@ -151,7 +151,7 @@ query-serviceの`AccountViewTable`に相乗りする案は採らなかった。�
 - **組戻し用の新しい終端状態を`SagaState`に追加する**: `start()`を`kind = Recall`で再利用する
   方がシンプルで、既存の状態遷移ロジック(`advance`)を一切変更せずに済むため、こちらを
   採用した(決定5)。
-- **サガ状態専用の新しいDSQLテーブルで名義インデックスを持つ**: [[0010-transfer-service-saga]]
+- **名義インデックス専用の新しいAurora DSQLテーブルを持つ**: [[0010-transfer-service-saga]]
   決定2と同じ理由(単一アイテムの読み書きにリレーショナル・トランザクション機構は不要、
-  DSQL用のスキーマ自動適用の仕組みをもう一セット持つ重さに見合わない)で見送り、DynamoDBの
+  専用のスキーマ・IAM自動適用の仕組みをもう一セット持つ重さに見合わない)で見送り、DynamoDBの
   専用テーブルとした。
