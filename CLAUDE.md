@@ -82,6 +82,30 @@ There is no live Aurora DSQL instance in this environment. `account-service`'s p
 Rust is installed via `rustup`; if a fresh environment lacks it, `source "$HOME/.cargo/env"`
 after install.
 
+```bash
+cd infra
+npm test            # CDK synth assertions (infra/test/) — no live AWS needed, but bundles
+                     # Lambdas via Docker so it's slower than the Rust tests above; this is
+                     # why it's a GitHub Actions job (ci.yml) rather than in .githooks/pre-commit
+npm run deploy       # deploy the current source to the live MonetaAccountPipelineStack
+npm run test:e2e     # exercises the LIVE DEPLOYED STACK (real HTTP/SQS/DynamoDB calls) —
+                     # this tests whatever is currently deployed, not your working tree.
+                     # Run `npm run deploy` first if you've changed anything under crates/ or
+                     # infra/lib/ since the last deploy, or you'll be testing stale code and
+                     # get a misleading pass/fail. See infra/e2e/README.md.
+```
+
+Three tiers of testing, in increasing order of what they need and what they actually prove:
+`cargo test`/`clippy` (source only, no AWS) → CDK synth tests (source only, no AWS, but proves
+the infra actually synthesizes/bundles) → `test:e2e` (needs a live, up-to-date deployment; proves
+the deployed system behaves as documented in `docs/e2e-scenarios.md`). Only the first two run in
+CI (`.github/workflows/ci.yml`) — `test:e2e` needs real AWS credentials and a deployed stack, so
+it stays manual/on-demand.
+
+`.githooks/pre-commit` runs the first tier (cargo + web-ui) on every commit; enable it once per
+clone with `git config core.hooksPath .githooks`. CI re-runs that plus the CDK synth tier as a
+backstop in case the hook isn't set up or was bypassed.
+
 ## Architecture
 
 ### Crate boundary (ADR-0003, ADR-0008)
