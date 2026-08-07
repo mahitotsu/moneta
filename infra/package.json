@@ -10,13 +10,11 @@
     "diff": "npm run cdk -- diff",
     "deploy": "npm run cdk -- deploy",
     "destroy": "npm run cdk -- destroy",
-    "clean-data": "NODE_OPTIONS=\"--require ./force-ipv4.cjs\" tsx scripts/clean-data.ts",
-    "test:e2e": "NODE_OPTIONS=\"--require ./force-ipv4.cjs\" jest --config e2e/jest.config.js --maxWorkers=3"
+    "clean-data": "NODE_OPTIONS=\"--require ./force-ipv4.cjs\" tsx scripts/clean-data.ts"
   },
   "devDependencies": {
     "@aws-sdk/client-cloudformation": "^3.1101.0",
     "@aws-sdk/client-dynamodb": "^3.1101.0",
-    "@aws-sdk/client-lambda": "^3.1102.0",
     "@aws-sdk/client-sqs": "^3.1101.0",
     "@aws-sdk/dsql-signer": "^3.1101.0",
     "@aws-sdk/lib-dynamodb": "^3.1101.0",

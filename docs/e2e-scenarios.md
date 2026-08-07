@@ -244,8 +244,8 @@ Then `maxReceiveCount`超過後にFIFO DLQに到達し、CloudWatchアラーム�
 ## J. Transfer service(口座間送金のサガ)
 
 顧客向けUI/API Gatewayはまだ無い([[0010-transfer-service-saga]]決定6、[[0011-furikae-furikomi-distinction]]でも据え置いたまま)が、受付経路自体(Transfer受付キューへの直接
-`SendMessage`)は`infra/e2e/scenarios/transfer-*.e2e.test.ts`で自動E2E化済み
-(`infra/e2e/README.md`のシナリオ対応表参照)。`support/transferClient.ts`が
+`SendMessage`)は`e2e/scenarios/transfer-*.e2e.test.ts`で自動E2E化済み
+(`e2e/README.md`のシナリオ対応表参照)。`support/transferClient.ts`が
 `TransferCommand`(`{"Start":{...}}`/`{"Confirm":{...}}`/`{"Cancel":{...}}`/
 `{"Recall":{...}}`のいずれか、[[0011-furikae-furikomi-distinction]])をSQSへ直接送信し、
 `support/sagaState.ts`がDynamoDBのサガ状態を直接ポーリングする(照会APIはサガ状態を

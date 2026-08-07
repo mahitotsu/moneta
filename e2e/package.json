@@ -1,0 +1,21 @@
+{
+  "name": "e2e",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "NODE_OPTIONS=\"--require ./force-ipv4.cjs\" jest --maxWorkers=3"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-cloudformation": "^3.1101.0",
+    "@aws-sdk/client-dynamodb": "^3.1101.0",
+    "@aws-sdk/client-lambda": "^3.1102.0",
+    "@aws-sdk/client-sqs": "^3.1101.0",
+    "@aws-sdk/lib-dynamodb": "^3.1101.0",
+    "@swc/core": "^1.15.0",
+    "@swc/jest": "^0.2.39",
+    "@types/jest": "^30",
+    "@types/node": "^24.10.1",
+    "jest": "^30",
+    "typescript": "~7.0.2"
+  }
+}
