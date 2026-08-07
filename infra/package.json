@@ -5,10 +5,12 @@
     "build": "tsc",
     "watch": "tsc -w",
     "test": "jest",
+    "posttest": "bash scripts/sweep-rust-lambda-docker-cache.sh",
     "cdk": "NODE_OPTIONS=\"--require ./force-ipv4.cjs\" cdk",
     "synth": "npm run cdk -- synth",
     "diff": "npm run cdk -- diff",
     "deploy": "npm run cdk -- deploy",
+    "postdeploy": "bash scripts/sweep-rust-lambda-docker-cache.sh",
     "destroy": "npm run cdk -- destroy",
     "clean-data": "NODE_OPTIONS=\"--require ./force-ipv4.cjs\" tsx scripts/clean-data.ts"
   },

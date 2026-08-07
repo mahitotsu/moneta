@@ -26,4 +26,16 @@ echo "==> web-ui: oxlint"
 echo "==> web-ui: vitest"
 (cd web-ui && npm run test)
 
+echo "==> cargo sweep: remove build artifacts untouched for 14+ days"
+# /targetは`cargo build --workspace`のたびに肥大化し続ける(15GB超に達したことがある)。
+# `cargo clean`による全消しは次回ビルドを丸ごとやり直しにしてしまうため、直近14日
+# ノータッチの成果物だけをルールベースで削除するcargo-sweep(要`cargo install cargo-sweep`)
+# を使う。毎コミットで走らせても実際に削除が発生するのは古い成果物がある時だけで、
+# 直近作業中のクレートの再ビルド速度には影響しない。
+if command -v cargo-sweep >/dev/null 2>&1; then
+  cargo sweep --time 14
+else
+  echo "  (cargo-sweep未インストールのためスキップ: cargo install cargo-sweep)"
+fi
+
 echo "==> pre-commit checks passed"

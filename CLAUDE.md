@@ -90,6 +90,14 @@ npm test            # CDK synth assertions (infra/test/) — no live AWS needed,
 npm run deploy       # deploy the current source to the live MonetaAccountPipelineStack
 ```
 
+Both commands' Docker-based Lambda bundling writes to a persistent host-side cache,
+`.rust-lambda-docker-cache/` (git-ignored); each run also auto-trims artifacts unused for 30+
+days (by atime, with a size cap as a backstop) via `posttest`/`postdeploy` npm hooks
+(`infra/scripts/sweep-rust-lambda-docker-cache.sh`, needs `cargo install cargo-sweep`, silently
+skipped if absent). Likewise `cargo build`'s own `/target` is kept bounded on every commit by
+`.githooks/pre-commit` (same tool, 14-day threshold since it's touched every commit rather than
+only on infra runs).
+
 ```bash
 cd e2e
 npm test             # exercises the LIVE DEPLOYED STACK (real HTTP/SQS/DynamoDB calls) —
