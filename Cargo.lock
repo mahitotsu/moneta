@@ -3009,6 +3009,7 @@ dependencies = [
  "rust_decimal",
  "rust_decimal_macros",
  "serde",
+ "serde_dynamo",
  "serde_json",
  "time",
  "tokio",

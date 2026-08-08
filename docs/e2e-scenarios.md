@@ -244,14 +244,17 @@ Then `maxReceiveCount`超過後にFIFO DLQに到達し、CloudWatchアラーム�
 
 ## J. Transfer service(口座間送金のサガ)
 
-顧客向けUI/API Gatewayはまだ無い([[0010-transfer-service-saga]]決定6、[[0011-furikae-furikomi-distinction]]でも据え置いたまま)が、受付経路自体(Transfer受付キューへの直接
-`SendMessage`)は`e2e/scenarios/transfer-*.e2e.test.ts`で自動E2E化済み
-(`e2e/README.md`のシナリオ対応表参照)。`support/transferClient.ts`が
-`TransferCommand`(`{"Start":{...}}`/`{"Confirm":{...}}`/`{"Cancel":{...}}`/
-`{"Recall":{...}}`のいずれか、[[0011-furikae-furikomi-distinction]])をSQSへ直接送信し、
-`support/sagaState.ts`がDynamoDBのサガ状態を直接ポーリングする(照会APIはサガ状態を
-公開していないため)。J10の「組戻し時間窓の期限超過」だけは実時間24時間を待つ代わりに、
-`updatedAt`を直接書き換えるテスト専用の裏口(`backdateSagaUpdatedAt`)で模擬している。
+顧客向けAPI Gateway(送金受付・状態照会)は[[0012-transfer-customer-api-and-status-query]]で
+実装済み。`e2e/scenarios/transfer-*.e2e.test.ts`が`support/transferClient.ts`経由でHTTP越しに
+検証する(`e2e/README.md`のシナリオ対応表参照)。`createTransferCommandApi`が
+`PUT /transfers/{transferId}`(Start)・`POST .../confirm`・`POST .../cancel`・
+`PUT .../recall`を、`createTransferQueryApi`が`GET /transfers/{transferId}`
+(`TransferStatusView`への直接統合)を呼ぶ。口座名義インデックス
+(`waitForOwnerIndexed`、`moneta-transfer-account-owners`)には対応する照会APIがなく、
+これはTransfer service内部の関心事に留まるため引き続きDynamoDB直接ポーリングのままである。
+J10の「組戻し時間窓の期限超過」だけは実時間24時間を待つ代わりに、`updatedAt`を直接書き換える
+テスト専用の裏口(`backdateSagaUpdatedAt`)で模擬している——公開APIには対応する経路が
+そもそも存在しない。Web UI(振替/振込画面)は引き続き未実装。
 
 **J1. 正常な送金は送金元の減少・送金先の増加として反映される**
 Given 送金元・送金先とも有効な口座

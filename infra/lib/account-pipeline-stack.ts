@@ -716,6 +716,9 @@ export class AccountPipelineStack extends cdk.Stack {
       // 削除されない——実際にこれが原因で、スキーマ移行失敗によるロールバック後の再デプロイが
       // 「moneta-transfer-sagasは既に存在する」で失敗した。
       removalPolicy: cdk.RemovalPolicy.DESTROY,
+      // 顧客向け状態照会(docs/adr/0012決定1)のため、transfer-status-projectorへ配信する。
+      // NEW_IMAGEのみで足りる(更新前の値を見る必要がない)。
+      stream: dynamodb.StreamViewType.NEW_IMAGE,
     });
 
     // --- [Transfer service所有] 口座名義インデックス(DynamoDB、docs/adr/0011) ---
@@ -829,6 +832,255 @@ export class AccountPipelineStack extends cdk.Stack {
     });
 
     // ==========================================================================
+    // Transfer serviceの顧客向け入口(docs/adr/0012) — [Transfer service所有]
+    //
+    // 決定1: 送金状態の読み取りモデル(TransferStatusView、DynamoDB Streams駆動)
+    // ==========================================================================
+
+    // TransferSagaTable(書き込み専用、CAS)を顧客向けAPIに直接晒さず、専用のビューを新設する。
+    // オペレーション用ストアと顧客向け契約のライフサイクルを分離するため(決定1却下理由)。
+    const transferStatusViewTable = new dynamodb.Table(this, "TransferStatusViewTable", {
+      tableName: "moneta-transfer-status-view",
+      partitionKey: { name: "transferId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    const transferStatusProjectorDlq = new sqs.Queue(this, "TransferStatusProjectorDlq");
+
+    const transferStatusProjectorFn = new lambda.Function(this, "TransferStatusProjectorFunction", {
+      runtime: lambda.Runtime.PROVIDED_AL2023,
+      architecture: lambda.Architecture.X86_64,
+      handler: "bootstrap",
+      timeout: cdk.Duration.seconds(30),
+      code: rustLambdaCode("transfer-service", "transfer-status-projector"),
+      environment: {
+        STATUS_VIEW_TABLE_NAME: transferStatusViewTable.tableName,
+      },
+    });
+    transferStatusViewTable.grantWriteData(transferStatusProjectorFn);
+
+    transferStatusProjectorFn.addEventSource(
+      new DynamoEventSource(transferSagaTable, {
+        startingPosition: lambda.StartingPosition.TRIM_HORIZON,
+        batchSize: 10,
+        retryAttempts: 3,
+        reportBatchItemFailures: true,
+        onFailure: new SqsDestination(transferStatusProjectorDlq),
+      }),
+    );
+
+    // --- 送金状態照会API: API Gateway REST API + DynamoDB直接統合 --------------
+    // account-serviceのAccountQueryApi(GetItem直接統合、決定1・[[0004]])と同じ思想。
+    const transferQueryApiDynamoRole = new iam.Role(this, "TransferQueryApiDynamoRole", {
+      assumedBy: new iam.ServicePrincipal("apigateway.amazonaws.com"),
+    });
+    transferQueryApiDynamoRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["dynamodb:GetItem"],
+        resources: [transferStatusViewTable.tableArn],
+      }),
+    );
+
+    const transferQueryApi = new apigateway.RestApi(this, "TransferQueryApi", {
+      restApiName: "moneta-transfer-query-api",
+      deployOptions: { stageName: "prod" },
+    });
+
+    const getTransferIntegration = new apigateway.AwsIntegration({
+      service: "dynamodb",
+      action: "GetItem",
+      options: {
+        credentialsRole: transferQueryApiDynamoRole,
+        passthroughBehavior: apigateway.PassthroughBehavior.NEVER,
+        requestTemplates: {
+          "application/json": JSON.stringify({
+            TableName: transferStatusViewTable.tableName,
+            Key: {
+              transferId: { S: "$input.params('transferId')" },
+            },
+          }),
+        },
+        integrationResponses: [
+          {
+            statusCode: "200",
+            responseTemplates: {
+              // account-serviceのGetAccountIntegrationと同じ404変換パターン(決定1)。
+              // TransferStatusViewの各属性をそのままJSONオブジェクトとして組み立てる
+              // (accountViewTableのようなview属性への集約はしていないため、フィールドごと)。
+              "application/json": [
+                '#if($input.path("$.Item") == "")',
+                "#set($context.responseOverride.status = 404)",
+                '{"message": "transfer not found"}',
+                "#else",
+                "{",
+                '"transferId":"$input.path("$.Item.transferId.S")",',
+                '"fromAccountId":"$input.path("$.Item.fromAccountId.S")",',
+                '"toAccountId":"$input.path("$.Item.toAccountId.S")",',
+                '"amount":"$input.path("$.Item.amount.S")",',
+                '"kind":"$input.path("$.Item.kind.S")",',
+                '"state":"$input.path("$.Item.state.S")",',
+                '"updatedAt":"$input.path("$.Item.updatedAt.S")"',
+                "}",
+                "#end",
+              ].join("\n"),
+            },
+          },
+        ],
+      },
+    });
+
+    const transfersResource = transferQueryApi.root.addResource("transfers");
+    const transferResource = transfersResource.addResource("{transferId}");
+    transferResource.addMethod("GET", getTransferIntegration, {
+      methodResponses: [{ statusCode: "200" }, { statusCode: "404" }],
+    });
+
+    // --- 送金受付API: API Gateway REST API + SQS直接統合(決定2〜4) ------------
+    // account-serviceのAccountCommandApiと同じLambdaレスVTLパターン(決定2)。
+    const transferCommandApiSqsRole = new iam.Role(this, "TransferCommandApiSqsRole", {
+      assumedBy: new iam.ServicePrincipal("apigateway.amazonaws.com"),
+    });
+    transferCommandApiSqsRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["sqs:SendMessage"],
+        resources: [transferCommandQueue.queueArn],
+      }),
+    );
+
+    const transferCommandApi = new apigateway.RestApi(this, "TransferCommandApi", {
+      restApiName: "moneta-transfer-command-api",
+      deployOptions: { stageName: "prod" },
+    });
+
+    // account-serviceのCommandRequestValidator/CommandParamsOnlyValidatorと同じ2段構え。
+    // ただしIdempotency-Keyヘッダーは要求しない(決定3: transferIdとアクション名の組がすでに
+    // 一意な冪等性キーになるため)。
+    const transferCommandRequestValidator = new apigateway.RequestValidator(this, "TransferCommandRequestValidator", {
+      restApi: transferCommandApi,
+      validateRequestBody: true,
+      validateRequestParameters: true,
+    });
+    const transferCommandParamsOnlyValidator = new apigateway.RequestValidator(
+      this,
+      "TransferCommandParamsOnlyValidator",
+      {
+        restApi: transferCommandApi,
+        validateRequestBody: false,
+        validateRequestParameters: true,
+      },
+    );
+
+    const accountIdRefSchema: apigateway.JsonSchema = {
+      type: apigateway.JsonSchemaType.STRING,
+      minLength: 1,
+    };
+
+    const startTransferModel = transferCommandApi.addModel("StartTransferModel", {
+      contentType: "application/json",
+      schema: {
+        schema: apigateway.JsonSchemaVersion.DRAFT4,
+        type: apigateway.JsonSchemaType.OBJECT,
+        required: ["from_account_id", "to_account_id", "amount"],
+        properties: { from_account_id: accountIdRefSchema, to_account_id: accountIdRefSchema, amount: decimalStringSchema },
+        additionalProperties: false,
+      },
+    });
+    const recallTransferModel = transferCommandApi.addModel("RecallTransferModel", {
+      contentType: "application/json",
+      schema: {
+        schema: apigateway.JsonSchemaVersion.DRAFT4,
+        type: apigateway.JsonSchemaType.OBJECT,
+        required: ["original_transfer_id"],
+        properties: { original_transfer_id: accountIdRefSchema },
+        additionalProperties: false,
+      },
+    });
+
+    // `TransferCommand`(command_intake.rs)が期待するJSON本文を組み立てるVTL。
+    // account-serviceのsqsIntegrationと同じ二重引用符エスケープ回避策(`$q`変数、決定2で
+    // 再利用を確認する対象)を使う。MessageGroupId/MessageDeduplicationIdはどちらも
+    // パスパラメータの`transferId`から導出する——`{transferId}-{action}`という固定サフィックス
+    // 付き文字列がそのまま冪等性キーになる(決定3、Idempotency-Keyヘッダー不要)。
+    const transferSqsIntegration = (transferCommandJsonFragment: string, dedupSuffix: string) =>
+      new apigateway.AwsIntegration({
+        service: "sqs",
+        path: `${cdk.Aws.ACCOUNT_ID}/${transferCommandQueue.queueName}`,
+        integrationHttpMethod: "POST",
+        options: {
+          credentialsRole: transferCommandApiSqsRole,
+          passthroughBehavior: apigateway.PassthroughBehavior.NEVER,
+          requestParameters: {
+            "integration.request.header.Content-Type": `'application/x-www-form-urlencoded'`,
+          },
+          requestTemplates: {
+            "application/json": [
+              "#set($q = '\"')\n",
+              "Action=SendMessage",
+              "&MessageGroupId=$util.urlEncode($input.params('transferId'))",
+              `&MessageDeduplicationId=$util.urlEncode($input.params('transferId'))-${dedupSuffix}`,
+              `&MessageBody=$util.urlEncode("${transferCommandJsonFragment}")`,
+            ].join(""),
+          },
+          integrationResponses: [
+            {
+              statusCode: "202",
+              selectionPattern: "2\\d{2}",
+              responseTemplates: {
+                "application/json": `{"transferId": "$input.params('transferId')", "status": "accepted"}`,
+              },
+            },
+            {
+              statusCode: "502",
+              responseTemplates: {
+                "application/json": `{"message": "failed to enqueue command"}`,
+              },
+            },
+          ],
+        },
+      });
+
+    const startCommandJson = `{\${q}Start\${q}:{\${q}transfer_id\${q}:\${q}$input.params('transferId')\${q},\${q}from_account_id\${q}:\${q}$util.escapeJavaScript($input.path('$.from_account_id'))\${q},\${q}to_account_id\${q}:\${q}$util.escapeJavaScript($input.path('$.to_account_id'))\${q},\${q}amount\${q}:\${q}$util.escapeJavaScript($input.path('$.amount'))\${q}}}`;
+    const confirmCommandJson = `{\${q}Confirm\${q}:{\${q}transfer_id\${q}:\${q}$input.params('transferId')\${q}}}`;
+    const cancelCommandJson = `{\${q}Cancel\${q}:{\${q}transfer_id\${q}:\${q}$input.params('transferId')\${q}}}`;
+    const recallCommandJson = `{\${q}Recall\${q}:{\${q}transfer_id\${q}:\${q}$input.params('transferId')\${q},\${q}original_transfer_id\${q}:\${q}$util.escapeJavaScript($input.path('$.original_transfer_id'))\${q}}}`;
+
+    const transferCommandTransfersResource = transferCommandApi.root.addResource("transfers");
+    const transferCommandTransferResource = transferCommandTransfersResource.addResource("{transferId}");
+
+    // クライアントが新しいtransferIdを生成し、PUTで指定して開始する(決定4、account-service
+    // のPUT /accounts/{accountId}と同じ意味論)。
+    transferCommandTransferResource.addMethod("PUT", transferSqsIntegration(startCommandJson, "start"), {
+      requestValidator: transferCommandRequestValidator,
+      requestModels: { "application/json": startTransferModel },
+      methodResponses: [{ statusCode: "202" }, { statusCode: "502" }],
+    });
+
+    transferCommandTransferResource
+      .addResource("confirm")
+      .addMethod("POST", transferSqsIntegration(confirmCommandJson, "confirm"), {
+        requestValidator: transferCommandParamsOnlyValidator,
+        methodResponses: [{ statusCode: "202" }, { statusCode: "502" }],
+      });
+
+    transferCommandTransferResource
+      .addResource("cancel")
+      .addMethod("POST", transferSqsIntegration(cancelCommandJson, "cancel"), {
+        requestValidator: transferCommandParamsOnlyValidator,
+        methodResponses: [{ statusCode: "202" }, { statusCode: "502" }],
+      });
+
+    // 組戻し。パスの{transferId}は組戻し自身の新しいサガID、取消対象はbodyのoriginal_transfer_id
+    // (決定4: 「新しいリソースをこのIDで作る」というPUTの意味論をStartと揃える)。
+    transferCommandTransferResource
+      .addResource("recall")
+      .addMethod("PUT", transferSqsIntegration(recallCommandJson, "recall"), {
+        requestValidator: transferCommandRequestValidator,
+        requestModels: { "application/json": recallTransferModel },
+        methodResponses: [{ statusCode: "202" }, { statusCode: "502" }],
+      });
+
+    // ==========================================================================
     // Web UIホスティング + CloudFrontによるオリジン統合(docs/adr/0007)
     //
     // queryApi/commandApiはどちらもリソースパスが/accounts/{accountId}から始まる
@@ -878,6 +1130,35 @@ export class AccountPipelineStack extends cdk.Stack {
       ),
     });
 
+    // Transfer serviceの顧客向けAPI(docs/adr/0012決定5)。account-serviceのものとは別プレフィックス
+    // にすることで、CloudFront Function側の書き換えロジックもAPI Gateway側のリソースツリーも
+    // account-serviceのものと独立に保つ。
+    const transferQueryApiPrefixFunction = new cloudfront.Function(this, "TransferQueryApiPrefixFunction", {
+      runtime: cloudfront.FunctionRuntime.JS_2_0,
+      code: cloudfront.FunctionCode.fromInline(
+        [
+          "function handler(event) {",
+          "  var request = event.request;",
+          '  request.uri = request.uri.replace(/^\\/transfer-query-api/, "") || "/";',
+          "  return request;",
+          "}",
+        ].join("\n"),
+      ),
+    });
+
+    const transferCommandApiPrefixFunction = new cloudfront.Function(this, "TransferCommandApiPrefixFunction", {
+      runtime: cloudfront.FunctionRuntime.JS_2_0,
+      code: cloudfront.FunctionCode.fromInline(
+        [
+          "function handler(event) {",
+          "  var request = event.request;",
+          '  request.uri = request.uri.replace(/^\\/transfer-command-api/, "") || "/";',
+          "  return request;",
+          "}",
+        ].join("\n"),
+      ),
+    });
+
     // CloudFrontはデフォルトで任意ヘッダーをオリジンへ転送しないため、Idempotency-Key
     // (ADR-0006決定3)を明示的に転送する。
     const commandApiOriginRequestPolicy = new cloudfront.OriginRequestPolicy(this, "CommandApiOriginRequestPolicy", {
@@ -907,6 +1188,23 @@ export class AccountPipelineStack extends cdk.Stack {
           originRequestPolicy: commandApiOriginRequestPolicy,
           functionAssociations: [
             { function: commandApiPrefixFunction, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST },
+          ],
+        },
+        "/transfer-query-api/*": {
+          origin: new origins.RestApiOrigin(transferQueryApi),
+          cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+          functionAssociations: [
+            { function: transferQueryApiPrefixFunction, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST },
+          ],
+        },
+        "/transfer-command-api/*": {
+          origin: new origins.RestApiOrigin(transferCommandApi),
+          // account-serviceのcommand-apiと同じ理由(デフォルトのALLOW_GET_HEADだとPUT/POSTが
+          // 403になる)。
+          allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+          cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+          functionAssociations: [
+            { function: transferCommandApiPrefixFunction, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST },
           ],
         },
       },
@@ -948,5 +1246,9 @@ export class AccountPipelineStack extends cdk.Stack {
     new cdk.CfnOutput(this, "TransferCommandIntakeFunctionName", { value: transferCommandIntakeFn.functionName });
     new cdk.CfnOutput(this, "TransferSagaStepFunctionName", { value: transferSagaStepFn.functionName });
     new cdk.CfnOutput(this, "TransferOwnerProjectorFunctionName", { value: transferOwnerProjectorFn.functionName });
+    new cdk.CfnOutput(this, "TransferStatusViewTableName", { value: transferStatusViewTable.tableName });
+    new cdk.CfnOutput(this, "TransferStatusProjectorFunctionName", { value: transferStatusProjectorFn.functionName });
+    new cdk.CfnOutput(this, "TransferQueryApiUrl", { value: transferQueryApi.url });
+    new cdk.CfnOutput(this, "TransferCommandApiUrl", { value: transferCommandApi.url });
   }
 }

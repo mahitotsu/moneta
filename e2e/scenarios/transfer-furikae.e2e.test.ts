@@ -4,9 +4,8 @@
 import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { REJECTION_SETTLE_MS, settle, waitFor } from "../support/poll";
-import { getSaga, waitForSagaState } from "../support/sagaState";
 import { openFreshAccount } from "../support/testAccount";
-import { startTransfer } from "../support/transferClient";
+import { createTransferCommandApi, createTransferQueryApi, waitForTransferState } from "../support/transferClient";
 
 const OWNER = "e2e-furikae-owner";
 
@@ -15,19 +14,22 @@ describe("J1/J7: 振替(同一名義)は確認不要で即座に開始され、�
     const outputs = await fetchStackOutputs();
     const commandApi = createCommandApi(outputs.commandApiUrl);
     const queryApi = createQueryApi(outputs.queryApiUrl);
+    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl);
+    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl);
     const fromId = await openFreshAccount(commandApi, queryApi, "1000.00", OWNER);
     const toId = await openFreshAccount(commandApi, queryApi, "0.00", OWNER);
-    const transferId = `e2e-furikae-${crypto.randomUUID()}`;
+    const transferId = crypto.randomUUID();
 
-    await startTransfer(outputs.transferCommandQueueUrl, {
+    const startResponse = await transferCommandApi.start({
       transferId,
       fromAccountId: fromId,
       toAccountId: toId,
       amount: "300.00",
     });
+    expect(startResponse.status).toBe(202);
 
-    const saga = await waitForSagaState(outputs.transferSagaTableName, transferId, ["credited"]);
-    expect(saga.kind).toBe("furikae");
+    const status = await waitForTransferState(transferQueryApi, transferId, ["credited"]);
+    expect(status.kind).toBe("furikae");
 
     await waitFor(
       async () => {
@@ -51,19 +53,22 @@ describe("J2: 送金元の残高不足は送金先に一切影響しない", () 
     const outputs = await fetchStackOutputs();
     const commandApi = createCommandApi(outputs.commandApiUrl);
     const queryApi = createQueryApi(outputs.queryApiUrl);
+    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl);
+    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl);
     const fromId = await openFreshAccount(commandApi, queryApi, "100.00", OWNER);
     const toId = await openFreshAccount(commandApi, queryApi, "0.00", OWNER);
-    const transferId = `e2e-furikae-insufficient-${crypto.randomUUID()}`;
+    const transferId = crypto.randomUUID();
 
-    await startTransfer(outputs.transferCommandQueueUrl, {
+    const startResponse = await transferCommandApi.start({
       transferId,
       fromAccountId: fromId,
       toAccountId: toId,
       amount: "500.00",
     });
+    expect(startResponse.status).toBe(202);
 
-    const saga = await waitForSagaState(outputs.transferSagaTableName, transferId, ["failed"]);
-    expect(saga.state).toBe("failed");
+    const status = await waitForTransferState(transferQueryApi, transferId, ["failed"]);
+    expect(status.state).toBe("failed");
 
     const fromView = await queryApi.getAccount(fromId);
     const toView = await queryApi.getAccount(toId);
@@ -77,6 +82,8 @@ describe("J3: 送金先が入金を受け付けられない場合、送金元へ
     const outputs = await fetchStackOutputs();
     const commandApi = createCommandApi(outputs.commandApiUrl);
     const queryApi = createQueryApi(outputs.queryApiUrl);
+    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl);
+    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl);
     const fromId = await openFreshAccount(commandApi, queryApi, "1000.00", OWNER);
     const toId = await openFreshAccount(commandApi, queryApi, "0.00", OWNER);
 
@@ -90,16 +97,17 @@ describe("J3: 送金先が入金を受け付けられない場合、送金元へ
       { description: `account ${toId} to become frozen` },
     );
 
-    const transferId = `e2e-furikae-compensation-${crypto.randomUUID()}`;
-    await startTransfer(outputs.transferCommandQueueUrl, {
+    const transferId = crypto.randomUUID();
+    const startResponse = await transferCommandApi.start({
       transferId,
       fromAccountId: fromId,
       toAccountId: toId,
       amount: "300.00",
     });
+    expect(startResponse.status).toBe(202);
 
-    const saga = await waitForSagaState(outputs.transferSagaTableName, transferId, ["compensated"]);
-    expect(saga.state).toBe("compensated");
+    const status = await waitForTransferState(transferQueryApi, transferId, ["compensated"]);
+    expect(status.state).toBe("compensated");
 
     await waitFor(
       async () => {
@@ -118,10 +126,12 @@ describe("J4: 同一口座への送金は要求時点で却下される", () => 
     const outputs = await fetchStackOutputs();
     const commandApi = createCommandApi(outputs.commandApiUrl);
     const queryApi = createQueryApi(outputs.queryApiUrl);
+    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl);
+    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl);
     const accountId = await openFreshAccount(commandApi, queryApi, "100.00", OWNER);
-    const transferId = `e2e-furikae-same-account-${crypto.randomUUID()}`;
+    const transferId = crypto.randomUUID();
 
-    await startTransfer(outputs.transferCommandQueueUrl, {
+    await transferCommandApi.start({
       transferId,
       fromAccountId: accountId,
       toAccountId: accountId,
@@ -133,8 +143,8 @@ describe("J4: 同一口座への送金は要求時点で却下される", () => 
     // 経由しないため)十分な時間待てば処理は終わっているはずである。
     await settle(REJECTION_SETTLE_MS);
 
-    const saga = await getSaga(outputs.transferSagaTableName, transferId);
-    expect(saga).toBeNull();
+    const status = await transferQueryApi.getTransferStatus(transferId);
+    expect(status).toBeNull();
 
     const view = await queryApi.getAccount(accountId);
     expect(Number(view?.balance)).toBe(100.0);

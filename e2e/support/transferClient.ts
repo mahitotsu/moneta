@@ -1,12 +1,33 @@
-import { SendMessageCommand, SQSClient } from "@aws-sdk/client-sqs";
-import { REGION } from "./stackOutputs";
+import { rawRequest, RawResponse } from "./httpClient";
+import { waitFor, WaitForOptions } from "./poll";
 
-// Transfer受付キュー(`moneta-transfer-commands-main.fifo`)への直接SendMessage
-// (docs/adr/0010決定6: 顧客向けAPI Gatewayはまだ無く、SQS直接投入のみ)。
-// メッセージ本文の形はcrates/transfer-service/src/bin/command_intake.rsの
-// `TransferCommand`(serdeのデフォルト外部タグ付け)と一致させる——コード共有はせず
-// 独立に定義する(e2e/support/httpClient.tsがaccount-serviceの契約を独立に
-// 保持しているのと同じ理由、docs/adr/0011)。
+// Transfer serviceの顧客向けAPI(docs/adr/0012)。account-serviceのhttpClient.tsと同じ役割
+// (Command API + Query API のHTTPラッパー)をTransfer向けに提供する——docs/adr/0010決定6時点の
+// SQS直接投入/DynamoDB直接ポーリングという裏口は、この増分で正式なAPIに置き換わった
+// (docs/e2e-scenarios.md参照)。
+
+export type TransferKind = "furikae" | "furikomi" | "recall";
+
+export type SagaState =
+  | "pending_confirmation"
+  | "pending_debit"
+  | "pending_credit"
+  | "compensating"
+  | "credited"
+  | "compensated"
+  | "failed"
+  | "cancelled";
+
+export interface TransferStatusView {
+  transferId: string;
+  fromAccountId: string;
+  toAccountId: string;
+  amount: string;
+  kind: TransferKind;
+  state: SagaState;
+  updatedAt: string;
+}
+
 export interface StartTransferInput {
   transferId: string;
   fromAccountId: string;
@@ -19,47 +40,71 @@ export interface RecallTransferInput {
   originalTransferId: string;
 }
 
-let cachedClient: SQSClient | undefined;
-function client(): SQSClient {
-  if (!cachedClient) cachedClient = new SQSClient({ region: REGION });
-  return cachedClient;
+export interface TransferCommandApi {
+  start(input: StartTransferInput): Promise<RawResponse>;
+  confirm(transferId: string): Promise<RawResponse>;
+  cancel(transferId: string): Promise<RawResponse>;
+  recall(input: RecallTransferInput): Promise<RawResponse>;
 }
 
-// FIFOキューなので`MessageGroupId`/`MessageDeduplicationId`が必須。同一transferIdに対する
-// 一連の操作(Start→Confirm等)を`MessageGroupId`で直列化する——サガ状態のCAS
-// (advance_saga_state)自体が並行更新に安全だが、直列化しておけば受付側での順序も揃う。
-async function send(queueUrl: string, groupId: string, dedupSuffix: string, body: unknown): Promise<void> {
-  await client().send(
-    new SendMessageCommand({
-      QueueUrl: queueUrl,
-      MessageBody: JSON.stringify(body),
-      MessageGroupId: groupId,
-      MessageDeduplicationId: `${groupId}-${dedupSuffix}`,
-    }),
-  );
+// docs/adr/0012決定3: Idempotency-Keyヘッダーは要求しない(transferIdとアクション名の組が
+// VTL側で導出する冪等性キーになるため)。account-serviceのcreateCommandApiと異なり、呼び出し側
+// がヘッダーを用意する必要はない。
+export function createTransferCommandApi(baseUrl: string): TransferCommandApi {
+  return {
+    start: (input) =>
+      rawRequest(`${baseUrl}/transfers/${input.transferId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from_account_id: input.fromAccountId,
+          to_account_id: input.toAccountId,
+          amount: input.amount,
+        }),
+      }),
+    confirm: (transferId) => rawRequest(`${baseUrl}/transfers/${transferId}/confirm`, { method: "POST" }),
+    cancel: (transferId) => rawRequest(`${baseUrl}/transfers/${transferId}/cancel`, { method: "POST" }),
+    recall: (input) =>
+      rawRequest(`${baseUrl}/transfers/${input.transferId}/recall`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ original_transfer_id: input.originalTransferId }),
+      }),
+  };
 }
 
-export async function startTransfer(queueUrl: string, input: StartTransferInput): Promise<void> {
-  await send(queueUrl, input.transferId, "start", {
-    Start: {
-      transfer_id: input.transferId,
-      from_account_id: input.fromAccountId,
-      to_account_id: input.toAccountId,
-      amount: input.amount,
+export interface TransferQueryApi {
+  getTransferStatus(transferId: string): Promise<TransferStatusView | null>;
+}
+
+export function createTransferQueryApi(baseUrl: string): TransferQueryApi {
+  return {
+    getTransferStatus: async (transferId) => {
+      const response = await rawRequest<TransferStatusView>(`${baseUrl}/transfers/${transferId}`);
+      if (response.status === 404) return null;
+      if (response.status !== 200) {
+        throw new Error(
+          `getTransferStatus(${transferId}) unexpected status ${response.status}: ${JSON.stringify(response.body)}`,
+        );
+      }
+      return response.body;
     },
-  });
+  };
 }
 
-export async function confirmTransfer(queueUrl: string, transferId: string): Promise<void> {
-  await send(queueUrl, transferId, "confirm", { Confirm: { transfer_id: transferId } });
-}
-
-export async function cancelTransfer(queueUrl: string, transferId: string): Promise<void> {
-  await send(queueUrl, transferId, "cancel", { Cancel: { transfer_id: transferId } });
-}
-
-export async function recallTransfer(queueUrl: string, input: RecallTransferInput): Promise<void> {
-  await send(queueUrl, input.transferId, "recall", {
-    Recall: { transfer_id: input.transferId, original_transfer_id: input.originalTransferId },
-  });
+// `support/sagaState.ts`の旧`waitForSagaState`と同じ役割を、DynamoDB直接ポーリングではなく
+// この新しい照会APIで果たす(docs/adr/0012決定1、裏口の解消)。
+export async function waitForTransferState(
+  queryApi: TransferQueryApi,
+  transferId: string,
+  expectedStates: SagaState[],
+  options: WaitForOptions = {},
+): Promise<TransferStatusView> {
+  return waitFor(
+    async () => {
+      const status = await queryApi.getTransferStatus(transferId);
+      return status && expectedStates.includes(status.state) ? status : undefined;
+    },
+    { description: `transfer ${transferId} to reach state in [${expectedStates.join(", ")}]`, ...options },
+  );
 }

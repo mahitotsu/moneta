@@ -23,6 +23,9 @@ export interface StackOutputs {
   transferCommandQueueUrl: string;
   transferSagaTableName: string;
   transferAccountOwnersTableName: string;
+  // Transfer serviceの顧客向け入口(docs/adr/0012)。
+  transferCommandApiUrl: string;
+  transferQueryApiUrl: string;
 }
 
 const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
@@ -39,6 +42,8 @@ const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
   transferCommandQueueUrl: "TransferCommandQueueUrl",
   transferSagaTableName: "TransferSagaTableName",
   transferAccountOwnersTableName: "TransferAccountOwnersTableName",
+  transferCommandApiUrl: "TransferCommandApiUrl",
+  transferQueryApiUrl: "TransferQueryApiUrl",
 };
 
 export async function fetchStackOutputs(): Promise<StackOutputs> {

@@ -3,63 +3,17 @@ import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from "@aws-sdk/lib-
 import { REGION } from "./stackOutputs";
 import { waitFor, WaitForOptions } from "./poll";
 
-export type SagaState =
-  | "pending_confirmation"
-  | "pending_debit"
-  | "pending_credit"
-  | "compensating"
-  | "credited"
-  | "compensated"
-  | "failed"
-  | "cancelled";
-
-export type TransferKind = "furikae" | "furikomi" | "recall";
-
-export interface SagaItem {
-  transferId: string;
-  fromAccountId: string;
-  toAccountId: string;
-  amount: string;
-  kind: TransferKind;
-  state: SagaState;
-  updatedAt: string;
-}
-
 let cachedDoc: DynamoDBDocumentClient | undefined;
 function doc(): DynamoDBDocumentClient {
   if (!cachedDoc) cachedDoc = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
   return cachedDoc;
 }
 
-// `crates/transfer-service/src/persistence.rs`のDynamoDB項目の形と一致させる
-// (transferId/fromAccountId/toAccountId/amount/kind/state/updatedAt)。
-export async function getSaga(sagaTableName: string, transferId: string): Promise<SagaItem | null> {
-  const result = await doc().send(new GetCommand({ TableName: sagaTableName, Key: { transferId } }));
-  return (result.Item as SagaItem | undefined) ?? null;
-}
-
-// account-serviceのイベントがDynamoDB Streams駆動のoutbox(docs/adr/0004・0013)経由で
-// EventBridgeへ発行されて初めてtransfer-saga-step/transfer-owner-projectorが動くため、
-// サガ状態の収束もaccount残高の収束と同じ`waitFor`ポーリングで待てる
-// (docs/adr/0004・0010・0011、e2e/README.md)。
-export async function waitForSagaState(
-  sagaTableName: string,
-  transferId: string,
-  expectedStates: SagaState[],
-  options: WaitForOptions = {},
-): Promise<SagaItem> {
-  return waitFor(
-    async () => {
-      const saga = await getSaga(sagaTableName, transferId);
-      return saga && expectedStates.includes(saga.state) ? saga : undefined;
-    },
-    { description: `saga ${transferId} to reach state in [${expectedStates.join(", ")}]`, ...options },
-  );
-}
-
 // 口座名義インデックス(`crates/transfer-service/src/bin/owner_projector.rs`、docs/adr/0011)への
 // 反映待ち。`account.event.Opened`のoutbox発行を経て投影されるため、これも`waitFor`で
-// ポーリングする。
+// ポーリングする。照会APIを持たない内部専用インデックスであり(docs/adr/0012はサガ状態の
+// 照会APIだけを新設した——名義インデックスはfurikae/furikomi判定というTransfer service内部の
+// 関心事に留まる)、この直接アクセスは裏口ではなく妥当な検証手段である。
 export async function waitForOwnerIndexed(
   ownerTableName: string,
   accountId: string,
@@ -79,7 +33,9 @@ export async function waitForOwnerIndexed(
 // 待つ代わりに`updatedAt`を直接過去へ書き換えて模擬する(docs/e2e-scenarios.md J10)。
 // アプリケーションの通常の書き込み経路(advance_saga_state)を経由しない、この検証だけの
 // 裏口であることを明示するため、他のヘルパーとは呼び出し方を変えている
-// (support/dlq.tsがDLQを直接操作するのと同じ位置づけ)。
+// (support/dlq.tsがDLQを直接操作するのと同じ位置づけ)。公開APIには対応する経路が
+// そもそも存在しない(実時間を早送りする手段はAPIでは提供できない)ため、docs/adr/0012の
+// 照会API新設後もこの直接書き込みは残す。
 export async function backdateSagaUpdatedAt(sagaTableName: string, transferId: string, hoursAgo: number): Promise<void> {
   const backdated = new Date(Date.now() - hoursAgo * 60 * 60 * 1000).toISOString();
   await doc().send(

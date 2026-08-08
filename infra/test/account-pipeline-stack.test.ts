@@ -70,7 +70,7 @@ describe("AccountPipelineStack", () => {
   // ロールバック後の再デプロイが「テーブルは既に存在する」で失敗した(TransferSagaTable)。
   // 全てのDynamoDBテーブルがこの落とし穴を回避できているかを固定する回帰テスト
   // (docs/adr/0011でTransferAccountOwnersTableを、docs/adr/0013でaccount-service自身の
-  // 3テーブルを追加)。
+  // 3テーブルを、docs/adr/0012でTransferStatusViewTableを追加)。
   test("all DynamoDB tables are set to DESTROY on stack/changeset rollback, not the RETAIN default", () => {
     const tables = template.findResources("AWS::DynamoDB::Table");
     const tableNames = Object.values(tables).map((table) => table.Properties.TableName);
@@ -83,6 +83,7 @@ describe("AccountPipelineStack", () => {
         "moneta-processed-messages",
         "moneta-transfer-account-owners",
         "moneta-transfer-sagas",
+        "moneta-transfer-status-view",
       ].sort(),
     );
     for (const table of Object.values(tables)) {
@@ -123,8 +124,8 @@ describe("AccountPipelineStack", () => {
     });
   });
 
-  test("creates exactly eight Lambda functions: write path, outbox projector, query projector, the three transfer-service functions (command intake, saga step, owner projector), and the two Web UI hosting custom-resource handlers (S3 auto-delete-objects, BucketDeployment sync)", () => {
-    template.resourceCountIs("AWS::Lambda::Function", 8);
+  test("creates exactly nine Lambda functions: write path, outbox projector, query projector, the four transfer-service functions (command intake, saga step, owner projector, status projector), and the two Web UI hosting custom-resource handlers (S3 auto-delete-objects, BucketDeployment sync)", () => {
+    template.resourceCountIs("AWS::Lambda::Function", 9);
   });
 
   // docs/adr/0013: grantReadWriteData()はdynamodb:TransactWriteItemsを含まないため
@@ -214,6 +215,75 @@ describe("AccountPipelineStack", () => {
     }
   });
 
+  // docs/adr/0012決定1: TransferSagaTable(書き込み専用)を直接晒さず、DynamoDB Streamsで
+  // 専用のTransferStatusViewへ投影する。
+  test("transfer_sagas table has a stream, and the status projector is wired to it via an event source mapping", () => {
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      TableName: "moneta-transfer-sagas",
+      StreamSpecification: { StreamViewType: "NEW_IMAGE" },
+    });
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      TableName: "moneta-transfer-status-view",
+      BillingMode: "PAY_PER_REQUEST",
+      KeySchema: [{ AttributeName: "transferId", KeyType: "HASH" }],
+    });
+    template.hasResourceProperties("AWS::Lambda::EventSourceMapping", {
+      StartingPosition: "TRIM_HORIZON",
+      FunctionResponseTypes: ["ReportBatchItemFailures"],
+    });
+  });
+
+  test("exposes GET /transfers/{transferId} as a direct DynamoDB integration against TransferStatusView, not TransferSagaTable", () => {
+    template.hasResourceProperties("AWS::ApiGateway::Method", {
+      HttpMethod: "GET",
+      Integration: Match.objectLike({
+        Type: "AWS",
+        IntegrationHttpMethod: "POST",
+        RequestTemplates: Match.objectLike({
+          // テーブル名自体はRef(実体名は合成時点では解決されない)なので、リテラルとして
+          // 常に現れる文字列(account-serviceの既存テストと同じ"TableName"、パスパラメータ名の
+          // "transferId")で判定する。
+          "application/json": Match.objectLike({
+            "Fn::Join": Match.arrayWith([
+              Match.arrayWith([Match.stringLikeRegexp("TableName"), Match.stringLikeRegexp("transferId")]),
+            ]),
+          }),
+        }),
+      }),
+    });
+  });
+
+  // docs/adr/0012決定3: Idempotency-Keyヘッダーは要求しない(account-serviceのコマンドAPIとは
+  // 異なる)。決定4のリソース構成(PUT /transfers/{id}、POST confirm/cancel、PUT recall)が
+  // 全てSQS直接統合として存在することを確認する。
+  test("transfer command API exposes Start/Confirm/Cancel/Recall as SQS direct integrations without requiring an Idempotency-Key header", () => {
+    const methods = template.findResources("AWS::ApiGateway::Method");
+    const transferSqsMethods = Object.values(methods).filter(
+      (m) =>
+        m.Properties?.Integration?.Type === "AWS" &&
+        // キューの物理名(moneta-transfer-commands-main.fifo)はFn::GetAttで参照されるため
+        // 合成時点ではリテラルに現れない。論理ID(TransferCommandQueue)で判定する。
+        JSON.stringify(m.Properties?.Integration?.Uri ?? "").includes("TransferCommandQueue"),
+    );
+    expect(transferSqsMethods).toHaveLength(4); // Start(PUT)/Confirm(POST)/Cancel(POST)/Recall(PUT)
+    for (const method of transferSqsMethods) {
+      expect(method.Properties.RequestParameters ?? {}).not.toHaveProperty(
+        "method.request.header.Idempotency-Key",
+      );
+    }
+  });
+
+  test("routes /transfer-query-api/* and /transfer-command-api/* to their respective REST APIs with caching disabled", () => {
+    template.hasResourceProperties("AWS::CloudFront::Distribution", {
+      DistributionConfig: Match.objectLike({
+        CacheBehaviors: Match.arrayWith([
+          Match.objectLike({ PathPattern: "/transfer-query-api/*" }),
+          Match.objectLike({ PathPattern: "/transfer-command-api/*" }),
+        ]),
+      }),
+    });
+  });
+
   // docs/adr/0006決定5: 金額の精度は小数点以下2桁まで(実デプロイでDBラウンドトリップ由来の
   // スケールのブレを発見したことを契機に、APIの仕様として明示した)。3桁以上はAPI Gatewayの
   // リクエスト検証で構造的に拒否する(account-domainのAMOUNT_DECIMAL_PLACESと合わせる)。
@@ -229,7 +299,9 @@ describe("AccountPipelineStack", () => {
           .filter((pattern): pattern is string => pattern !== undefined);
       })
       .flat();
-    expect(patterns).toHaveLength(2); // OpenCommandModel(initial_balance) + AmountCommandModel(amount)
+    // OpenCommandModel(initial_balance) + AmountCommandModel(amount) + StartTransferModel(amount、
+    // docs/adr/0012決定4がACCOUNT-serviceの決定5をそのまま踏襲)。
+    expect(patterns).toHaveLength(3);
     for (const pattern of patterns) {
       expect(pattern).toBe("^-?\\d+(\\.\\d{1,2})?$");
     }

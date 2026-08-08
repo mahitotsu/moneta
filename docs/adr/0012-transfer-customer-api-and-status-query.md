@@ -2,10 +2,8 @@
 
 ## ステータス
 
-Proposed。[[0010-transfer-service-saga]]決定6・[[0011-furikae-furikomi-distinction]]が
-「次の増分」として明示的に据え置いていた領域に着手する。本ADRはその設計を確定するもので、
-実装(`infra/lib/account-pipeline-stack.ts`のAPI Gateway追加、`web-ui/`の顧客向け画面)は
-これに続く。
+決定1〜5(送金状態照会API・送金受付API)はAccepted、実装・実デプロイ・E2E検証済み
+(`e2e/`、20スイート35テスト)。決定6(Web UI)はProposedのまま、次のセッションで着手する。
 
 ## コンテキスト
 

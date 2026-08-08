@@ -60,14 +60,20 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
   furikomi, a per-transfer amount limit for furikomi, and recall (組戻し) modeled as a fresh
   `kind = Recall` saga rather than a new terminal state. Customer-facing API Gateway/UI remains
   out of scope, same as `0010` decision 6.
-- `0012`: Transfer service's customer-facing increment (proposed, not yet implemented) — a
-  status-query API Gateway direct-integrated to a new `TransferStatusView` table, kept
-  deliberately separate from the operational `TransferSagaTable` and populated via DynamoDB
-  Streams → a new `transfer-status-projector` Lambda (same shape as the existing
-  `transfer-owner-projector`, not a new query-service/transfer-service coupling); a command API
-  Gateway mirroring `0006`'s Lambda-less SQS pattern for `Start`/`Confirm`/`Cancel`/`Recall`;
-  and web-ui screens where the customer's own transfer history lives in localStorage only (same
-  choice `0009` made for account ownership) rather than a new server-side per-account index.
+- `0012`: Transfer service's customer-facing increment — decisions 1-5 (backend) are Accepted,
+  deployed, and E2E-verified (`e2e/`, 20 suites/35 tests); decision 6 (web-ui) is still
+  Proposed/not implemented. A status-query API Gateway direct-integrated to a new
+  `TransferStatusView` table, kept deliberately separate from the operational
+  `TransferSagaTable` and populated via DynamoDB Streams → a new `transfer-status-projector`
+  Lambda (same shape as the existing `transfer-owner-projector`, not a new
+  query-service/transfer-service coupling); a command API Gateway mirroring `0006`'s Lambda-less
+  SQS pattern for `Start`/`Confirm`/`Cancel`/`Recall`, deliberately requiring no
+  `Idempotency-Key` header (transferId+action already gives VTL a deterministic dedup key,
+  unlike account-service's Deposit/Withdraw). `e2e/support/transferClient.ts` and
+  `sagaState.ts`'s old SQS/DynamoDB-direct backdoor were replaced with real HTTP calls against
+  these APIs. Still to do: web-ui screens where the customer's own transfer history lives in
+  localStorage only (same choice `0009` made for account ownership) rather than a new
+  server-side per-account index.
 - `0013`: account-service's persistence store is DynamoDB, not Aurora DSQL — account-service's
   data-access pattern (single-partition-key reads/writes, one atomic multi-item write per
   message covering account state + outbox event + idempotency log, optimistic concurrency)

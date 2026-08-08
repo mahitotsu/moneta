@@ -5,9 +5,9 @@
 import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { REJECTION_SETTLE_MS, settle, waitFor } from "../support/poll";
-import { getSaga, waitForOwnerIndexed, waitForSagaState } from "../support/sagaState";
+import { waitForOwnerIndexed } from "../support/sagaState";
 import { openFreshAccount } from "../support/testAccount";
-import { confirmTransfer, startTransfer } from "../support/transferClient";
+import { createTransferCommandApi, createTransferQueryApi, waitForTransferState } from "../support/transferClient";
 
 // 送金元・送金先で異なる名義にするため、テストごとにユニークな2つのowner_idを使う
 // (同じowner_idを複数テストで使い回すと、名義そのものは衝突しても実害はないが、
@@ -22,6 +22,8 @@ describe("J5/J6: 振込(名義不一致)は確認前は出金されず、確認�
     const outputs = await fetchStackOutputs();
     const commandApi = createCommandApi(outputs.commandApiUrl);
     const queryApi = createQueryApi(outputs.queryApiUrl);
+    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl);
+    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl);
     const [ownerA, ownerB] = distinctOwners();
     const fromId = await openFreshAccount(commandApi, queryApi, "1000.00", ownerA);
     const toId = await openFreshAccount(commandApi, queryApi, "0.00", ownerB);
@@ -32,24 +34,26 @@ describe("J5/J6: 振込(名義不一致)は確認前は出金されず、確認�
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, fromId);
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, toId);
 
-    const transferId = `e2e-furikomi-${crypto.randomUUID()}`;
-    await startTransfer(outputs.transferCommandQueueUrl, {
+    const transferId = crypto.randomUUID();
+    const startResponse = await transferCommandApi.start({
       transferId,
       fromAccountId: fromId,
       toAccountId: toId,
       amount: "300.00",
     });
+    expect(startResponse.status).toBe(202);
 
-    const pending = await waitForSagaState(outputs.transferSagaTableName, transferId, ["pending_confirmation"]);
+    const pending = await waitForTransferState(transferQueryApi, transferId, ["pending_confirmation"]);
     expect(pending.kind).toBe("furikomi");
     const fromBeforeConfirm = await queryApi.getAccount(fromId);
     const toBeforeConfirm = await queryApi.getAccount(toId);
     expect(Number(fromBeforeConfirm?.balance)).toBe(1000.0);
     expect(Number(toBeforeConfirm?.balance)).toBe(0.0);
 
-    await confirmTransfer(outputs.transferCommandQueueUrl, transferId);
+    const confirmResponse = await transferCommandApi.confirm(transferId);
+    expect(confirmResponse.status).toBe(202);
 
-    const credited = await waitForSagaState(outputs.transferSagaTableName, transferId, ["credited"]);
+    const credited = await waitForTransferState(transferQueryApi, transferId, ["credited"]);
     expect(credited.state).toBe("credited");
     await waitFor(
       async () => {
@@ -73,15 +77,17 @@ describe("J8: 振込の上限額超過は受付時点で却下される", () => 
     const outputs = await fetchStackOutputs();
     const commandApi = createCommandApi(outputs.commandApiUrl);
     const queryApi = createQueryApi(outputs.queryApiUrl);
+    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl);
+    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl);
     const [ownerA, ownerB] = distinctOwners();
     const fromId = await openFreshAccount(commandApi, queryApi, "1000.00", ownerA);
     const toId = await openFreshAccount(commandApi, queryApi, "0.00", ownerB);
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, fromId);
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, toId);
 
-    const transferId = `e2e-furikomi-over-limit-${crypto.randomUUID()}`;
+    const transferId = crypto.randomUUID();
     // saga.rsのFURIKOMI_MAX_AMOUNT(1,000,000)を超える金額(docs/adr/0011決定4)。
-    await startTransfer(outputs.transferCommandQueueUrl, {
+    await transferCommandApi.start({
       transferId,
       fromAccountId: fromId,
       toAccountId: toId,
@@ -90,8 +96,8 @@ describe("J8: 振込の上限額超過は受付時点で却下される", () => 
 
     await settle(REJECTION_SETTLE_MS);
 
-    const saga = await getSaga(outputs.transferSagaTableName, transferId);
-    expect(saga).toBeNull();
+    const status = await transferQueryApi.getTransferStatus(transferId);
+    expect(status).toBeNull();
     const fromView = await queryApi.getAccount(fromId);
     expect(Number(fromView?.balance)).toBe(1000.0);
   });
