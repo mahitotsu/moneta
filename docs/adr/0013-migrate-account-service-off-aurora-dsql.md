@@ -3,7 +3,7 @@
 ## ステータス
 
 Accepted。`crates/account-service`・`infra/lib/account-pipeline-stack.ts`に実装済みで、
-実デプロイ・E2Eスイート(`e2e/`、20スイート35テスト)で検証済み。
+実デプロイ・E2Eスイート(`api-e2e/`、20スイート35テスト)で検証済み。
 [[0002-sqs-message-lifecycle-and-error-classification]]・
 [[0004-query-service-event-driven-projection]]の記述もこの決定に合わせて更新済み。
 [[0005-automated-schema-migration-custom-resource]]は対象が消滅したため削除済み。
@@ -135,7 +135,7 @@ grantしても、その中の`Put`/`Update`/`ConditionCheck`個別のアクシ�
 
 実デプロイ後、`account_events`への書き込みから照会API(`GET /accounts/{id}`)への反映までを
 手動測定したところ、数秒程度で収束した(旧EventBridge Scheduler方式の「最大約1分」という
-上限から大幅に短縮)。`e2e/`のE2Eスイート(20スイート・35テスト)は全件成功し、
+上限から大幅に短縮)。`api-e2e/`のE2Eスイート(20スイート・35テスト)は全件成功し、
 `support/poll.ts`の`waitFor`をデフォルトタイムアウト30秒・1秒間隔に簡素化した状態(加速用の
-`triggerRelay`フックは削除、[[0004]]・e2e/README.md参照)でも安定して収束することを確認した。
+`triggerRelay`フックは削除、[[0004]]・api-e2e/README.md参照)でも安定して収束することを確認した。
 決定5に記載したIAM権限の不足は、この検証の過程で実際に発見・修正したものである。

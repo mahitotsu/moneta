@@ -1,5 +1,5 @@
 // Deployed-stack introspection shared by operational scripts (scripts/clean-data.ts) and the
-// E2E test harness (e2e/): both need to resolve live endpoint URLs/resource names via
+// E2E test harness (api-e2e/): both need to resolve live endpoint URLs/resource names via
 // CloudFormation outputs rather than hardcoding them.
 import { CloudFormationClient, DescribeStacksCommand } from "@aws-sdk/client-cloudformation";
 

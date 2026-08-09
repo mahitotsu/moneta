@@ -4,7 +4,7 @@ use serde::Serialize;
 
 /// account-serviceのSQS FIFOキューへ送るメッセージ本文の形。account-serviceの
 /// `AccountCommandEnvelope`(`persistence.rs`)と同じJSON形状を、コード共有はせず独立に
-/// 定義する(infra/e2e/support/httpClientと同じ理由——契約を変更したら両方を追随させる)。
+/// 定義する(api-e2e/support/httpClientと同じ理由——契約を変更したら両方を追随させる)。
 /// `command`だけは`account_domain::Command`を直接使うため、コマンドの形自体がドリフトする
 /// 心配はない(docs/adr/0010決定1: コマンドAPIを経由せずSQSへ直接送る)。
 #[derive(Serialize)]

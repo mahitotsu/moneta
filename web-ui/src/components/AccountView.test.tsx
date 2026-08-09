@@ -1,7 +1,7 @@
 // Covers docs/e2e-scenarios.md F3 --反映待ち(結果整合性のラグ)と一時的な取得失敗は、顧客
 // から見れば区別がつかない「まだ表示できていない」でしかなく、どちらも「エラー」と言い切らず
 // 同じ穏やかな文言で表示し、既に取得済みの残高があればそれを表示し続ける(AccountView.tsx
-// のコメント参照)。この主張はinfra/e2eのHTTPベースのハーネスでは検証できない(実際の画面の
+// のコメント参照)。この主張はapi-e2eのHTTPベースのハーネスでは検証できない(実際の画面の
 // 表示ロジックはWeb UI側のコードにしかない)ため、コンポーネント単体で検証する。
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";

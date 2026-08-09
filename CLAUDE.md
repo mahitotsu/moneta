@@ -61,17 +61,17 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
   `kind = Recall` saga rather than a new terminal state. Customer-facing API Gateway/UI remains
   out of scope, same as `0010` decision 6.
 - `0012`: Transfer service's customer-facing increment — decisions 1-5 (backend) are Accepted,
-  deployed, and E2E-verified (`e2e/`, 20 suites/35 tests); decision 6 (web-ui) is still
-  Proposed/not implemented. A status-query API Gateway direct-integrated to a new
+  deployed, and E2E-verified (`api-e2e/`, 20 suites/35 tests); decision 6 (web-ui) is
+  implemented, see below. A status-query API Gateway direct-integrated to a new
   `TransferStatusView` table, kept deliberately separate from the operational
   `TransferSagaTable` and populated via DynamoDB Streams → a new `transfer-status-projector`
   Lambda (same shape as the existing `transfer-owner-projector`, not a new
   query-service/transfer-service coupling); a command API Gateway mirroring `0006`'s Lambda-less
   SQS pattern for `Start`/`Confirm`/`Cancel`/`Recall`, deliberately requiring no
   `Idempotency-Key` header (transferId+action already gives VTL a deterministic dedup key,
-  unlike account-service's Deposit/Withdraw). `e2e/support/transferClient.ts` and
+  unlike account-service's Deposit/Withdraw). `api-e2e/support/transferClient.ts` and
   `sagaState.ts`'s old SQS/DynamoDB-direct backdoor were replaced with real HTTP calls against
-  these APIs. Still to do: web-ui screens where the customer's own transfer history lives in
+  these APIs. Web-ui screens (振替/振込, decision 6) keep the customer's own transfer history in
   localStorage only (same choice `0009` made for account ownership) rather than a new
   server-side per-account index.
 - `0013`: account-service's persistence store is DynamoDB, not Aurora DSQL — account-service's
@@ -83,7 +83,7 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
   optimistic-locking pattern; the outbox is DynamoDB Streams → a projector Lambda (same shape as
   `0012`'s `transfer-status-projector`) instead of a polling relay; `0005`'s schema-migration
   Custom Resource has no counterpart (DynamoDB is schemaless) and is deleted. Deployed and
-  verified against the live stack (`e2e/`, 20 suites/35 tests green) — real-deployment gotcha:
+  verified against the live stack (`api-e2e/`, 20 suites/35 tests green) — real-deployment gotcha:
   `dynamodb:TransactWriteItems` alone doesn't authorize a transaction; IAM also requires the
   per-item action (`PutItem`/`UpdateItem`/`ConditionCheckItem`) granted separately, discovered
   via `AccessDeniedException` on first deploy (ADR-0013 decision 5).
@@ -123,21 +123,22 @@ skipped if absent). Likewise `cargo build`'s own `/target` is kept bounded on ev
 only on infra runs).
 
 ```bash
-cd e2e
+cd api-e2e
 npm test             # exercises the LIVE DEPLOYED STACK (real HTTP/SQS/DynamoDB calls) —
                       # this tests whatever is currently deployed, not your working tree.
                       # Run `infra`'s `npm run deploy` first if you've changed anything under
                       # crates/ or infra/lib/ since the last deploy, or you'll be testing stale
-                      # code and get a misleading pass/fail. See e2e/README.md.
+                      # code and get a misleading pass/fail. See api-e2e/README.md.
 ```
 
-`e2e/` is its own top-level package, independent of `infra/` (it only reads the deployed
-stack's CloudFormation outputs — see `e2e/README.md` for why it isn't nested under `infra/`
-despite testing what `infra/` deploys).
+`api-e2e/` is its own top-level package, independent of `infra/` (it only reads the deployed
+stack's CloudFormation outputs — see `api-e2e/README.md` for why it isn't nested under `infra/`
+despite testing what `infra/` deploys). It's named `api-e2e` (not just `e2e`) because it only
+drives the HTTP APIs directly — it doesn't touch the deployed web-ui through a browser.
 
 Three tiers of testing, in increasing order of what they need and what they actually prove:
 `cargo test`/`clippy` (source only, no AWS) → CDK synth tests (source only, no AWS, but proves
-the infra actually synthesizes/bundles) → `e2e`'s `npm test` (needs a live, up-to-date
+the infra actually synthesizes/bundles) → `api-e2e`'s `npm test` (needs a live, up-to-date
 deployment; proves the deployed system behaves as documented in `docs/e2e-scenarios.md`). Only
 the first two run in CI (`.github/workflows/ci.yml`) — the E2E suite needs real AWS credentials
 and a deployed stack, so it stays manual/on-demand.

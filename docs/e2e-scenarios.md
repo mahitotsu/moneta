@@ -245,8 +245,8 @@ Then `maxReceiveCount`超過後にFIFO DLQに到達し、CloudWatchアラーム�
 ## J. Transfer service(口座間送金のサガ)
 
 顧客向けAPI Gateway(送金受付・状態照会)は[[0012-transfer-customer-api-and-status-query]]で
-実装済み。`e2e/scenarios/transfer-*.e2e.test.ts`が`support/transferClient.ts`経由でHTTP越しに
-検証する(`e2e/README.md`のシナリオ対応表参照)。`createTransferCommandApi`が
+実装済み。`api-e2e/scenarios/transfer-*.e2e.test.ts`が`support/transferClient.ts`経由でHTTP越しに
+検証する(`api-e2e/README.md`のシナリオ対応表参照)。`createTransferCommandApi`が
 `PUT /transfers/{transferId}`(Start)・`POST .../confirm`・`POST .../cancel`・
 `PUT .../recall`を、`createTransferQueryApi`が`GET /transfers/{transferId}`
 (`TransferStatusView`への直接統合)を呼ぶ。口座名義インデックス
@@ -254,7 +254,9 @@ Then `maxReceiveCount`超過後にFIFO DLQに到達し、CloudWatchアラーム�
 これはTransfer service内部の関心事に留まるため引き続きDynamoDB直接ポーリングのままである。
 J10の「組戻し時間窓の期限超過」だけは実時間24時間を待つ代わりに、`updatedAt`を直接書き換える
 テスト専用の裏口(`backdateSagaUpdatedAt`)で模擬している——公開APIには対応する経路が
-そもそも存在しない。Web UI(振替/振込画面)は引き続き未実装。
+そもそも存在しない。Web UI(振替/振込画面)は実装済み(`web-ui/src/components/TransferListScreen.tsx`
+他)だが、ブラウザ自動化を伴うUI層のハッピーパス確認は`api-e2e`のスコープ外のままである
+(`ui-e2e/`で別途対応予定)。
 
 **J1. 正常な送金は送金元の減少・送金先の増加として反映される**
 Given 送金元・送金先とも有効な口座

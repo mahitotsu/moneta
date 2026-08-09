@@ -3,7 +3,7 @@
 ## ステータス
 
 決定1〜5(送金状態照会API・送金受付API)はAccepted、実装・実デプロイ・E2E検証済み
-(`e2e/`、20スイート35テスト)。決定6(Web UI)はAccepted、実装済み(`web-ui/src/`の
+(`api-e2e/`、20スイート35テスト)。決定6(Web UI)はAccepted、実装済み(`web-ui/src/`の
 `TransferListScreen.tsx`・`TransferDetailScreen.tsx`・`TransferForm.tsx`・
 `CustomerTabBar.tsx`・`transferHistory.ts`他)。`cd web-ui && npm run build && npm run lint
 && npm test`は green。実デプロイ環境上でのJ1・J5〜J10のハッピーパス手動確認はまだ未実施
@@ -201,7 +201,7 @@ account自体についてすでに同じ判断(顧客-口座関係はサーバ�
 ## 次のステップ
 
 1. 決定1(`TransferStatusView`・`transfer-status-projector`・照会API)を先に実装・デプロイし、
-   `e2e`の`support/sagaState.ts`をこの新しい照会APIの呼び出しに置き換えられるか確認する
+   `api-e2e`の`support/sagaState.ts`をこの新しい照会APIの呼び出しに置き換えられるか確認する
    (裏口の解消)。DynamoDB Streamsの順序保証・Lambdaトリガー無課金は本ADR執筆時点で公式
    ドキュメントを確認済みだが、`ParallelizationFactor`等の実際のCDK設定値は実装時に
    再確認する([[verify_aws_specs_before_implementing]])。

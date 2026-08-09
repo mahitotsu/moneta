@@ -16,8 +16,8 @@ The `cdk.json` file tells the CDK Toolkit how to execute your app.
 automatically as part of the deploy via a Custom Resource (see docs/adr/0005), so there's no
 separate manual script to run afterward.
 
-The E2E scenarios (`e2e/`, against the deployed stack over real HTTP) live in their own
-top-level package, not here — see `e2e/README.md`. They're a consumer of this stack's
+The E2E scenarios (`api-e2e/`, against the deployed stack over real HTTP) live in their own
+top-level package, not here — see `api-e2e/README.md`. They're a consumer of this stack's
 CloudFormation outputs, not part of the CDK app itself.
 
 ## Do not run `npx cdk ...` or `tsx scripts/...` directly
@@ -30,5 +30,5 @@ for `fetch`), even though the `aws` CLI itself resolves credentials fine (it doe
 DNS path). `force-ipv4.cjs` forces `dns.lookup` to IPv4-only to work around this; the `npm run
 cdk`/`synth`/`diff`/`deploy`/`destroy`/`clean-data` scripts all load it via `NODE_OPTIONS`. If you
 do need to invoke one of these directly, prefix it yourself:
-`NODE_OPTIONS="--require ./force-ipv4.cjs" <command>`. (`e2e/` has its own copy of this
-workaround — see `e2e/README.md`.)
+`NODE_OPTIONS="--require ./force-ipv4.cjs" <command>`. (`api-e2e/` has its own copy of this
+workaround — see `api-e2e/README.md`.)

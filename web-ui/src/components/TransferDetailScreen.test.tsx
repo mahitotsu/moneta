@@ -1,6 +1,6 @@
 // docs/e2e-scenarios.md J5/J9/J10と、docs/adr/0012決定6のトレードオフ(反映待ちの404と
 // 「まだ存在しないID」が区別できない/組戻し時間窓の最終判定は常にサーバー側)をweb-ui単体で
-// 検証する。実際のHTTP越しの状態遷移はe2e/scenarios/transfer-*.e2e.test.tsが検証するため、
+// 検証する。実際のHTTP越しの状態遷移はapi-e2e/scenarios/transfer-*.e2e.test.tsが検証するため、
 // ここではAccountView.test.tsxと同じ理由(UI表示ロジックはWeb UI側のコードにしかない)で
 // コンポーネント単体テストに絞る。
 import { afterEach, describe, expect, it, vi } from "vitest";

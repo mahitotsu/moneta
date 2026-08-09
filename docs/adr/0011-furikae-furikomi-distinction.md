@@ -136,7 +136,7 @@ query-serviceの`AccountViewTable`に相乗りする案は採らなかった。�
 - **顧客向けAPI Gateway/Web UIは今回もスコープ外**: 振替/振込フォーム・名義確認画面・
   recallボタンは、[[0010-transfer-service-saga]]決定6が据え置いた項目とあわせて次の増分に
   持ち越す。ただし受付経路自体(`TransferCommand`の`Start`/`Confirm`/`Cancel`/`Recall`を
-  Transfer受付キューへ直接`SendMessage`する経路)は`e2e/scenarios/transfer-*.e2e.test.ts`
+  Transfer受付キューへ直接`SendMessage`する経路)は`api-e2e/scenarios/transfer-*.e2e.test.ts`
   で自動E2E化済み——手動確認だけに頼る状態ではない([e2eシナリオJ](../e2e-scenarios.md)
   参照)。
 

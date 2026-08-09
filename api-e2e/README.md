@@ -29,7 +29,7 @@
 ```bash
 cd infra && npm run deploy   # 1. 最新のソースをデプロイする(変更が無ければ`npm run diff`で
                               #    「差分なし」を確認するだけでもよい)
-cd ../e2e && npm install     # 2. 初回のみ(依存関係を自前で持つ独立パッケージのため)
+cd ../api-e2e && npm install # 2. 初回のみ(依存関係を自前で持つ独立パッケージのため)
 npm test                     # 3. 今デプロイされている断面に対して検証する
 ```
 
@@ -86,7 +86,7 @@ DynamoDBへ移行し、アウトボックスもEventBridge Schedulerの1分間�
 | F2 | `scenarios/transaction-history-lag.e2e.test.ts` | 実装済み |
 | G1, G2, G3 | `scenarios/input-validation.e2e.test.ts` | 実装済み |
 | G4 | `scenarios/known-gap-malformed-account-id.e2e.test.ts` | 実装済み(既知のギャップの固定化。DLQへの到達を確認後、そのメッセージだけを削除する) |
-| F3 | `web-ui/src/components/AccountView.test.tsx`(このe2eではなくweb-ui側、Vitest+React Testing Library) | 実装済み(表示ロジックの主張であり、実AWS環境やブラウザ自動化を要さずコンポーネント単体で検証できるため、このハーネスとは別建て) |
+| F3 | `web-ui/src/components/AccountView.test.tsx`(このapi-e2eではなくweb-ui側、Vitest+React Testing Library) | 実装済み(表示ロジックの主張であり、実AWS環境やブラウザ自動化を要さずコンポーネント単体で検証できるため、このハーネスとは別建て) |
 | A4/A5のUI固有部分(顧客セッションと無関係であること・表示用ラベルがバックエンドに送られないこと)、H1-H3 | (未実装) | このハーネスは生HTTP呼び出しのみで、実際のWeb UI(ブラウザ)は駆動していない。ブラウザ自動化(Playwright等)が別途必要 — `docs/e2e-scenarios.md`参照 |
 | I1 | (未実装、手動確認のみ) | 持続的なインフラ障害の再現にはフォルトインジェクション(実環境への意図的な障害注入)が要り、このPoCの規模には過大。デプロイ済み環境に対する破壊的操作を伴うため、自動化するなら別途合意が必要 |
 | J1, J2, J7 | `scenarios/transfer-furikae.e2e.test.ts` | 実装済み(docs/adr/0011。同一owner_idの2口座間送金=furikaeとして、確認不要の即時開始・残高反映・残高不足を検証) |
@@ -100,7 +100,7 @@ DynamoDBへ移行し、アウトボックスもEventBridge Schedulerの1分間�
 ## 実装上の注意
 
 - `support/httpClient.ts`はWeb UI(`web-ui/src/api/`)と同じワイヤーフォーマットを別途
-  定義したもの(コード共有はしていない — e2e/web-uiは独立したTSプロジェクトのため)。
+  定義したもの(コード共有はしていない — api-e2e/web-uiは独立したTSプロジェクトのため)。
   バックエンドの契約を変更したら両方を追随させる必要がある。
 - `support/stackOutputs.ts`は`infra/support/stackOutputs.ts`(`clean-data.ts`が使う)と
   ほぼ同一の内容を意図的に複製している。CloudFormationの`DescribeStacks`を叩くだけの
