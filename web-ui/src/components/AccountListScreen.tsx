@@ -2,12 +2,11 @@ import { useState } from "react";
 import { useQueries } from "@tanstack/react-query";
 import { OpenAccountForm } from "./OpenAccountForm";
 import { BrandAppBar } from "./AppBar";
+import { CustomerTabBar, type CustomerTab } from "./CustomerTabBar";
 import { PlusCircle } from "./icons";
 import { getAccount } from "../api/client";
-import { formatAccountNumber, formatCurrency } from "../format";
+import { ACCOUNT_ID_PATTERN, formatAccountNumber, formatCurrency } from "../format";
 import { addAccountFor, getAccountsFor, removeAccountFor, signOut, type CustomerAccount } from "../customerSession";
-
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const STATUS_LABEL: Record<string, string> = { active: "有効", frozen: "凍結中", closed: "解約済み" };
 const STATUS_BADGE_CLASS: Record<string, string> = {
@@ -19,10 +18,11 @@ const STATUS_BADGE_CLASS: Record<string, string> = {
 interface Props {
   customerName: string;
   onSelectAccount: (accountId: string) => void;
+  onSelectTab: (tab: CustomerTab) => void;
   onSignedOut: () => void;
 }
 
-export function AccountListScreen({ customerName, onSelectAccount, onSignedOut }: Props) {
+export function AccountListScreen({ customerName, onSelectAccount, onSelectTab, onSignedOut }: Props) {
   const [accounts, setAccounts] = useState<CustomerAccount[]>(() => getAccountsFor(customerName));
   const [addOpen, setAddOpen] = useState(false);
   const [manualId, setManualId] = useState("");
@@ -54,6 +54,8 @@ export function AccountListScreen({ customerName, onSelectAccount, onSignedOut }
         }}
       />
       <div className="bank-body">
+        <CustomerTabBar active="accounts" onSelect={onSelectTab} />
+
         {accounts.length > 0 && (
           <div className="panel total-balance-panel">
             <p className="subtitle">合計残高(解約済みの口座を除く)</p>
@@ -145,7 +147,7 @@ export function AccountListScreen({ customerName, onSelectAccount, onSignedOut }
               className="panel"
               onSubmit={(e) => {
                 e.preventDefault();
-                if (!UUID_PATTERN.test(manualId)) return;
+                if (!ACCOUNT_ID_PATTERN.test(manualId)) return;
                 addAccountFor(customerName, manualId);
                 setManualId("");
                 refresh();
@@ -158,7 +160,7 @@ export function AccountListScreen({ customerName, onSelectAccount, onSignedOut }
                   value={manualId}
                   onChange={(e) => setManualId(e.target.value)}
                 />
-                <button type="submit" disabled={!UUID_PATTERN.test(manualId)}>
+                <button type="submit" disabled={!ACCOUNT_ID_PATTERN.test(manualId)}>
                   追加
                 </button>
               </div>

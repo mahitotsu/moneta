@@ -1,10 +1,13 @@
-import type { AccountView, CommandAcceptedResponse, FreezeReasonRequest, TransactionEntry } from "./types";
+import type { AccountView, CommandAcceptedResponse, FreezeReasonRequest, TransactionEntry, TransferStatusView } from "./types";
 
 // 相対パスのみを叩く。本番はCloudFrontのbehavior(/query-api/*, /command-api/*)、
 // ローカル開発はvite.config.tsのserver.proxyが、それぞれ実際のAPI Gatewayへ転送する
 // (docs/adr/0007) ため、このファイルに環境ごとのURL分岐は持たない。
 const QUERY_API_BASE = "/query-api";
 const COMMAND_API_BASE = "/command-api";
+// Transfer serviceの顧客向けAPI(docs/adr/0012決定5)。account-serviceのものとは別プレフィックス。
+const TRANSFER_QUERY_API_BASE = "/transfer-query-api";
+const TRANSFER_COMMAND_API_BASE = "/transfer-command-api";
 
 // 画面にはHTTPステータスやレスポンス本文といった内部実装を一切出さず、業務的な文言だけを
 // 見せる。生の失敗内容は開発者向けにconsole.errorへ残す(このPoCにサーバーサイドの
@@ -144,4 +147,77 @@ export async function getTransactionHistory(accountId: string): Promise<Transact
     "getTransactionHistory",
   );
   return response.json() as Promise<TransactionEntry[]>;
+}
+
+/**
+ * Transfer serviceの送金受付API(docs/adr/0012決定2〜4)。account-serviceのpostCommandと異なり
+ * `Idempotency-Key`ヘッダーは送らない——`transferId`とアクション名の組がVTL側で導出する
+ * 冪等性キーになるため要求されない(決定3)。レスポンスはaccount-service同様、常に
+ * `202 Accepted`(結果整合性、ADR-0002)であり、残高不足等のドメイン却下はこの時点では
+ * わからない。取消/組戻しがサーバー側で却下された場合、対象の`transferId`はサガ自体が
+ * 作られず照会APIが404を返し続ける——「まだ反映されていない」と区別がつかない
+ * (決定6のトレードオフ、[[eventual_consistency_not_a_failure]])。
+ */
+async function transferCommand(method: string, path: string, body?: unknown): Promise<CommandAcceptedResponse> {
+  const response = await fetchOrThrow(
+    `${TRANSFER_COMMAND_API_BASE}${path}`,
+    {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    },
+    COMMAND_FAILURE_MESSAGE,
+    `transferCommand ${method} ${path}`,
+  );
+  return response.json() as Promise<CommandAcceptedResponse>;
+}
+
+/** `transferId`はクライアント生成(決定4、account-serviceの口座開設と同じ理由)。 */
+export function startTransfer(
+  transferId: string,
+  fromAccountId: string,
+  toAccountId: string,
+  amount: string,
+): Promise<CommandAcceptedResponse> {
+  return transferCommand("PUT", `/transfers/${transferId}`, {
+    from_account_id: fromAccountId,
+    to_account_id: toAccountId,
+    amount,
+  });
+}
+
+export function confirmTransfer(transferId: string): Promise<CommandAcceptedResponse> {
+  return transferCommand("POST", `/transfers/${transferId}/confirm`);
+}
+
+export function cancelTransfer(transferId: string): Promise<CommandAcceptedResponse> {
+  return transferCommand("POST", `/transfers/${transferId}/cancel`);
+}
+
+/**
+ * 組戻し。`transferId`は組戻し自身の新しいサガID(クライアント生成)、取消対象は
+ * `originalTransferId`として渡す(決定4)。送金元・送金先はサーバー側が元のサガから
+ * 引いて入れ替えるため、ここでは渡さない。
+ */
+export function recallTransfer(transferId: string, originalTransferId: string): Promise<CommandAcceptedResponse> {
+  return transferCommand("PUT", `/transfers/${transferId}/recall`, { original_transfer_id: originalTransferId });
+}
+
+/** 見つからない場合は`null`を返す(404、getAccountと同じ変換)。 */
+export async function getTransferStatus(transferId: string): Promise<TransferStatusView | null> {
+  let response: Response;
+  try {
+    response = await fetch(`${TRANSFER_QUERY_API_BASE}/transfers/${transferId}`);
+  } catch (cause) {
+    console.error("getTransferStatus: network error", cause);
+    throw new Error(QUERY_FAILURE_MESSAGE);
+  }
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    console.error(`getTransferStatus: ${response.status} ${await response.text()}`);
+    throw new Error(QUERY_FAILURE_MESSAGE);
+  }
+  return response.json() as Promise<TransferStatusView>;
 }

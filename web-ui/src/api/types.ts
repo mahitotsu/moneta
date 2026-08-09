@@ -49,3 +49,54 @@ export interface TransactionEntry {
   eventId: string;
   reason: FreezeReasonView | null;
 }
+
+/**
+ * 振替(同一名義間)/振込(名義不一致)/組戻し(docs/adr/0011)。サーバー側の名義突き合わせ
+ * (`transfer-service`のowner index projection)が決めるものであり、クライアントは`Start`/
+ * `Recall`のリクエストにこの値を含めない——`GET /transfers/{transferId}`
+ * (`TransferStatusView`)のレスポンスとしてのみ受け取る(docs/adr/0012決定1)。
+ * web-ui側でlocalStorageに保存する`kind`(`transferHistory.ts`)は送信時点のUI上の意図に
+ * すぎず、表示は常にこの値(サーバー側の判定結果)を優先する。
+ */
+export type TransferKind = "furikae" | "furikomi" | "recall";
+
+/** `crates/transfer-service/src/saga.rs`の`SagaState`と1対1(snake_case化のみ)。 */
+export type TransferState =
+  | "pending_confirmation"
+  | "pending_debit"
+  | "pending_credit"
+  | "compensating"
+  | "credited"
+  | "compensated"
+  | "failed"
+  | "cancelled";
+
+/** `GET /transfers/{transferId}`のレスポンス全体
+ * (`transfer-status-projector`のフィールド写像が単一の真実源、docs/adr/0012決定1)。 */
+export interface TransferStatusView {
+  transferId: string;
+  fromAccountId: string;
+  toAccountId: string;
+  amount: string;
+  kind: TransferKind;
+  state: TransferState;
+  updatedAt: string;
+}
+
+export const TRANSFER_KIND_LABEL: Record<TransferKind, string> = {
+  furikae: "振替",
+  furikomi: "振込",
+  recall: "組戻し",
+};
+
+/** AWS/HTTP等の内部用語を出さない業務言語のみの文言(過去の指摘事項、web-ui全体の方針)。 */
+export const TRANSFER_STATE_LABEL: Record<TransferState, string> = {
+  pending_confirmation: "確認待ち",
+  pending_debit: "手続き中",
+  pending_credit: "手続き中",
+  compensating: "取消処理中",
+  credited: "完了",
+  compensated: "取消完了",
+  failed: "手続きできませんでした",
+  cancelled: "取消済み",
+};

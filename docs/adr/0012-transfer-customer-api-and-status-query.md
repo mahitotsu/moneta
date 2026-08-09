@@ -3,7 +3,11 @@
 ## ステータス
 
 決定1〜5(送金状態照会API・送金受付API)はAccepted、実装・実デプロイ・E2E検証済み
-(`e2e/`、20スイート35テスト)。決定6(Web UI)はProposedのまま、次のセッションで着手する。
+(`e2e/`、20スイート35テスト)。決定6(Web UI)はAccepted、実装済み(`web-ui/src/`の
+`TransferListScreen.tsx`・`TransferDetailScreen.tsx`・`TransferForm.tsx`・
+`CustomerTabBar.tsx`・`transferHistory.ts`他)。`cd web-ui && npm run build && npm run lint
+&& npm test`は green。実デプロイ環境上でのJ1・J5〜J10のハッピーパス手動確認はまだ未実施
+(次のステップに残す)。
 
 ## コンテキスト
 
@@ -202,5 +206,6 @@ account自体についてすでに同じ判断(顧客-口座関係はサーバ�
    ドキュメントを確認済みだが、`ParallelizationFactor`等の実際のCDK設定値は実装時に
    再確認する([[verify_aws_specs_before_implementing]])。
 2. 決定2〜4(送金受付API)を実装し、`aws apigateway test-invoke-method`で実機検証する。
-3. 決定6(web-ui)に着手する。J1・J5〜J10の各シナリオがUI上のハッピーパスとして再現できることを
-   手動確認する。
+3. 決定6(web-ui)実装済み。残るのは実デプロイ環境上でJ1・J5〜J10の各シナリオがUI上の
+   ハッピーパスとして再現できることを手動確認すること(`infra`の`npm run deploy`を先に
+   実行し、最新のソースが反映された状態で確認する)。

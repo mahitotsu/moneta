@@ -375,6 +375,13 @@ button.secondary {
   margin: 0;
 }
 
+/* ---- 顧客向け画面内の「口座」/「送金」タブ(docs/adr/0012決定6) ---- */
+
+.bank-tabs {
+  display: flex;
+  gap: 8px;
+}
+
 /* ---- ダッシュボード(口座一覧) ---- */
 
 .total-balance-panel {
