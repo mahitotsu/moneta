@@ -1,0 +1,6 @@
+node_modules
+*.js
+*.d.ts
+test-results/
+playwright-report/
+support/stackOutputs.generated.json

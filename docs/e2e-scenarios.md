@@ -255,14 +255,16 @@ Then `maxReceiveCount`超過後にFIFO DLQに到達し、CloudWatchアラーム�
 J10の「組戻し時間窓の期限超過」だけは実時間24時間を待つ代わりに、`updatedAt`を直接書き換える
 テスト専用の裏口(`backdateSagaUpdatedAt`)で模擬している——公開APIには対応する経路が
 そもそも存在しない。Web UI(振替/振込画面)は実装済み(`web-ui/src/components/TransferListScreen.tsx`
-他)だが、ブラウザ自動化を伴うUI層のハッピーパス確認は`api-e2e`のスコープ外のままである
-(`ui-e2e/`で別途対応予定)。
+他)。ブラウザ自動化を伴うUI層のハッピーパス確認は`api-e2e`のスコープ外だが、`ui-e2e/`
+(Playwright、ヘッドレスChromium、[[0014-ui-e2e-headless-browser-testing]])がJ1・J5・J6・J9を
+実際のデプロイ済みWeb UI上のクリック操作として自動検証する。
 
 **J1. 正常な送金は送金元の減少・送金先の増加として反映される**
 Given 送金元・送金先とも有効な口座
 When 送金元の残高以下の金額で送金を要求する
 Then 最終的に送金元の残高が減り、送金先の残高が同額増える
-→ [[0010-transfer-service-saga]]決定3 — **P0** — `transfer-furikae.e2e.test.ts`
+→ [[0010-transfer-service-saga]]決定3 — **P0** — `transfer-furikae.e2e.test.ts`・UI上のハッピー
+パス確認は`ui-e2e/scenarios/transfer-furikae.spec.ts`([[0014-ui-e2e-headless-browser-testing]])
 
 **J2. 送金元の残高不足は送金先に一切影響しない**
 Given 送金元の残高より大きい金額
@@ -288,13 +290,17 @@ Given 送金元・送金先の名義が異なる(口座名義インデックス�
 When `Start`で送金を要求する
 Then サガは`pending_confirmation`のまま停止し、送金元・送金先とも残高は変化しない
 (account-serviceには何も発行されていない)
-→ [[0011-furikae-furikomi-distinction]]決定3 — **P0** — `transfer-furikomi.e2e.test.ts`
+→ [[0011-furikae-furikomi-distinction]]決定3 — **P0** — `transfer-furikomi.e2e.test.ts`・UI上で
+確認/取消ボタンが表示されることの確認は`ui-e2e/scenarios/transfer-furikomi.spec.ts`
+([[0014-ui-e2e-headless-browser-testing]])
 
 **J6. 振込を確認すると出金→着金が進む**
 Given J5の状態(`pending_confirmation`)
 When 同じ`transfer_id`で`Confirm`を要求する
 Then 最終的に送金元の残高が減り、送金先の残高が同額増える(J1と同じ最終結果)
-→ [[0011-furikae-furikomi-distinction]]決定3 — **P0** — `transfer-furikomi.e2e.test.ts`
+→ [[0011-furikae-furikomi-distinction]]決定3 — **P0** — `transfer-furikomi.e2e.test.ts`・UI上で
+確認ボタンを押して完了に至ることの確認は`ui-e2e/scenarios/transfer-furikomi.spec.ts`
+([[0014-ui-e2e-headless-browser-testing]])
 
 **J7. 振替(名義一致)は確認不要で即座に開始される**
 Given 送金元・送金先の名義が同じ
@@ -312,7 +318,9 @@ Then サガは作成されず、送金元・送金先とも残高は変化しな
 Given J6が完了した(`credited`)振込のサガ
 When 期限内に`Recall`(新しい`transfer_id`・元の`transfer_id`を指定)を要求する
 Then 最終的に送金先の残高が減り、送金元の残高が同額戻る(逆方向の送金として実行される)
-→ [[0011-furikae-furikomi-distinction]]決定5 — **P0** — `transfer-recall.e2e.test.ts`
+→ [[0011-furikae-furikomi-distinction]]決定5 — **P0** — `transfer-recall.e2e.test.ts`・UI上で
+組戻すボタンが表示されクリックできることの確認は`ui-e2e/scenarios/transfer-recall.spec.ts`
+([[0014-ui-e2e-headless-browser-testing]])
 
 **J10. 期限超過または受取人の残高不足でのrecallはFailedになる**
 Given J9の状態で、時間窓を過ぎている、または送金先の残高が送金額未満

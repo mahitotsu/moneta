@@ -87,7 +87,8 @@ DynamoDBへ移行し、アウトボックスもEventBridge Schedulerの1分間�
 | G1, G2, G3 | `scenarios/input-validation.e2e.test.ts` | 実装済み |
 | G4 | `scenarios/known-gap-malformed-account-id.e2e.test.ts` | 実装済み(既知のギャップの固定化。DLQへの到達を確認後、そのメッセージだけを削除する) |
 | F3 | `web-ui/src/components/AccountView.test.tsx`(このapi-e2eではなくweb-ui側、Vitest+React Testing Library) | 実装済み(表示ロジックの主張であり、実AWS環境やブラウザ自動化を要さずコンポーネント単体で検証できるため、このハーネスとは別建て) |
-| A4/A5のUI固有部分(顧客セッションと無関係であること・表示用ラベルがバックエンドに送られないこと)、H1-H3 | (未実装) | このハーネスは生HTTP呼び出しのみで、実際のWeb UI(ブラウザ)は駆動していない。ブラウザ自動化(Playwright等)が別途必要 — `docs/e2e-scenarios.md`参照 |
+| J1, J5, J6, J9のUI固有部分(振替/振込画面の状態遷移・確認/取消/組戻しボタン) | `ui-e2e/scenarios/*.spec.ts` | 実装済み(`docs/adr/0014`)。このハーネスは生HTTP呼び出しのみで実際のWeb UI(ブラウザ)は駆動していないため、`ui-e2e/`という別のトップレベルパッケージ(Playwright、ヘッドレスChromium)で検証する |
+| A4/A5のUI固有部分(顧客セッションと無関係であること・表示用ラベルがバックエンドに送られないこと)、H1-H3 | (未実装) | `ui-e2e/`と同じ枠組みで追加できるが、`docs/adr/0014`時点ではTransfer service(振替/振込)の検証を優先し未着手 |
 | I1 | (未実装、手動確認のみ) | 持続的なインフラ障害の再現にはフォルトインジェクション(実環境への意図的な障害注入)が要り、このPoCの規模には過大。デプロイ済み環境に対する破壊的操作を伴うため、自動化するなら別途合意が必要 |
 | J1, J2, J7 | `scenarios/transfer-furikae.e2e.test.ts` | 実装済み(docs/adr/0011。同一owner_idの2口座間送金=furikaeとして、確認不要の即時開始・残高反映・残高不足を検証) |
 | J3 | `scenarios/transfer-furikae.e2e.test.ts` | 実装済み(送金先を凍結した状態でfurikaeを実行し、補償まで確認) |

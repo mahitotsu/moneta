@@ -2,7 +2,7 @@ name: CI
 
 # push/PRのたびにbuild/test/lintを強制する(.githooks/pre-commitの内容と同じ主旨だが、
 # フックがセットアップされていない/意図的にバイパスされた場合の保険としてリモート側でも
-# 実行する)。実AWS環境を要するapi-e2e/はここに含めない(api-e2e/README.md参照)。
+# 実行する)。実AWS環境を要するapi-e2e/・ui-e2e/はここに含めない(それぞれのREADME.md参照)。
 on:
   push:
     branches: [main]

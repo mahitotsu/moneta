@@ -2,9 +2,9 @@
 # コミット時にbuild/test/lintを強制する(壊れた状態をコミット履歴に残さないため)。
 # セットアップ(cloneごとに1回): git config core.hooksPath .githooks
 #
-# infra/(CDK synth、Rust LambdaのDockerビルドを含み初回は数分かかる)とapi-e2e/(実AWS
-# 環境が必要)はここには含めない。前者はGitHub Actionsで、後者は元々手動/実デプロイ環境限定
-# (api-e2e/README.md参照)。
+# infra/(CDK synth、Rust LambdaのDockerビルドを含み初回は数分かかる)とapi-e2e/・ui-e2e/
+# (どちらも実AWS環境が必要)はここには含めない。前者はGitHub Actionsで、後者2つは元々
+# 手動/実デプロイ環境限定(api-e2e/README.md・ui-e2e/README.md参照)。
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 

@@ -87,6 +87,13 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
   `dynamodb:TransactWriteItems` alone doesn't authorize a transaction; IAM also requires the
   per-item action (`PutItem`/`UpdateItem`/`ConditionCheckItem`) granted separately, discovered
   via `AccessDeniedException` on first deploy (ADR-0013 decision 5).
+- `0014`: adds `ui-e2e/` — Playwright, headless Chromium only — as a sibling of `api-e2e/`
+  (itself renamed from `e2e/` in this same decision, since it turned out to only ever drive the
+  HTTP APIs directly). Same "manual/on-demand, live deployed CloudFront URL only, not in CI"
+  placement `api-e2e/` established; test data (accounts, signed-in customer) is seeded directly
+  over HTTP and into `localStorage` rather than driven through the browser, so specs stay focused
+  on the one thing HTTP-only testing and mocked-API component tests can't reach: the transfer
+  screens' (`0012` decision 6) actual DOM/event-handler wiring against the live backend.
 
 ## Commands
 
@@ -136,12 +143,25 @@ stack's CloudFormation outputs — see `api-e2e/README.md` for why it isn't nest
 despite testing what `infra/` deploys). It's named `api-e2e` (not just `e2e`) because it only
 drives the HTTP APIs directly — it doesn't touch the deployed web-ui through a browser.
 
+```bash
+cd ui-e2e
+npm test             # same "live deployed stack" caveat as api-e2e above. Drives the deployed
+                      # web-ui with headless Chromium (Playwright) — the one thing api-e2e and
+                      # web-ui's own vitest component tests can't reach (real DOM/event-handler
+                      # wiring against the live backend). See ui-e2e/README.md and ADR-0014.
+```
+
+`ui-e2e/` is a sibling of `api-e2e/`, not nested inside it, for the same reason `api-e2e/` isn't
+nested inside `infra/` — different test runner (Playwright vs. Jest), different dependency
+footprint (a browser binary), different layer under test. Same manual/on-demand, live-stack-only,
+not-in-CI placement as `api-e2e/`.
+
 Three tiers of testing, in increasing order of what they need and what they actually prove:
 `cargo test`/`clippy` (source only, no AWS) → CDK synth tests (source only, no AWS, but proves
-the infra actually synthesizes/bundles) → `api-e2e`'s `npm test` (needs a live, up-to-date
-deployment; proves the deployed system behaves as documented in `docs/e2e-scenarios.md`). Only
-the first two run in CI (`.github/workflows/ci.yml`) — the E2E suite needs real AWS credentials
-and a deployed stack, so it stays manual/on-demand.
+the infra actually synthesizes/bundles) → `api-e2e`/`ui-e2e`'s `npm test` (needs a live,
+up-to-date deployment; proves the deployed system behaves as documented in
+`docs/e2e-scenarios.md`). Only the first two run in CI (`.github/workflows/ci.yml`) — the E2E
+suites need real AWS credentials and a deployed stack, so they stay manual/on-demand.
 
 `.githooks/pre-commit` runs the first tier (cargo + web-ui) on every commit; enable it once per
 clone with `git config core.hooksPath .githooks`. CI re-runs that plus the CDK synth tier as a

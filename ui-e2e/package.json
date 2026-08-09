@@ -1,0 +1,16 @@
+{
+  "name": "ui-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "NODE_OPTIONS=\"--require ./force-ipv4.cjs\" playwright test"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-cloudformation": "^3.1101.0",
+    "@aws-sdk/client-dynamodb": "^3.1101.0",
+    "@aws-sdk/lib-dynamodb": "^3.1101.0",
+    "@playwright/test": "^1.62.1",
+    "@types/node": "^24.10.1",
+    "typescript": "~5.9.2"
+  }
+}
