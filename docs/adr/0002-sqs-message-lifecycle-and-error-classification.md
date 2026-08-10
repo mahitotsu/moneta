@@ -199,6 +199,42 @@ retry_on_occ(&config, || async {
    `batchItemFailures`としてSQSに報告する。以降は`maxReceiveCount`（下記）が効き、
    それも尽きたらDLQへ。
 
+**追記(2026-08-10、production-readiness-matrix.md R2の議論を受けて)**: 上記のversion付き
+OCCリトライが「AWS公式のDynamoDB書き込みパターン」という一般論だけで導入され、**このアーキテクチャ
+固有にどのような状況でversion競合が実際に起こりうるかが一度も名指しされていなかった**。
+SQS FIFOは「同一`MessageGroupId`は常に1つのLambda実行しか処理しない」ことを保証する
+（[Amazon SQS FIFO queue and Lambda concurrency behavior](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/fifo-queue-lambda-behavior.html)）
+ため、素朴には「同一口座への書き込みが2つのLambda実行から同時に飛ぶ」状況自体が起こらないように
+見える。具体的なトリガーは以下の2つである。
+
+1. **可視性タイムアウトの超過による重複実行**: Lambdaの処理(またはDynamoDBへの書き込み)が
+   何らかの理由で長引き、SQSの可視性タイムアウトが切れると、同じメッセージが別のLambda実行に
+   再配信されうる。旧い実行がまだ終わっていない状態で新しい実行が同じメッセージ(＝同じ口座)を
+   処理し始めると、両者が同時に同じ`accounts`項目へ書き込もうとする。これはFIFOの
+   「1グループ1実行」という定常状態の保証の**外側**にある、at-least-once配信一般に伴う
+   エッジケースである。
+2. **DLQからの手動redriveによる新旧メッセージの混在**（決定6のDLQ設計、下記参照）:
+   redrive-to-sourceは順序を保証せず、同時に到着する新規メッセージと混在しうる。同一口座に
+   対する「DLQに滞留していた古いコマンド」と「その間に正常に届いた新しいコマンド」が、
+   ほぼ同時に処理される状況を作りうる。
+
+したがって、version付きOCCリトライは「通常のFIFO運用では稀だが、上記2つのエッジケースでは
+現実に起こりうる」保険として位置づけられる。この具体的なトリガーを踏まえると、外部からの
+黒箱HTTPリクエスト(並行送信)だけでは②を意図的に再現できず、①も可視性タイムアウトの調整や
+Lambda実行の意図的な遅延といった環境操作が要る。決定論的に検証する最も現実的な方法は、
+`account-service`の永続化コードに対して、DynamoDBクライアントをHTTPトランスポート層で
+モック化した単体テストを書き、1回目に`ConditionalCheckFailedException`、2回目に成功を
+返させることである——[[0003-domain-service-crate-boundary]]が退けた「リポジトリ抽象化層の
+追加」とは異なるレイヤー(HTTPトランスポートの差し替え)であり、そちらの決定と矛盾しない。
+
+**実装済み(2026-08-10)**: `aws-smithy-mocks`クレート(`mock!`/`mock_client!`)を
+`account-service`の`dev-dependencies`に追加し、
+[handler.rs](../../crates/account-service/src/handler.rs)の
+`optimistic_lock_conflict_is_retried_in_lambda_and_eventually_succeeds`として実装・
+`cargo test -p account-service`で合格を確認済み。これにより、リトライループが実際に
+発火し、正しく回復することが単体テストレベルで決定論的に証明された(黒箱E2Eでは
+再現不能だった性質)。
+
 DLQ自体の設計は以下の通り。
 
 - FIFOソースキューのDLQは**FIFOキューでなければならない**（AWSの制約）。
