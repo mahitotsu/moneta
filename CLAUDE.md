@@ -7,7 +7,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This is a technology-validation PoC for a blog article, not a reference architecture for
 organizational rollout. Prioritize technical validity over organizational realism (review
 processes, team ownership, governance) — those are left as discussion points for the article,
-not implemented. Write path: Web UI (`web-ui/`, React) → CloudFront → API Gateway → SQS FIFO →
+not implemented. The same applies to core-banking domain features whose value is independent of
+event-driven architecture — overdraft/credit lines, joint/multi-owner accounts, and
+multi-currency support are out of scope because they require changes to the write-path domain
+model itself, not new loosely-coupled services (see `docs/production-readiness-matrix.md`'s
+④ section, D8/D9/D10, for the reasoning and for other domain features — standing orders,
+interest, fees, dormancy, regulatory reporting — kept as backlogged validation candidates
+*because* they fit the "new service subscribes to existing events/queues" pattern this PoC
+argues for). Write path: Web UI (`web-ui/`, React) → CloudFront → API Gateway → SQS FIFO →
 Lambda (Rust) → DynamoDB. Read path: DynamoDB Streams outbox → EventBridge → Query service
 (Lambda + DynamoDB) → CloudFront → API Gateway → caller. CloudFront unifies the static UI and
 both APIs under one origin so the browser never needs CORS — see `0007`.

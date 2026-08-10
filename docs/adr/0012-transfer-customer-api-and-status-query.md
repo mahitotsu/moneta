@@ -13,14 +13,14 @@
 
 [[0010-transfer-service-saga]]・[[0011-furikae-furikomi-distinction]]によりTransfer service
 のサガ本体(`transfer-command-intake`/`transfer-saga-step`/`transfer-owner-projector`)は
-実装済みで、E2Eシナリオ J1〜J10([docs/e2e-scenarios.md](../e2e-scenarios.md))で挙動が
-自動検証されている。一方で顧客向けの入口は存在しない:
+実装済みで、E2Eシナリオ FC10〜FC12(旧J1〜J10、[docs/e2e-scenarios.md](../e2e-scenarios.md))で
+挙動が自動検証されている。一方で顧客向けの入口は存在しない:
 
 - 送金の受付経路はTransfer受付キュー(`moneta-transfer-commands-main.fifo`)への直接
   `SendMessage`のみで、API Gatewayがない([[0010-transfer-service-saga]]決定6)。
 - **照会APIはサガ状態を一切公開していない**。E2Eテストは`support/sagaState.ts`で
   `TransferSagaTable`をDynamoDBから直接ポーリングする裏口を使っている
-  (docs/e2e-scenarios.md 246-251行目)。顧客向けのUIを作る以上、この裏口に相当する経路を
+  (docs/e2e-scenarios.mdのJ節、現FC10〜FC12)。顧客向けのUIを作る以上、この裏口に相当する経路を
   正式なAPIとして用意する必要がある。
 
 バックエンドが実機E2Eで検証済みの状態でこの増分に入れるため、[[0004-query-service-event-driven-projection]]や[[0006-write-path-api-gateway-sqs-direct-integration]]の初回実装時のような
