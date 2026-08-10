@@ -1,4 +1,4 @@
-// Covers docs/e2e-scenarios.md G1/G2/G3. Unlike category B/C/D/F, these are synchronous:
+// Covers docs/e2e-scenarios.md FC7 (旧G1/G2/G3). Unlike most other scenarios, these are synchronous:
 // API Gateway's Request Validator rejects before the message ever reaches SQS (docs/adr/0002's
 // "structural validation only" boundary, docs/adr/0006決定4), so there is nothing to poll for.
 import { fetchStackOutputs } from "../support/stackOutputs";

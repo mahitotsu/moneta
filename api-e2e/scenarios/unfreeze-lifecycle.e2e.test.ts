@@ -1,4 +1,4 @@
-// Covers docs/e2e-scenarios.md A7. Unlike the B-category fixture files, this one *must* use
+// Covers docs/e2e-scenarios.md FC4 (旧A7). Unlike the B-category fixture files, this one *must* use
 // its own dedicated account: it walks the account through a real state transition (frozen ->
 // active) rather than asserting a rejection, so it can't share a fixture with tests that assume
 // the fixture never changes. That means four sequential eventual-consistency waits (open,

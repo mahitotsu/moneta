@@ -1,4 +1,4 @@
-// Covers docs/e2e-scenarios.md A2/A4 (ATM入金/他行からの振込 -- same Deposit command, docs/
+// Covers docs/e2e-scenarios.md FC2/FC3 (旧A2/A4, ATM入金/他行からの振込 -- same Deposit command, docs/
 // adr/0009決定1) and A3/A5 (ATM出金/収納機関への支払い -- same Withdraw command). A4/A5's
 // distinguishing feature (which screen the customer never sees, what display-only labels never
 // reach the backend) is a Web UI concern, not observable over this HTTP-only harness -- see

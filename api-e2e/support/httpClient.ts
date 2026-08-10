@@ -55,7 +55,7 @@ export interface CommandApi {
 
 // `idempotencyKey` defaults to a fresh UUID per call (matching web-ui's behavior of one key
 // per distinct customer action, docs/adr/0006決定3) but can be pinned by scenarios that need
-// to force a specific dedup/omission case (C1/C2 in docs/e2e-scenarios.md).
+// to force a specific dedup/omission case (E1 in docs/e2e-scenarios.md, 旧C1/C2).
 export function createCommandApi(baseUrl: string): CommandApi {
   return {
     openAccount: (accountId, initialBalance, ownerId = "e2e-test-customer", idempotencyKey = crypto.randomUUID()) =>

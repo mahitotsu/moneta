@@ -1,7 +1,7 @@
-// Covers docs/e2e-scenarios.md D2 -- a higher-volume variant of D1 (concurrency.e2e.test.ts):
-// with every concurrent write individually payable, none should be rejected, and the in-Lambda
-// OCC retry (docs/adr/0002決定6) should absorb any conflicts invisibly rather than losing
-// updates.
+// Covers docs/e2e-scenarios.md R1 (旧D2) -- a higher-volume variant of concurrency.e2e.test.ts:
+// with every concurrent write individually payable, none should be rejected. This proves FIFO
+// ordering keeps the balance correct at 10x volume; it does NOT exercise the in-Lambda OCC
+// retry branch (see R2 in docs/e2e-scenarios.md).
 import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { settle, waitFor } from "../support/poll";

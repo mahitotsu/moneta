@@ -1,7 +1,7 @@
-// Covers docs/e2e-scenarios.md D1 -- the PoC's central technical claim: same-account
-// commands are serialized via MessageGroupId (docs/adr/0002), and any OCC conflict from
-// concurrent writes is absorbed by the in-Lambda retry (`retry_on_occ`, docs/adr/0002決定6)
-// rather than surfacing to the client or corrupting the balance.
+// Covers docs/e2e-scenarios.md R1 (旧D1) -- the PoC's central technical claim: same-account
+// commands are serialized via MessageGroupId (docs/adr/0002). This proves FIFO ordering keeps
+// the balance correct under concurrent writes; it does NOT exercise the in-Lambda OCC retry
+// branch (see R2 in docs/e2e-scenarios.md for why that's a separate, still-unproven claim).
 import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { settle, waitFor } from "../support/poll";

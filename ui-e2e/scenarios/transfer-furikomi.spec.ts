@@ -1,4 +1,4 @@
-// Covers docs/e2e-scenarios.md J5/J6 as a real browser journey (docs/adr/0014): different-owner
+// Covers docs/e2e-scenarios.md FC11 (旧J5/J6) as a real browser journey (docs/adr/0014): different-owner
 // (振込) transfers stop at pending_confirmation and must render the 確認/取消 buttons before
 // anything is debited -- api-e2e/scenarios/transfer-furikomi.e2e.test.ts already proves this at
 // the HTTP layer, this proves the UI actually shows the right screen and the button actually

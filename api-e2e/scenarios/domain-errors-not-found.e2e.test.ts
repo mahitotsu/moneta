@@ -1,4 +1,4 @@
-// Covers docs/e2e-scenarios.md B4. No fixture needed at all -- the account is never opened --
+// Covers docs/e2e-scenarios.md FC1 (旧B4). No fixture needed at all -- the account is never opened --
 // so this is the cheapest domain-error scenario (a single settle() wait, no eventual-
 // consistency polling).
 import { fetchStackOutputs } from "../support/stackOutputs";

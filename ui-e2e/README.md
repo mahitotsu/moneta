@@ -29,7 +29,7 @@ npm test                     # 3. 今デプロイされている断面に対し�
 
 ## この仕組みが解決するギャップ、解決しないこと
 
-`api-e2e/README.md`のシナリオ対応表は、H1-H3・A4/A5のUI固有部分について「このハーネスは
+`api-e2e/README.md`のシナリオ対応表は、FC9・FC2/FC3のUI固有部分について「このハーネスは
 生HTTP呼び出しのみで、実際のWeb UI(ブラウザ)は駆動していない。ブラウザ自動化
 (Playwright等)が別途必要」と明記していた。このディレクトリがその隙間を埋める。
 
@@ -44,14 +44,14 @@ npm test                     # 3. 今デプロイされている断面に対し�
   `web-ui/src/components/*.test.tsx`(Vitest、モックAPI)が既にコンポーネント単体で
   検証しており、実AWS環境やブラウザ自動化を要さない。ここで重複して検証しない。
 
-| シナリオ | ファイル |
+| シナリオ(新ID、[production-readiness-matrix.md](../docs/production-readiness-matrix.md)) | ファイル |
 |---|---|
-| J1, J7 | `scenarios/transfer-furikae.spec.ts` |
-| J5, J6 | `scenarios/transfer-furikomi.spec.ts`(確認して完了) |
-| (J5派生) | `scenarios/transfer-furikomi.spec.ts`(確認前に取消してcancelled) |
-| J9 | `scenarios/transfer-recall.spec.ts` |
+| FC10(旧J1/J7) | `scenarios/transfer-furikae.spec.ts` |
+| FC11(旧J5/J6) | `scenarios/transfer-furikomi.spec.ts`(確認して完了) |
+| FC11派生 | `scenarios/transfer-furikomi.spec.ts`(確認前に取消してcancelled) |
+| FC12(旧J9) | `scenarios/transfer-recall.spec.ts` |
 
-J2/J3/J4/J8/J10(ドメイン却下・入力検証系)はUI固有の主張を含まず、`api-e2e/`が既に
+旧J2/J3/J4/J8/J10相当(ドメイン却下・入力検証系)はUI固有の主張を含まず、`api-e2e/`が既に
 HTTPレベルで検証済みのため、ここでは繰り返さない。
 
 ## 実装上の注意

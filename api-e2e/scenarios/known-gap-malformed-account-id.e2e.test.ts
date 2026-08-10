@@ -1,4 +1,4 @@
-// Covers docs/e2e-scenarios.md G4 -- locks in a documented, deliberately-accepted gap (docs/
+// Covers docs/e2e-scenarios.md FC8 (旧G4) -- locks in a documented, deliberately-accepted gap (docs/
 // adr/0006's "今回のスコープ外として残す既知のギャップ"): a malformed accountId still gets a
 // 202 Accepted (the Lambda-less integration can't validate it), but persistence.rs's
 // deserialization fails deterministically on every delivery, which is classified as an infra

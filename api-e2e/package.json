@@ -15,6 +15,7 @@
     "@swc/jest": "^0.2.39",
     "@types/jest": "^30",
     "@types/node": "^24.10.1",
+    "fast-check": "^4.9.0",
     "jest": "^30",
     "typescript": "~7.0.2"
   }

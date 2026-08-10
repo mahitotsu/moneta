@@ -1,4 +1,4 @@
-// Covers docs/e2e-scenarios.md B3, A8. Closed is terminal, so -- like the frozen fixture --
+// Covers docs/e2e-scenarios.md FC5 (旧B3/A8). Closed is terminal, so -- like the frozen fixture --
 // both rejection assertions here (withdraw, deposit) share one fixture closed once in
 // `beforeAll`.
 import { fetchStackOutputs } from "../support/stackOutputs";

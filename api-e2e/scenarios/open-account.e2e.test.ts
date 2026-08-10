@@ -1,4 +1,4 @@
-// Covers docs/e2e-scenarios.md A1.
+// Covers docs/e2e-scenarios.md FC1 (旧A1).
 import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { waitForStatus } from "../support/testAccount";

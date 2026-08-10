@@ -1,4 +1,4 @@
-// Covers docs/e2e-scenarios.md A9.
+// Covers docs/e2e-scenarios.md FC6 (旧A9).
 import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { waitFor } from "../support/poll";

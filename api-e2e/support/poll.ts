@@ -17,7 +17,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 // Polls `check` until it returns a defined value, or throws once `timeoutMs` elapses. Used to
-// express "eventually consistent" assertions (docs/e2e-scenarios.md category F) as a bounded
+// express "eventually consistent" assertions (docs/e2e-scenarios.md P1) as a bounded
 // wait rather than a fixed sleep, so tests fail fast when the system is actually broken and
 // don't flake when it's just slow.
 export async function waitFor<T>(check: () => Promise<T | undefined>, options: WaitForOptions = {}): Promise<T> {
@@ -33,7 +33,7 @@ export async function waitFor<T>(check: () => Promise<T | undefined>, options: W
   }
 }
 
-// For asserting a *rejection* (docs/e2e-scenarios.md category B): there is no positive signal
+// For asserting a *rejection* (docs/e2e-scenarios.md FC-category domain errors): there is no positive signal
 // to poll for (DomainError rejections aren't published as events -- ADR-0002's "future
 // Notification service" gap), so the only externally observable proof is "state stayed put
 // for long enough that the command must already have been processed". Rejections are decided

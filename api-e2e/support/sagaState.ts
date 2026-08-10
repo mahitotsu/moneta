@@ -30,7 +30,7 @@ export async function waitForOwnerIndexed(
 }
 
 // テスト専用: 組戻し(recall)の時間窓(`RECALL_WINDOW`、saga.rs)の期限切れを、実時間24時間
-// 待つ代わりに`updatedAt`を直接過去へ書き換えて模擬する(docs/e2e-scenarios.md J10)。
+// 待つ代わりに`updatedAt`を直接過去へ書き換えて模擬する(docs/e2e-scenarios.md FC12, 旧J10)。
 // アプリケーションの通常の書き込み経路(advance_saga_state)を経由しない、この検証だけの
 // 裏口であることを明示するため、他のヘルパーとは呼び出し方を変えている
 // (support/dlq.tsがDLQを直接操作するのと同じ位置づけ)。公開APIには対応する経路が

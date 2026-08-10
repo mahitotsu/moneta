@@ -1,4 +1,4 @@
-// Covers docs/e2e-scenarios.md J1/J7 as a real browser journey (docs/adr/0014) -- the deployed
+// Covers docs/e2e-scenarios.md FC10 (旧J1/J7) as a real browser journey (docs/adr/0014) -- the deployed
 // web-ui, not just the HTTP contract api-e2e/scenarios/transfer-furikae.e2e.test.ts already
 // verifies. Same-owner (振替) transfers require no confirmation step, so this is the shortest
 // full round trip: sign in -> 送金タブ -> 振替フォーム -> 完了 badge.

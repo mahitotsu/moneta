@@ -1,4 +1,4 @@
-// Covers docs/e2e-scenarios.md J5/J6/J8 (振込=名義不一致、docs/adr/0011)。
+// Covers docs/e2e-scenarios.md FC11 (旧J5/J6/J8) (振込=名義不一致、docs/adr/0011)。
 // 送金元・送金先が異なるowner_idの2口座間の送金は`kind=furikomi`と判定され、確認
 // (`Confirm`)が呼ばれるまでaccount-serviceには何も発行されない(J5)。確認後はfurikaeと
 // 同じ経路で着金する(J6)。furikomi固有の上限額(J8)も併せて検証する。
@@ -100,5 +100,41 @@ describe("J8: 振込の上限額超過は受付時点で却下される", () => 
     expect(status).toBeNull();
     const fromView = await queryApi.getAccount(fromId);
     expect(Number(fromView?.balance)).toBe(1000.0);
+  });
+});
+
+// FC14(docs/decision-tables.md発見4): PendingConfirmation以外の状態に対するConfirmの再送
+// (ConfirmError::NotPendingConfirmation)が、単体のみでE2E未検証だった。UIの二度押しや
+// ネットワーク再送で現実的に起こりうる操作。
+describe("FC14: 確認済み(credited)の振込への二重Confirmは却下され、二重に着金しない", () => {
+  it("2回目のConfirmは残高に一切影響しない", async () => {
+    const outputs = await fetchStackOutputs();
+    const commandApi = createCommandApi(outputs.commandApiUrl);
+    const queryApi = createQueryApi(outputs.queryApiUrl);
+    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl);
+    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl);
+    const [ownerA, ownerB] = distinctOwners();
+    const fromId = await openFreshAccount(commandApi, queryApi, "1000.00", ownerA);
+    const toId = await openFreshAccount(commandApi, queryApi, "0.00", ownerB);
+    await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, fromId);
+    await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, toId);
+
+    const transferId = crypto.randomUUID();
+    await transferCommandApi.start({ transferId, fromAccountId: fromId, toAccountId: toId, amount: "300.00" });
+    await waitForTransferState(transferQueryApi, transferId, ["pending_confirmation"]);
+    await transferCommandApi.confirm(transferId);
+    await waitForTransferState(transferQueryApi, transferId, ["credited"]);
+
+    // 既にcreditedになったサガへ同じtransferIdでConfirmを再送する。
+    const secondConfirmResponse = await transferCommandApi.confirm(transferId);
+    expect(secondConfirmResponse.status).toBe(202); // SQS投入自体は常に202(非同期)。
+    await settle(REJECTION_SETTLE_MS);
+
+    const status = await transferQueryApi.getTransferStatus(transferId);
+    expect(status?.state).toBe("credited"); // 状態は変化しない。
+    const fromView = await queryApi.getAccount(fromId);
+    const toView = await queryApi.getAccount(toId);
+    expect(Number(fromView?.balance)).toBe(700.0); // 二重出金されていない。
+    expect(Number(toView?.balance)).toBe(300.0); // 二重入金されていない。
   });
 });

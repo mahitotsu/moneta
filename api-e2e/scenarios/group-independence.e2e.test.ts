@@ -1,8 +1,8 @@
-// Covers docs/e2e-scenarios.md E1 -- a malformed accountId is a genuine *infra* failure
+// Covers docs/e2e-scenarios.md R5 (旧E1) -- a malformed accountId is a genuine *infra* failure
 // (persistence.rs's serde_json::from_str fails, not a DomainError, docs/adr/0006's known gap),
 // so unlike DomainError it IS retried by SQS and can occupy its own MessageGroupId for a while.
 // This approximates true head-of-line blocking (hard to force reliably without fault injection,
-// docs/e2e-scenarios.md I1) by checking that an unrelated, healthy account's group is
+// docs/e2e-scenarios.md R4, 旧I1) by checking that an unrelated, healthy account's group is
 // unaffected while a different group is busy retrying (docs/adr/0002決定3).
 import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi } from "../support/httpClient";

@@ -10,7 +10,7 @@ import { TRANSFER_KIND_LABEL, TRANSFER_STATE_LABEL, type TransferState } from ".
 // crates/transfer-service/src/saga.rsのRECALL_WINDOWと同じ24時間。ここでの時刻比較は
 // あくまで表示上のヒントであり、最終判定は常にサーバー側の`recall_eligibility`が権威
 // (docs/adr/0012決定6)——期限切れの組戻し要求はサーバー側で却下される
-// (docs/e2e-scenarios.md J10)。
+// (docs/e2e-scenarios.md FC12, 旧J10)。
 const RECALL_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 const STATE_BADGE_CLASS: Record<TransferState, string> = {

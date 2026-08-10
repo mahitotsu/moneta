@@ -1,4 +1,4 @@
-// Covers docs/e2e-scenarios.md C3 -- the counterpart to C1 (idempotency.e2e.test.ts): dedup is
+// Covers docs/e2e-scenarios.md E1 (旧C3) -- the counterpart to the same-key case (idempotency.e2e.test.ts): dedup is
 // keyed on the Idempotency-Key itself, not on the command's content, so the same command body
 // sent under two distinct keys must both apply.
 import { fetchStackOutputs } from "../support/stackOutputs";

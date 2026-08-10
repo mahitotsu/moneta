@@ -1,4 +1,4 @@
-// Covers docs/e2e-scenarios.md J1/J2/J3/J4/J7 (振替=同一名義間、docs/adr/0011)。
+// Covers docs/e2e-scenarios.md FC10 (旧J1/J2/J4/J7)・R6 (旧J3) (振替=同一名義間、docs/adr/0011)。
 // 同一owner_idの2口座間の送金は`kind=furikae`と判定され、確認(J5/J6)を経由せず即座に
 // 開始される(J7)——このファイルの全テストがその前提の上で書かれている。
 import { fetchStackOutputs } from "../support/stackOutputs";
@@ -148,5 +148,33 @@ describe("J4: 同一口座への送金は要求時点で却下される", () => 
 
     const view = await queryApi.getAccount(accountId);
     expect(Number(view?.balance)).toBe(100.0);
+  });
+});
+
+// FC13(docs/decision-tables.md発見: saga.rsのStartErrorのうちSameAccount/ExceedsFurikomiLimitは
+// 検証済みだったが、NonPositiveAmountは一度もE2E検証されていなかった)。APIGWの構造検証
+// (decimalStringSchema、`^-?\d+(\.\d{1,2})?$`)は正負を見ないため、"0"・"-10"はSQSまで到達し、
+// saga::startのドメイン層で初めて拒否される——account-serviceのB8/FC3と同じ境界。
+// InvalidAmountPrecision側("10.123"のような3桁超)はこのパターンとは逆にAPIGWレベルで
+// 4xx拒否されるため(account-serviceのFC7と同じ理由)、この構造検証を経由するE2Eでは到達
+// できず、saga.rsの単体テストのみでカバーする。
+describe("FC13: 非正の金額でのStartは受付時点で却下される", () => {
+  it.each([["ゼロ", "0"], ["負値", "-10"]])("%sの金額はサガを作成せず、残高も変化しない", async (_label, amount) => {
+    const outputs = await fetchStackOutputs();
+    const commandApi = createCommandApi(outputs.commandApiUrl);
+    const queryApi = createQueryApi(outputs.queryApiUrl);
+    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl);
+    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl);
+    const fromId = await openFreshAccount(commandApi, queryApi, "100.00", OWNER);
+    const toId = await openFreshAccount(commandApi, queryApi, "0.00", OWNER);
+    const transferId = crypto.randomUUID();
+
+    await transferCommandApi.start({ transferId, fromAccountId: fromId, toAccountId: toId, amount });
+    await settle(REJECTION_SETTLE_MS);
+
+    const status = await transferQueryApi.getTransferStatus(transferId);
+    expect(status).toBeNull();
+    const fromView = await queryApi.getAccount(fromId);
+    expect(Number(fromView?.balance)).toBe(100.0);
   });
 });

@@ -1,4 +1,4 @@
-// Covers docs/e2e-scenarios.md B1, B5, B6, B8.
+// Covers docs/e2e-scenarios.md FC3 (B1/B8相当), FC1 (B5相当), FC4 (B6相当).
 //
 // All four assert a *rejection* that, by definition, leaves the account's state untouched
 // (docs/adr/0002決定1). Since none of them is expected to succeed, they can safely share one
@@ -10,7 +10,7 @@ import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { settle } from "../support/poll";
 import { openFreshAccount } from "../support/testAccount";
 
-describe("B(Active fixture共有): ドメインエラーは状態を動かさない", () => {
+describe("FC(Active fixture共有): ドメインエラーは状態を動かさない", () => {
   let commandApi: ReturnType<typeof createCommandApi>;
   let queryApi: ReturnType<typeof createQueryApi>;
   let accountId: string;
@@ -22,7 +22,7 @@ describe("B(Active fixture共有): ドメインエラーは状態を動かさな
     accountId = await openFreshAccount(commandApi, queryApi, "100");
   });
 
-  it("B1: 残高不足の出金は却下され、残高が変化しない", async () => {
+  it("FC3(旧B1): 残高不足の出金は却下され、残高が変化しない", async () => {
     const response = await commandApi.withdraw(accountId, "1000000");
     expect(response.status).toBe(202);
 
@@ -32,7 +32,7 @@ describe("B(Active fixture共有): ドメインエラーは状態を動かさな
     expect(Number(after?.balance)).toBe(100);
   });
 
-  it("B5: 既にOpen済みの口座IDへの再Openは却下され、元の残高が保持される", async () => {
+  it("FC1(旧B5): 既にOpen済みの口座IDへの再Openは却下され、元の残高が保持される", async () => {
     const response = await commandApi.openAccount(accountId, "999999");
     expect(response.status).toBe(202);
 
@@ -42,7 +42,7 @@ describe("B(Active fixture共有): ドメインエラーは状態を動かさな
     expect(Number(after?.balance)).toBe(100);
   });
 
-  it("B6: 既にActiveな口座へのUnfreezeは却下され、状態・残高が変化しない", async () => {
+  it("FC4(旧B6): 既にActiveな口座へのUnfreezeは却下され、状態・残高が変化しない", async () => {
     const response = await commandApi.unfreeze(accountId);
     expect(response.status).toBe(202);
 
@@ -52,9 +52,23 @@ describe("B(Active fixture共有): ドメインエラーは状態を動かさな
     expect(Number(after?.balance)).toBe(100);
   });
 
-  it("B8: 負の金額での入金は却下され、残高が変化しない(APIGWの構造検証は正負を見ない, ADR-0006決定5)", async () => {
+  it("FC2(旧B8): 負の金額での入金は却下され、残高が変化しない(APIGWの構造検証は正負を見ない, ADR-0006決定5)", async () => {
     const response = await commandApi.deposit(accountId, "-10");
     expect(response.status).toBe(202);
+
+    await settle();
+    const after = await queryApi.getAccount(accountId);
+    expect(after).toMatchObject({ status: "active" });
+    expect(Number(after?.balance)).toBe(100);
+  });
+
+  // docs/decision-tables.md発見1の是正: Depositの負値(直上のテスト)には対があったのに、
+  // Withdrawの負/ゼロ額は単体・E2Eとも一度も検証されていなかった非対称な穴。
+  it("FC3(新規): 負またはゼロの金額での出金は却下され、残高が変化しない(APIGWの構造検証は正負を見ない, ADR-0006決定5)", async () => {
+    const zero = await commandApi.withdraw(accountId, "0");
+    expect(zero.status).toBe(202);
+    const negative = await commandApi.withdraw(accountId, "-10");
+    expect(negative.status).toBe(202);
 
     await settle();
     const after = await queryApi.getAccount(accountId);

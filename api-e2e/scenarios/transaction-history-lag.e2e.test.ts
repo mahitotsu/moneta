@@ -1,4 +1,4 @@
-// Covers docs/e2e-scenarios.md F2 -- the transaction-history read model (AccountHistoryTable,
+// Covers docs/e2e-scenarios.md P1 (旧F2) -- the transaction-history read model (AccountHistoryTable,
 // docs/adr/0009) goes through the same outbox -> EventBridge -> DynamoDB path as the current-
 // state view (docs/adr/0004・0013), so it has the same near-real-time convergence bound (DynamoDB
 // Streams, not the old EventBridge Scheduler's ~1-minute floor). Also confirms that querying

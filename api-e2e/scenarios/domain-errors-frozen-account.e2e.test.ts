@@ -1,4 +1,4 @@
-// Covers docs/e2e-scenarios.md B2, B7, A6 (deposit half already lived in B2, this adds the
+// Covers docs/e2e-scenarios.md FC4 (deposit half already lived in old B2, this adds the
 // withdraw half of A6 to the same fixture at near-zero extra cost).
 //
 // Same rationale as domain-errors-active-account.e2e.test.ts: both assertions are rejections
@@ -51,5 +51,27 @@ describe("B(Frozen fixture共有): ドメインエラーは状態を動かさな
     const after = await queryApi.getAccount(accountId);
     // Setup fixed the reason to CourtOrder; a rejected re-freeze must not overwrite it.
     expect(after).toMatchObject({ status: "frozen", frozenReason: "court_order" });
+  });
+});
+
+// FC5(docs/decision-tables.md発見2の是正): Closeは却下ではなく実際に状態を動かす(Frozen->Closed)
+// ため、上のBフィクスチャ(「ずっとfrozenのまま」という不変条件を前提に共有している)とは別に、
+// 専用の口座を1つ開いて検証する(unfreeze-lifecycle.e2e.test.tsと同じ理由)。
+describe("FC5(専用フィクスチャ): Frozenな口座は凍結解除を経由せず直接解約できる", () => {
+  it("凍結中の口座をCloseすると、最終的にClosed・final_balanceを返す", async () => {
+    const outputs = await fetchStackOutputs();
+    const commandApi = createCommandApi(outputs.commandApiUrl);
+    const queryApi = createQueryApi(outputs.queryApiUrl);
+    const accountId = await openFreshAccount(commandApi, queryApi, "100");
+    await commandApi.freeze(accountId, "CourtOrder");
+    await waitForStatus(queryApi, accountId, "frozen");
+
+    const response = await commandApi.close(accountId);
+    expect(response.status).toBe(202);
+
+    await waitForStatus(queryApi, accountId, "closed");
+    const after = await queryApi.getAccount(accountId);
+    expect(after).toMatchObject({ status: "closed" });
+    expect(Number(after?.balance)).toBe(100);
   });
 });

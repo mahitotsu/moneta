@@ -1,4 +1,4 @@
-// Covers docs/e2e-scenarios.md F1 -- the read side (account_events' DynamoDB Streams ->
+// Covers docs/e2e-scenarios.md P1 (旧F1) -- the read side (account_events' DynamoDB Streams ->
 // EventBridge -> DynamoDB view, docs/adr/0004・0013) lags the write side, but converges quickly
 // (DynamoDB Streams delivers near-real-time, unlike the old EventBridge Scheduler's ~1-minute
 // floor). This is a documented property, not a failure (docs/adr/0001's UX accountability, and

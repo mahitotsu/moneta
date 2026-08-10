@@ -406,6 +406,25 @@ mod tests {
         );
     }
 
+    /// `deposit_zero_or_negative_is_rejected`と対になるWithdraw側。
+    /// `docs/decision-tables.md`発見1(Active/Frozen × Withdraw(負/ゼロ額)が単体・E2Eとも
+    /// 一度も検証されていなかった)の是正——Depositには対になるテストが既にあったのに、
+    /// Withdrawだけ欠けていた非対称な穴だった。
+    #[test]
+    fn withdraw_zero_or_negative_is_rejected() {
+        let account = Account::open(AccountId::new(), owner(), dec!(100));
+        assert_eq!(
+            account.apply(Command::Withdraw { amount: dec!(0) }, now()).unwrap_err(),
+            DomainError::InvalidAmount(dec!(0))
+        );
+        assert_eq!(
+            account
+                .apply(Command::Withdraw { amount: dec!(-10) }, now())
+                .unwrap_err(),
+            DomainError::InvalidAmount(dec!(-10))
+        );
+    }
+
     #[test]
     fn amounts_with_more_than_two_decimal_places_are_rejected() {
         let account = Account::open(AccountId::new(), owner(), dec!(1000));
@@ -514,6 +533,42 @@ mod tests {
         assert_eq!(
             account.apply(Command::Unfreeze, now()).unwrap_err(),
             DomainError::AlreadyActive
+        );
+    }
+
+    /// `docs/decision-tables.md`発見2の是正: `Frozen`状態から(先に凍結解除せず)直接`Close`できる
+    /// ことが単体・E2Eとも一度も検証されていなかった。`closed_account_rejects_all_commands`は
+    /// `Active`から`Close`した口座しか使っておらず、`account.rs`の`Frozen`分岐(`Command::Close =>
+    /// Ok(Event::Closed { .. })`)を一度も通っていなかった。
+    #[test]
+    fn frozen_account_can_be_closed_directly_without_unfreezing_first() {
+        let account = Account::open(AccountId::new(), owner(), dec!(100));
+        let frozen_event = account
+            .apply(
+                Command::Freeze {
+                    reason: FreezeReason::CourtOrder,
+                },
+                now(),
+            )
+            .unwrap();
+        let account = account.evolve(&frozen_event);
+
+        let closed_event = account.apply(Command::Close, now()).unwrap();
+        assert_eq!(
+            closed_event,
+            Event::Closed {
+                account_id: account.id(),
+                final_balance: dec!(100),
+                closed_at: now(),
+            }
+        );
+        let account = account.evolve(&closed_event);
+        assert_eq!(
+            account.state(),
+            &AccountState::Closed {
+                final_balance: dec!(100),
+                closed_at: now(),
+            }
         );
     }
 

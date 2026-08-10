@@ -1,4 +1,4 @@
-// Covers docs/e2e-scenarios.md J9/J10 (組戻し=recall、docs/adr/0011決定5)。
+// Covers docs/e2e-scenarios.md FC12 (旧J9/J10) (組戻し=recall、docs/adr/0011決定5)。
 // 組戻しは新しい終端状態を追加せず、`kind=recall`の新しいサガとして`start`を再利用する
 // 設計(saga.rs)。適格性(`recall_eligibility`)は kind==furikomi ・ state==credited ・
 // 時間窓(24時間)以内、の3条件——このファイルはその3条件それぞれの成立/不成立を検証する。
@@ -129,6 +129,43 @@ describe("J10b: 組戻し可能な時間窓を過ぎている場合は受付時�
     const recallId = crypto.randomUUID();
     await transferCommandApi.recall({ transferId: recallId, originalTransferId: transferId });
 
+    await settle(REJECTION_SETTLE_MS);
+
+    const recallStatus = await transferQueryApi.getTransferStatus(recallId);
+    expect(recallStatus).toBeNull();
+
+    const fromView = await queryApi.getAccount(fromId);
+    const toView = await queryApi.getAccount(toId);
+    expect(Number(fromView?.balance)).toBe(700.0);
+    expect(Number(toView?.balance)).toBe(300.0);
+  });
+});
+
+// FC15(docs/decision-tables.md発見5): 組戻しは振込(furikomi)専用の操作で、振替(furikae)や
+// 組戻し自体に対するRecallは`RecallError::NotFurikomi`で却下されるはずだが、単体のみでE2E
+// 未検証だった。組戻しは振替では原理的に不要(顧客自身が別の振替をやり直せば足りる、saga.rs
+// のコメント参照)という業務境界の外部観測。
+describe("FC15: 振替(furikae)に対するRecallは却下される", () => {
+  it("組戻し用サガは作成されず、残高も変化しない", async () => {
+    const outputs = await fetchStackOutputs();
+    const commandApi = createCommandApi(outputs.commandApiUrl);
+    const queryApi = createQueryApi(outputs.queryApiUrl);
+    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl);
+    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl);
+    // furikae: 送金元・送金先を同一名義にする(furikomiのcreditedFurikomiとは違い確認不要)。
+    const owner = `e2e-recall-furikae-owner-${crypto.randomUUID()}`;
+    const fromId = await openFreshAccount(commandApi, queryApi, "1000.00", owner);
+    const toId = await openFreshAccount(commandApi, queryApi, "0.00", owner);
+    await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, fromId);
+    await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, toId);
+
+    const transferId = crypto.randomUUID();
+    await transferCommandApi.start({ transferId, fromAccountId: fromId, toAccountId: toId, amount: "300.00" });
+    const credited = await waitForTransferState(transferQueryApi, transferId, ["credited"]);
+    expect(credited.kind).toBe("furikae");
+
+    const recallId = crypto.randomUUID();
+    await transferCommandApi.recall({ transferId: recallId, originalTransferId: transferId });
     await settle(REJECTION_SETTLE_MS);
 
     const recallStatus = await transferQueryApi.getTransferStatus(recallId);

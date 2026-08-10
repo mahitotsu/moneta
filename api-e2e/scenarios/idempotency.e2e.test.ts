@@ -1,4 +1,4 @@
-// Covers docs/e2e-scenarios.md C1/C2.
+// Covers docs/e2e-scenarios.md E1 (旧C1/C2).
 import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi, rawRequest } from "../support/httpClient";
 import { settle, waitFor } from "../support/poll";
