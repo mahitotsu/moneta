@@ -3,6 +3,7 @@ import * as path from "path";
 import * as cdk from "aws-cdk-lib/core";
 import { Construct } from "constructs";
 import * as apigateway from "aws-cdk-lib/aws-apigateway";
+import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
@@ -139,11 +140,38 @@ export class AccountPipelineStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
+    // docs/adr/0002決定6・production-readiness-matrix.md O1: DLQの滞留数・最古メッセージの
+    // 経過時間にCloudWatchアラームを張る。ADR自体は決定していたが、実装が伴っていなかった
+    // (2026-08-10発見)。`maxReceiveCount`を低く抑えている設計(このファイル冒頭のコメント参照)
+    // 上、DLQへの到達自体が「Lambda内3回リトライを使い切ってもなお解決しなかった、真に持続的な
+    // インフラ起因の失敗」を意味するため、閾値は「1件でも見えたら発報」という保守的な設定にする。
+    const addDlqAlarms = (id: string, queue: sqs.Queue) => {
+      new cloudwatch.Alarm(this, `${id}MessagesVisibleAlarm`, {
+        alarmName: `moneta-${queue.queueName}-messages-visible`,
+        metric: queue.metricApproximateNumberOfMessagesVisible({ period: cdk.Duration.minutes(5) }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      });
+      new cloudwatch.Alarm(this, `${id}OldestMessageAgeAlarm`, {
+        alarmName: `moneta-${queue.queueName}-oldest-message-age`,
+        metric: queue.metricApproximateAgeOfOldestMessage({ period: cdk.Duration.minutes(5) }),
+        // DLQに何かが滞留し続けている場合の経過時間の目安として1時間(ADRは具体的な閾値を
+        // 決め打ちしていないため、保守的な初期値として採用する——実運用でチューニングする前提)。
+        threshold: cdk.Duration.hours(1).toSeconds(),
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      });
+    };
+
     // --- SQS FIFO queue + DLQ -------------------------------------------------
     const deadLetterQueue = new sqs.Queue(this, "AccountCommandDlq", {
       queueName: "moneta-account-commands.fifo",
       fifo: true,
     });
+    addDlqAlarms("AccountCommandDlq", deadLetterQueue);
 
     const commandQueue = new sqs.Queue(this, "AccountCommandQueue", {
       queueName: "moneta-account-commands-main.fifo",
@@ -199,10 +227,14 @@ export class AccountPipelineStack extends cdk.Stack {
     // CLAUDE.mdの「AWS/ライブラリの挙動は推測せず検証する」を地で行く形になった。
     accountsTable.grantReadWriteData(fn); // GetItem(読み込み) + PutItem/UpdateItem(新規/既存の書き込み)
     accountsTable.grant(fn, "dynamodb:TransactWriteItems", "dynamodb:ConditionCheckItem");
-    accountEventsTable.grantWriteData(fn); // PutItem(イベント追記)
-    accountEventsTable.grant(fn, "dynamodb:TransactWriteItems");
-    processedMessagesTable.grantWriteData(fn); // PutItem(冪等性ログ)
-    processedMessagesTable.grant(fn, "dynamodb:TransactWriteItems");
+    // account_eventsは追記専用(監査ログ、docs/production-readiness-matrix.md L3)。
+    // `grantWriteData`はPutItemに加えUpdateItem/DeleteItem/BatchWriteItemも付与してしまい、
+    // コメントが謳う「PutItemのみ」という意図と矛盾する過剰権限だった(2026-08-10発見)。
+    // 必要なアクションだけを明示的に列挙する。
+    accountEventsTable.grant(fn, "dynamodb:PutItem", "dynamodb:TransactWriteItems");
+    // 冪等性ログも同じ理由で追記専用にする——同一メッセージIDの再処理はConditionalCheckFailed
+    // で弾かれる設計であり(ADR-0002決定4)、既存項目のUpdate/Deleteは想定されていない。
+    processedMessagesTable.grant(fn, "dynamodb:PutItem", "dynamodb:TransactWriteItems");
 
     // ==========================================================================
     // Query service (docs/adr/0004) — ADR-0001のイベント駆動連携の実証。
@@ -741,6 +773,7 @@ export class AccountPipelineStack extends cdk.Stack {
       queueName: "moneta-transfer-commands.fifo",
       fifo: true,
     });
+    addDlqAlarms("TransferCommandDlq", transferCommandDlq);
     const transferCommandQueue = new sqs.Queue(this, "TransferCommandQueue", {
       queueName: "moneta-transfer-commands-main.fifo",
       fifo: true,

@@ -201,6 +201,54 @@ describe("AccountPipelineStack", () => {
     });
   });
 
+  // docs/production-readiness-matrix.md O1: ADR-0002決定6は「DLQの滞留数・最古メッセージの
+  // 経過時間にCloudWatchアラームを張る」と決定していたが、実装が伴っていなかった(2026-08-10発見)。
+  test("both DLQs (account command, transfer command) have alarms on messages-visible and oldest-message-age", () => {
+    template.resourceCountIs("AWS::CloudWatch::Alarm", 4);
+    // DimensionsのValueはキュー論理IDへのFn::GetAtt(QueueName)であり、キュー名の文字列
+    // リテラルとしては現れない(CDKの`metricApproximateNumberOfMessagesVisible`の実際の
+    // 出力を実行して確認済み)。どのキューかまでは論理IDから間接的にしか分からないため、
+    // ここでは「両メトリクスとも2件ずつ(account用・transfer用)存在する」ことだけを確認する。
+    for (const metricName of ["ApproximateNumberOfMessagesVisible", "ApproximateAgeOfOldestMessage"]) {
+      template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+        MetricName: metricName,
+        Namespace: "AWS/SQS",
+        Dimensions: Match.arrayWith([Match.objectLike({ Name: "QueueName" })]),
+      });
+      const matches = template.findResources("AWS::CloudWatch::Alarm", {
+        Properties: { MetricName: metricName },
+      });
+      expect(Object.keys(matches)).toHaveLength(2);
+    }
+  });
+
+  // docs/production-readiness-matrix.md L3: account_events(監査ログ)とprocessed_messages
+  // (冪等性ログ)は追記専用であるべきで、既存項目のUpdate/Deleteは想定されていない
+  // (2026-08-10発見: 修正前は`grantWriteData`が意図せずUpdateItem/DeleteItem/BatchWriteItemも
+  // 付与していた——コメントは「PutItemのみ」と書いていたのに、実際に要求するIAMアクションが
+  // それより広いという、ADR-0013決定5と同種の「実際に要求されるアクションを検証せず思い込んでいた」
+  // ケース)。
+  test("account_events and processed_messages tables never grant UpdateItem/DeleteItem/BatchWriteItem to any function (append-only)", () => {
+    const policies = template.findResources("AWS::IAM::Policy");
+    const forbiddenActions = ["dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:BatchWriteItem"];
+    for (const [id, policy] of Object.entries(policies)) {
+      const statements = policy.Properties.PolicyDocument.Statement as Array<{
+        Action: string | string[];
+        Resource: unknown;
+      }>;
+      for (const statement of statements) {
+        const resources = JSON.stringify(statement.Resource);
+        if (!/AccountEventsTable|ProcessedMessagesTable/.test(resources)) continue;
+        const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+        for (const forbidden of forbiddenActions) {
+          if (actions.includes(forbidden)) {
+            throw new Error(`policy ${id} grants ${forbidden} on account_events/processed_messages`);
+          }
+        }
+      }
+    }
+  });
+
   // docs/adr/0004・0013: query projectorはEventBridgeのdetailだけで完結し、
   // account-serviceの内部ストア(accountsTable等)への読み取り権限を一切持たない。
   test("query projector never gets IAM access to account-service's own tables (accountsTable/accountEventsTable/processedMessagesTable)", () => {
