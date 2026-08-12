@@ -140,7 +140,9 @@ When 時間窓内に`Recall`を要求する
 Then 逆方向の送金として実行され、最終的に送金先の残高が減り送金元の残高が同額戻る。時間窓超過・
 受取人の残高不足はいずれも組戻しの失敗として観測される
 → [[0011]]決定5 — **P0** — `transfer-recall.e2e.test.ts`・UI上は`ui-e2e/scenarios/transfer-recall.spec.ts`
-組戻しは振込専用という業務境界の外部観測(2026-08-10追加。E2Eはライブスタックに対して実行・合格確認済み(2026-08-12)。
+組戻しは振込専用という業務境界の外部観測(2026-08-10追加。API・UIとも実行・合格確認済み(2026-08-12)。
+UI固有の主張(振替の完了画面には「組戻す」ボタンがそもそも描画されない、TransferDetailScreen.tsx
+の`kind===furikomi`条件)は`ui-e2e/scenarios/transfer-furikae.spec.ts`に追加。
 [decision-tables.md](decision-tables.md)発見5の是正) → `production-readiness-matrix.md` FC15
 
 **FC14: サガの二重操作拒否**
@@ -156,8 +158,12 @@ Given 送金元・送金先が異なる口座
 When 非正の金額(`0`・負値)で`Start`を要求する
 Then サガは作成されず、送金元・送金先とも残高は変化しない
 → [saga.rs:130-141](../crates/transfer-service/src/saga.rs#L130-L141)の`StartError::NonPositiveAmount`
-— **P1**(2026-08-10追加。E2Eはライブスタックに対して実行・合格確認済み、2026-08-12) — `transfer-furikae.e2e.test.ts`
-(小数点3桁以上の`InvalidAmountPrecision`はAPIGWの構造検証が先に4xx拒否するためE2E到達不能。
+— **P1**(2026-08-10追加。API・UIとも実行・合格確認済み、2026-08-12)
+— `transfer-furikae.e2e.test.ts`・`transfer-furikae.spec.ts`
+(UI固有の主張: `TransferForm.tsx`は金額をクライアント側検証しないため実際に送信できてしまうが、
+Startは202を返しサガが作られないため、エラー表示ではなく「反映待ち」画面のまま留まる——
+ADR-0012決定6の既存トレードオフ(結果整合性のラグと真に存在しないIDを区別しない)の延長。
+小数点3桁以上の`InvalidAmountPrecision`はAPIGWの構造検証が先に4xx拒否するためE2E到達不能。
 FC7と同じ理由で単体テストのみに留める)
 
 ---

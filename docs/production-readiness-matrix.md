@@ -54,13 +54,13 @@
 | FC6 | 取引履歴: 新しい順・件数上限 | 🟢 | 旧A9、`transaction-history.e2e.test.ts` |
 | FC7 | APIGW構造検証: 型/必須項目/enum/金額パターン | 🟡(精度境界`10.123`のような桁数超過ケースは未検証、[decision-tables.md](decision-tables.md)発見3で再確認) | 旧G1-G3、`input-validation.e2e.test.ts` |
 | FC14 | サガの二重操作拒否(`Confirm`/`Cancel`をPendingConfirmation以外に送る) | 🟢(2026-08-10、[decision-tables.md](decision-tables.md)発見4を是正。E2E追加、ライブスタックに対して実行・合格確認済み、2026-08-12) | `transfer-furikomi.e2e.test.ts` |
-| FC15 | 組戻し(Recall)の業務境界(振替/組戻し自体への誤ったRecall要求) | 🟢(2026-08-10、[decision-tables.md](decision-tables.md)発見5を是正。E2E追加、ライブスタックに対して実行・合格確認済み、2026-08-12) | `transfer-recall.e2e.test.ts` |
+| FC15 | 組戻し(Recall)の業務境界(振替/組戻し自体への誤ったRecall要求) | 🟢(2026-08-10、[decision-tables.md](decision-tables.md)発見5を是正。API・UIとも実行・合格確認済み、2026-08-12。TransferDetailScreen.tsxが`kind===furikomi`でのみ「組戻す」ボタンを描画するというUI固有の主張は、api-e2eのAPI直叩きテストだけでは検証できておらず、`ui-e2e/scenarios/transfer-furikae.spec.ts`に追加) | `transfer-recall.e2e.test.ts`・`transfer-furikae.spec.ts` |
 | FC8 | 既知のギャップ: 不正な形式の`accountId` | 🟢(意図的な既知のギャップとして固定) | 旧G4、`known-gap-malformed-account-id.e2e.test.ts` |
 | FC9 | 顧客/外部チャネル画面のUI分離(ボタン非表示・サインイン要否) | 🟡(H1-H3、api-e2e/README.mdが自己申告している既知の未実装) | 旧H1-H3、未実装(ブラウザ自動化なし) |
 | FC10 | 送金(振替)の基本正しさ: 同一名義・確認不要・即時開始 | 🟢 | 旧J1/J2/J4/J7、`transfer-furikae.e2e.test.ts` |
 | FC11 | 送金(振込)の基本正しさ: 名義不一致・確認必須・上限額 | 🟢 | 旧J5/J6/J8、`transfer-furikomi.e2e.test.ts` |
 | FC12 | 組戻し(recall)の基本正しさ: 時間窓・残高不足 | 🟢 | 旧J9/J10、`transfer-recall.e2e.test.ts` |
-| FC13 | transfer-serviceの`start`入力検証: 非正の金額・精度超過 | 🟡(2026-08-10。`NonPositiveAmount`はE2E追加、ライブスタックに対して実行・合格確認済み(2026-08-12)。`InvalidAmountPrecision`はAPIGWの構造検証で先に4xx拒否されるためE2E到達不能——FC7と同種の理由、単体テストのみで妥当) | `saga.rs`単体テスト、`transfer-furikae.e2e.test.ts` |
+| FC13 | transfer-serviceの`start`入力検証: 非正の金額・精度超過 | 🟡(2026-08-10。`NonPositiveAmount`はAPI・UIとも実行・合格確認済み、2026-08-12。TransferForm.tsxは金額を一切クライアント側検証しておらず、実際に顧客が"0"を送信できる操作なのでUI固有の検証価値がある——ただし当初想定した「エラー表示」ではなく、Startが202を返しサガが作られないため「反映待ち」画面のまま留まる、というADR-0012決定6の既存トレードオフの延長だと判明。`transfer-furikae.spec.ts`に追加。`InvalidAmountPrecision`はAPIGWの構造検証で先に4xx拒否されるためE2E到達不能——FC7と同種の理由、単体テストのみで妥当) | `saga.rs`単体テスト、`transfer-furikae.e2e.test.ts`・`transfer-furikae.spec.ts` |
 
 ---
 

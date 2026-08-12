@@ -59,3 +59,10 @@ export async function expectStateBadge(page: Page, label: string, timeoutMs = 90
 export async function expectKindLabel(page: Page, label: string, timeoutMs = 90_000): Promise<void> {
   await expect(page.locator(".balance-hero-top .account-type")).toHaveText(label, { timeout: timeoutMs });
 }
+
+// TransferDetailScreen.tsx's "反映待ち" placeholder (isLoading || !data の分岐)。結果整合性の
+// ラグ("まだ存在しない")と、真に存在しないID(サガが一度も作られなかった)を意図的に区別しない
+// (docs/adr/0012決定6、[[eventual_consistency_not_a_failure]])。
+export async function expectPendingPlaceholder(page: Page): Promise<void> {
+  await expect(page.getByText("この送金はまだ最新の情報に反映されていません")).toBeVisible();
+}

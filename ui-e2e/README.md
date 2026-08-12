@@ -50,6 +50,8 @@ npm test                     # 3. 今デプロイされている断面に対し�
 | FC11(旧J5/J6) | `scenarios/transfer-furikomi.spec.ts`(確認して完了) |
 | FC11派生 | `scenarios/transfer-furikomi.spec.ts`(確認前に取消してcancelled) |
 | FC12(旧J9) | `scenarios/transfer-recall.spec.ts` |
+| FC15(2026-08-12追加) | `scenarios/transfer-furikae.spec.ts`(振替完了画面に「組戻す」ボタンが描画されないことを確認) |
+| FC13(2026-08-12追加) | `scenarios/transfer-furikae.spec.ts`(非正の金額を送信しても反映待ち画面のまま留まることを確認) |
 
 旧J2/J3/J4/J8/J10相当(ドメイン却下・入力検証系)はUI固有の主張を含まず、`api-e2e/`が既に
 HTTPレベルで検証済みのため、ここでは繰り返さない。
