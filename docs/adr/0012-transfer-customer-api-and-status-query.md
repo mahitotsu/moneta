@@ -38,17 +38,39 @@ TransferSagaTable(書き込み専用、CAS)
             └─ TransferStatusView(読み取り専用) ← API Gateway GetItem直接統合
 ```
 
-これは新しい発明ではなく、`transfer-service`が[[0011-furikae-furikomi-distinction]]で
-既に導入している`transfer-owner-projector`(EventBridgeで観測した`account.event.Opened`を
-`TransferAccountOwnersTable`という別のDynamoDBへ投影する、まさに同じ形のコンポーネント)を、
-トリガーをEventBridgeからDynamoDB Streamsに変えて踏襲するだけである。`query-service`にも
-`transfer-service`にも新しいcrate間依存を持ち込まない(`transfer-status-projector`は
-`transfer-service`自身の新しいbinaryとして、`owner_projector.rs`の隣に置く)。
+**EventBridgeではなくDynamoDB Streamsを選ぶ理由**: `TransferSagaTable`の書き込み元
+(`transfer-command-intake`/`transfer-saga-step`)と`transfer-status-projector`はどちらも
+`transfer-service`という同一crate([[0001-service-boundaries-and-event-driven-integration]]・
+[[0003-domain-service-crate-boundary]]が定める通り、このプロジェクトではcrateの境界=
+サービスの境界)に属する。EventBridgeはこのプロジェクトで**サービス境界を跨ぐ**連携の統一
+アーキテクチャ(account-service→query-service、account-service→transfer-serviceの2箇所)
+であり、本決定が扱うのはサービス境界を一度も跨がない同一サービス内のCQRS的な書き込み/読み取り
+分離である。したがってEventBridgeを使う理由づけ自体がそもそも当てはまらない。
 
-AWS公式ドキュメントで確認したところ、DynamoDB Streams自体には稼働の有無によらない時間課金は
-存在せず、Lambdaトリガー経由の`GetRecords`呼び出しは無料である(通常のStreams読み取り課金は
-Lambda以外の直接呼び出しにのみ発生する)。「稼働していないときは課金されない」という本PoCの
-コスト方針と合致する。
+これを踏まえて実利もある。DynamoDB Streamsは**同一パーティションキー(同一`transferId`)内では
+実際の変更順序と同じ順序でレコードが並ぶことを保証する**(Lambdaのevent source mappingも既定の
+`ParallelizationFactor`ではこの順序を保つ、AWS公式ドキュメントで確認済み)。
+[[0004-query-service-event-driven-projection]]決定5がEventBridgeアウトボックスの
+at-least-once・順序無保証を前提にlast-writer-wins(`ConditionExpression`による`lastEventAt`
+比較)を要したのに対し、こちらは順序が最初から保証されるため、`transfer-status-projector`は
+条件なしの`PutItem`で足りる(同じレコードが再配信されても、最新の状態を上書きするだけで収束
+する)。EventBridge経由にしていたら、必要のないlast-writer-winsの複雑さを持ち込むことになって
+いた。
+
+コンポーネントの形自体は新しい発明ではなく、`transfer-service`が[[0011-furikae-furikomi-distinction]]で既に導入している`transfer-owner-projector`(EventBridgeで観測した
+`account.event.Opened`を`TransferAccountOwnersTable`へ投影する、まさに同じ形のコンポーネント)
+の、トリガーだけをDynamoDB Streamsに変えた踏襲である。`query-service`にも`transfer-service`にも
+新しいcrate間依存を持ち込まない(`transfer-status-projector`は`transfer-service`自身の新しい
+binaryとして、`owner_projector.rs`の隣に置く)。AWS公式ドキュメントで確認したところ、DynamoDB
+Streams自体には稼働の有無によらない時間課金は存在せず、Lambdaトリガー経由の`GetRecords`呼び出し
+は無料である(通常のStreams読み取り課金はLambda以外の直接呼び出しにのみ発生する)。「稼働して
+いないときは課金されない」という本PoCのコスト方針とも合致する。
+
+**この判断が崩れる条件**: `transfer-service`の外(例: 将来のNotification service)が送金完了/
+状態遷移を購読したくなった場合、`TransferSagaTable`は運用専用テーブルのため直接晒す対象には
+できない(下記却下案と同じ理由)。その時点で初めて、`transfer-service`自身がEventBridgeへ
+publishするアウトボックスを新設する必要が生じる——本決定はそれを先取りして作り込まない
+(YAGNI)。
 
 **却下した代替案: `TransferSagaTable`そのものへAPI Gateway→DynamoDB `GetItem`直接統合する
 (専用ビューを作らない)。** [[0004-query-service-event-driven-projection]]決定3・4が
@@ -70,16 +92,6 @@ Transferだけ緩めることになるため不採用とする。
   `dynamodb:GetItem`を許可すると、`transfer-command-intake`/`transfer-saga-step`が
   読み書きする運用テーブルに、顧客向け読み取り経路という別の主体からの直接アクセス経路が
   増える。
-
-さらにAWS公式ドキュメントで確認した通り、DynamoDB Streamsは**同一アイテム(同一パーティション
-キー)に対する変更については、実際の変更順序と同じ順序でストリームレコードが並ぶことを保証する**
-(Lambdaのevent source mappingも既定の`ParallelizationFactor`ではこの順序を保ったままシャードを
-処理する)。[[0004-query-service-event-driven-projection]]決定5がEventBridgeアウトボックスの
-at-least-once・順序無保証を前提にlast-writer-wins(`ConditionExpression`による`lastEventAt`
-比較)を要したのに対し、こちらは同一`transferId`内の順序が最初から保証されるため、
-`transfer-status-projector`は条件なしの`PutItem`で足りる(同じレコードが再配信されても、
-最新の状態を上書きするだけで収束する)。これはコピーした結果ではなく、DynamoDB Streamsという
-異なるソースの性質から導かれる、単純だが正当な差分である。
 
 `transfer-status-projector`は`TransferSagaTable`のNEW_IMAGEを丸ごと転記するのではなく、
 `transferId`/`fromAccountId`/`toAccountId`/`amount`/`kind`/`state`/`updatedAt`だけを
