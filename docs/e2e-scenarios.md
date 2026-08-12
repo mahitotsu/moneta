@@ -140,7 +140,7 @@ When 時間窓内に`Recall`を要求する
 Then 逆方向の送金として実行され、最終的に送金先の残高が減り送金元の残高が同額戻る。時間窓超過・
 受取人の残高不足はいずれも組戻しの失敗として観測される
 → [[0011]]決定5 — **P0** — `transfer-recall.e2e.test.ts`・UI上は`ui-e2e/scenarios/transfer-recall.spec.ts`
-組戻しは振込専用という業務境界の外部観測(2026-08-10追加。E2Eは型チェック済み。
+組戻しは振込専用という業務境界の外部観測(2026-08-10追加。E2Eはライブスタックに対して実行・合格確認済み(2026-08-12)。
 [decision-tables.md](decision-tables.md)発見5の是正) → `production-readiness-matrix.md` FC15
 
 **FC14: サガの二重操作拒否**
@@ -148,7 +148,7 @@ Given `PendingDebit`以降(確認済み)または終端状態のサガ
 When 同じ`transfer_id`に対して`Confirm`または`Cancel`を再度要求する
 Then いずれも却下され、サガの状態は変化しない
 → [saga.rs:181-191](../crates/transfer-service/src/saga.rs#L181-L191)の`ConfirmError`/
-`CancelError::NotPendingConfirmation` — **P2**(2026-08-10追加。E2Eは型チェック済み。
+`CancelError::NotPendingConfirmation` — **P2**(2026-08-10追加。E2Eはライブスタックに対して実行・合格確認済み(2026-08-12)。
 [decision-tables.md](decision-tables.md)発見4の是正) — `transfer-furikomi.e2e.test.ts`
 
 **FC13: transfer-serviceの`start`入力検証**
@@ -156,7 +156,7 @@ Given 送金元・送金先が異なる口座
 When 非正の金額(`0`・負値)で`Start`を要求する
 Then サガは作成されず、送金元・送金先とも残高は変化しない
 → [saga.rs:130-141](../crates/transfer-service/src/saga.rs#L130-L141)の`StartError::NonPositiveAmount`
-— **P1**(2026-08-10追加。E2Eは型チェック済み) — `transfer-furikae.e2e.test.ts`
+— **P1**(2026-08-10追加。E2Eはライブスタックに対して実行・合格確認済み、2026-08-12) — `transfer-furikae.e2e.test.ts`
 (小数点3桁以上の`InvalidAmountPrecision`はAPIGWの構造検証が先に4xx拒否するためE2E到達不能。
 FC7と同じ理由で単体テストのみに留める)
 
@@ -229,7 +229,7 @@ Given `Active`な口座
 When 顧客/外部チャネルからの直接コマンドと、transfer-serviceが発行するコマンド(送金の一部)が
 ほぼ同時に同じ口座へ届く
 Then R1と同じ直列化保証のもとで、どちらも取りこぼされず、残高が破綻しない
-→ **P1**(2026-08-10実装。E2Eは型チェック済み) — `concurrency-cross-producer.e2e.test.ts`
+→ **P1**(2026-08-10実装。E2Eはライブスタックに対して実行・合格確認済み、2026-08-12) — `concurrency-cross-producer.e2e.test.ts`
 (`production-readiness-matrix.md` R8。`commands.rs`が直接コマンドと同じ`MessageGroupId`
 (口座ID)を使う設計になっていることの検証を兼ねる)
 
@@ -386,8 +386,8 @@ Then 画面は「エラー」ではなく「反映待ち」相当の表示にな
 Given 同一名義4口座からなる閉じた系(初期合計1000)
 When ランダムな組み合わせの振替(furikae)を同時多発的に発生させ続ける
 Then どの時点で全体を集計しても、系全体の残高合計が常に一致し続ける(お金が増えたり消えたりしない)
-→ **P1**(2026-08-10、`fast-check`を導入しプロパティベーステストとして実装、型チェック済み。
-ライブスタックがないため実行確認は次回デプロイ時) — `conservation-property.e2e.test.ts`
+→ **P1**(2026-08-10、`fast-check`を導入しプロパティベーステストとして実装。ライブスタックに対して実行・合格確認済み(2026-08-12、
+fast-check numRuns=5全通過) — `conservation-property.e2e.test.ts`
 (`production-readiness-matrix.md` L1。スコープは同一名義口座間の振替に絞っており、外部からの
 入出金を含めた全種別の操作を混ぜた検証は今後の拡張余地として残る)
 

@@ -123,11 +123,11 @@
 
 | # | 内容 | 優先度 | 影響する既存文書 |
 |---|---|---|---|
-| 1 | ~~`Withdraw`の負/ゼロ額が単体・E2Eとも未検証~~ → **対応済み(2026-08-10)** | 済 | `account.rs`に`withdraw_zero_or_negative_is_rejected`単体テスト追加(`cargo test -p account-domain`で合格確認済み)、`domain-errors-active-account.e2e.test.ts`にE2Eテスト追加(ライブスタックでの実行確認は次回デプロイ時) |
-| 2 | ~~`Frozen`→`Close`が単体・E2Eとも未検証~~ → **対応済み(2026-08-10)** | 済 | `account.rs`に`frozen_account_can_be_closed_directly_without_unfreezing_first`単体テスト追加(合格確認済み)、E2E追加(型チェック済み) |
+| 1 | ~~`Withdraw`の負/ゼロ額が単体・E2Eとも未検証~~ → **対応済み(2026-08-10)** | 済 | `account.rs`に`withdraw_zero_or_negative_is_rejected`単体テスト追加(`cargo test -p account-domain`で合格確認済み)、`domain-errors-active-account.e2e.test.ts`にE2Eテスト追加、ライブスタックに対して実行・合格確認済み(2026-08-12) |
+| 2 | ~~`Frozen`→`Close`が単体・E2Eとも未検証~~ → **対応済み(2026-08-10)** | 済 | `account.rs`に`frozen_account_can_be_closed_directly_without_unfreezing_first`単体テスト追加(合格確認済み)、E2E追加、ライブスタックに対して実行・合格確認済み(2026-08-12) |
 | 3 | 精度超過のDeposit/WithdrawがE2E未到達 | P1(FC7として既知、この表で再確認)。**構造的に到達不能と結論**——APIGWの構造検証が先に4xx拒否するため、単体テストのみで妥当 | 既存の`production-readiness-matrix.md` FC7と同一 |
-| 4 | ~~`Confirm`/`Cancel`の二重操作拒否がE2E未検証~~ → **対応済み(2026-08-10)** | 済 | `transfer-furikomi.e2e.test.ts`にFC14として追加(型チェック済み) |
-| 5 | ~~`RecallError::NotFurikomi`がE2E未検証~~ → **対応済み(2026-08-10)** | 済 | `transfer-recall.e2e.test.ts`にFC15として追加(型チェック済み) |
+| 4 | ~~`Confirm`/`Cancel`の二重操作拒否がE2E未検証~~ → **対応済み(2026-08-10)** | 済 | `transfer-furikomi.e2e.test.ts`にFC14として追加、ライブスタックに対して実行・合格確認済み(2026-08-12) |
+| 5 | ~~`RecallError::NotFurikomi`がE2E未検証~~ → **対応済み(2026-08-10)** | 済 | `transfer-recall.e2e.test.ts`にFC15として追加、ライブスタックに対して実行・合格確認済み(2026-08-12) |
 
 **重要な副産物**: 今回の作業で、`e2e-scenarios.md`のFC3の記述自体が実態より広い保証を謳っていた
 (#1)ことが判明した。プロースのシナリオ記述は「書いた時点では正しいつもりでも、実装の詳細までは

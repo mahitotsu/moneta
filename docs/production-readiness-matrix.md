@@ -48,19 +48,19 @@
 |---|---|---|---|
 | FC1 | 口座開設: 正常系・異常系(重複ID・負の初期残高・精度超過) | 🟢 | 旧A1/B5、`open-account.e2e.test.ts` |
 | FC2 | 入金(Deposit): 正常系・異常系(負値・凍結中・解約後) | 🟢 | 旧A2/A4/B2/B3、`deposit-withdraw.e2e.test.ts`・`domain-errors-*.e2e.test.ts` |
-| FC3 | 出金(Withdraw): 正常系・異常系(残高不足・凍結中・解約後・負/ゼロ額) | 🟢(2026-08-10、[decision-tables.md](decision-tables.md)発見1を是正。単体テストは`cargo test -p account-domain`で実行・合格を確認済み。E2E側はコード追加済みだが、この環境にライブスタックがないため実行確認は次回デプロイ時) | 旧A3/A5/B1/B2/B3、同上 |
+| FC3 | 出金(Withdraw): 正常系・異常系(残高不足・凍結中・解約後・負/ゼロ額) | 🟢(2026-08-10、[decision-tables.md](decision-tables.md)発見1を是正。単体テストは`cargo test -p account-domain`で実行・合格を確認済み。E2E側はコード追加済みだが、ライブスタックに対して実行・合格確認済み(2026-08-12、api-e2e npm test 22スイート43テスト全合格)) | 旧A3/A5/B1/B2/B3、同上 |
 | FC4 | 凍結/凍結解除: 正常系・異常系(二重凍結・Active時のUnfreeze) | 🟢 | 旧A6/A7/B6/B7、`domain-errors-frozen-account.e2e.test.ts`・`unfreeze-lifecycle.e2e.test.ts` |
-| FC5 | 解約: 正常系・異常系(解約後の全操作拒否・Frozenからの直接解約) | 🟢(2026-08-10、[decision-tables.md](decision-tables.md)発見2を是正。単体テスト`frozen_account_can_be_closed_directly_without_unfreezing_first`実行・合格確認済み、E2Eは型チェック済み) | 旧A8/B3、`domain-errors-closed-account.e2e.test.ts`・`domain-errors-frozen-account.e2e.test.ts` |
+| FC5 | 解約: 正常系・異常系(解約後の全操作拒否・Frozenからの直接解約) | 🟢(2026-08-10、[decision-tables.md](decision-tables.md)発見2を是正。単体テスト`frozen_account_can_be_closed_directly_without_unfreezing_first`実行・合格確認済み、E2Eはライブスタックに対して実行・合格確認済み、2026-08-12) | 旧A8/B3、`domain-errors-closed-account.e2e.test.ts`・`domain-errors-frozen-account.e2e.test.ts` |
 | FC6 | 取引履歴: 新しい順・件数上限 | 🟢 | 旧A9、`transaction-history.e2e.test.ts` |
 | FC7 | APIGW構造検証: 型/必須項目/enum/金額パターン | 🟡(精度境界`10.123`のような桁数超過ケースは未検証、[decision-tables.md](decision-tables.md)発見3で再確認) | 旧G1-G3、`input-validation.e2e.test.ts` |
-| FC14 | サガの二重操作拒否(`Confirm`/`Cancel`をPendingConfirmation以外に送る) | 🟢(2026-08-10、[decision-tables.md](decision-tables.md)発見4を是正。E2E追加・型チェック済み) | `transfer-furikomi.e2e.test.ts` |
-| FC15 | 組戻し(Recall)の業務境界(振替/組戻し自体への誤ったRecall要求) | 🟢(2026-08-10、[decision-tables.md](decision-tables.md)発見5を是正。E2E追加・型チェック済み) | `transfer-recall.e2e.test.ts` |
+| FC14 | サガの二重操作拒否(`Confirm`/`Cancel`をPendingConfirmation以外に送る) | 🟢(2026-08-10、[decision-tables.md](decision-tables.md)発見4を是正。E2E追加、ライブスタックに対して実行・合格確認済み、2026-08-12) | `transfer-furikomi.e2e.test.ts` |
+| FC15 | 組戻し(Recall)の業務境界(振替/組戻し自体への誤ったRecall要求) | 🟢(2026-08-10、[decision-tables.md](decision-tables.md)発見5を是正。E2E追加、ライブスタックに対して実行・合格確認済み、2026-08-12) | `transfer-recall.e2e.test.ts` |
 | FC8 | 既知のギャップ: 不正な形式の`accountId` | 🟢(意図的な既知のギャップとして固定) | 旧G4、`known-gap-malformed-account-id.e2e.test.ts` |
 | FC9 | 顧客/外部チャネル画面のUI分離(ボタン非表示・サインイン要否) | 🟡(H1-H3、api-e2e/README.mdが自己申告している既知の未実装) | 旧H1-H3、未実装(ブラウザ自動化なし) |
 | FC10 | 送金(振替)の基本正しさ: 同一名義・確認不要・即時開始 | 🟢 | 旧J1/J2/J4/J7、`transfer-furikae.e2e.test.ts` |
 | FC11 | 送金(振込)の基本正しさ: 名義不一致・確認必須・上限額 | 🟢 | 旧J5/J6/J8、`transfer-furikomi.e2e.test.ts` |
 | FC12 | 組戻し(recall)の基本正しさ: 時間窓・残高不足 | 🟢 | 旧J9/J10、`transfer-recall.e2e.test.ts` |
-| FC13 | transfer-serviceの`start`入力検証: 非正の金額・精度超過 | 🟡(2026-08-10。`NonPositiveAmount`はE2E追加・型チェック済み。`InvalidAmountPrecision`はAPIGWの構造検証で先に4xx拒否されるためE2E到達不能——FC7と同種の理由、単体テストのみで妥当) | `saga.rs`単体テスト、`transfer-furikae.e2e.test.ts` |
+| FC13 | transfer-serviceの`start`入力検証: 非正の金額・精度超過 | 🟡(2026-08-10。`NonPositiveAmount`はE2E追加、ライブスタックに対して実行・合格確認済み(2026-08-12)。`InvalidAmountPrecision`はAPIGWの構造検証で先に4xx拒否されるためE2E到達不能——FC7と同種の理由、単体テストのみで妥当) | `saga.rs`単体テスト、`transfer-furikae.e2e.test.ts` |
 
 ---
 
@@ -77,7 +77,7 @@
 | R5 | メッセージグループの独立性(無関係な集約への影響なし) | 🟢 | `group-independence.e2e.test.ts`(E1) |
 | R6 | サガの補償(送金失敗時の資金保全) | 🟢 | [ADR-0010](adr/0010-transfer-service-saga.md)、`transfer-*.e2e.test.ts`(J1-J10) |
 | R7 | サガの補償自体が却下され続けるケース(`Compensating`滞留) | 🟡(意図的にスコープ外と明記) | [saga.rs:277-279](../crates/transfer-service/src/saga.rs#L277-L279)、ADR-0010「本ADRのスコープ外」 |
-| R8 | 複数のイベント駆動な発行元(直接顧客操作 と transfer-serviceのサガ)が同一集約を同時に取り合う安全性 | 🟢(2026-08-10、`concurrency-cross-producer.e2e.test.ts`追加・型チェック済み) | [commands.rs:35](../crates/transfer-service/src/commands.rs#L35)で同一`MessageGroupId`空間に収束する設計であることを実証するテスト |
+| R8 | 複数のイベント駆動な発行元(直接顧客操作 と transfer-serviceのサガ)が同一集約を同時に取り合う安全性 | 🟢(2026-08-10、`concurrency-cross-producer.e2e.test.ts`追加、ライブスタックに対して実行・合格確認済み、2026-08-12) | [commands.rs:35](../crates/transfer-service/src/commands.rs#L35)で同一`MessageGroupId`空間に収束する設計であることを実証するテスト |
 | R9 | DynamoDBスロットリング・接続断からの回復 | 🔴🚧**ブロック中** | ADRは「インフラ起因の失敗」として抽象的に分類するのみで、スロットリング固有の検証(バックオフの妥当性等)への言及なし。**「回復」自体(SQSの再配信をまたぐ)はR3と同じ障害注入基盤が前提条件**——スロットリングはLambda1回の呼び出し内では回復せず、`classify_transact_error`が`ApplyCommandError::Infra`として即座に呼び出し元へ伝播し、SQSの再配信に委ねる設計だから(R2のOptimisticLockConflictとは違うコードパス)。ただし「スロットリングが正しくInfraとして分類・伝播される」こと自体は、R2と同じ`aws-smithy-mocks`パターンで`ProvisionedThroughputExceededException`を返させれば単体テストで決定論的に検証できる(次に着手するならここが低コストな部分検証) |
 
 ### 運用上の優秀性(Operational Excellence)
@@ -136,7 +136,7 @@
 
 | # | 項目 | 判定 | 根拠 |
 |---|---|---|---|
-| L1 | 資金保存則(システム全体で合計金額が保存される) | 🟡(2026-08-10、`fast-check`を導入し`conservation-property.e2e.test.ts`としてプロパティベーステストを実装・型チェック済み。ライブスタックがないため実行確認は次回デプロイ時) | 同一名義口座間の振替が閉じた系の合計金額を変えないことをランダムな操作列で検証 |
+| L1 | 資金保存則(システム全体で合計金額が保存される) | 🟢(2026-08-10、`fast-check`を導入し`conservation-property.e2e.test.ts`としてプロパティベーステストを実装。ライブスタックに対して実行・合格確認済み、2026-08-12、numRuns=5全通過) | 同一名義口座間の振替が閉じた系の合計金額を変えないことをランダムな操作列で検証 |
 | L2 | 監査ログ(`account_events`アウトボックス)の完全性(全状態変化が漏れなく記録される) | 🟢(2026-08-10、コード読解により構造的に保証済みと判明。テスト追加は不要と判断) | [persistence.rs:387-408](../crates/account-service/src/persistence.rs#L387-L408)の`apply_command`は、`event_put`を`Ok`/`Err`どちらの結果でも無条件で`items`に積み、`processed_message_put`・`account_write`(または`account_condition_check`)と**1回のTransactWriteItemsで原子的にコミット**する。状態変化とイベント記録が分離した書き込みになることが構造的にありえない設計 |
 | L3 | 監査ログの改ざん不可能性(追記専用性) | 🟢(2026-08-10実装・実行確認済み) | **実装時に本物の過剰権限を発見・修正**: `accountEventsTable.grantWriteData(fn)`はコードコメントが「PutItemのみ」と謳っていたのに、実際にはUpdateItem/DeleteItem/BatchWriteItemも付与していた。`dynamodb:PutItem`のみの明示的な`grant`に置き換え、CDK synthテストで検証。`npm test`実行・25件全合格確認済み |
 | L4 | 非否認性 | ⚪ | S1(認証なし)が前提として成立していないため、この項目自体が現時点で意味を持たない。S1解消後に再評価 |
@@ -225,9 +225,9 @@ D5-D10・D16・D17の7項目(定期振込・金利・手数料・当座貸越・
 - **③元帳固有リスク**: L1(資金保存則、プロパティベーステスト)・L2(監査ログ完全性、構造的保証と判明)・L3(監査ログ改ざん不可能性、**実装時に本物の過剰権限を発見・修正**)
 
 `cargo test --workspace`(59テスト全合格)・`cargo clippy --workspace --all-targets`(警告0件)・
-`infra`の`npm test`(CDK synth、25件全合格、Docker経由のLambdaビルド含む)・`api-e2e`の
-`tsc --noEmit`で全て確認済み。api-e2eのE2Eテスト自体はライブスタックがないため実行未確認
-(次回デプロイ後に`npm test`で確認が必要)。
+`infra`の`npm test`(CDK synth、25件全合格、Docker経由のLambdaビルド含む)で全て確認済み。
+2026-08-12、デプロイ後に`api-e2e`(22スイート43テスト)・`ui-e2e`(4テスト)をライブスタックに
+対して実行し、全て合格を確認した。
 
 **引き続き🚧ブロック中(この session内では完了できない)**: R3・R9・P2・P3・S4・E2の6件。
 いずれも障害注入基盤・負荷生成ツール・追加の設計判断(ADR)のいずれかが前提条件になっており、
