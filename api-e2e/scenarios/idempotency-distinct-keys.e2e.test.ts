@@ -5,12 +5,14 @@ import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { waitFor } from "../support/poll";
 import { openFreshAccount } from "../support/testAccount";
+import { signUpAndSignIn } from "../support/auth";
 
 describe("C3: 異なるIdempotency-Keyでの同内容コマンドは両方とも適用される", () => {
   it("同じ入金内容を異なるキーで2回送ると、2回分反映される", async () => {
     const outputs = await fetchStackOutputs();
-    const commandApi = createCommandApi(outputs.commandApiUrl);
-    const queryApi = createQueryApi(outputs.queryApiUrl);
+    const identity = await signUpAndSignIn(outputs.userPoolClientId);
+    const commandApi = createCommandApi(outputs.commandApiUrl, identity.idToken);
+    const queryApi = createQueryApi(outputs.queryApiUrl, identity.idToken);
     const accountId = await openFreshAccount(commandApi, queryApi, "100");
 
     const first = await commandApi.deposit(accountId, "20", crypto.randomUUID());

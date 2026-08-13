@@ -1,23 +1,26 @@
 // Covers docs/e2e-scenarios.md FC10 (旧J1/J2/J4/J7)・R6 (旧J3) (振替=同一名義間、docs/adr/0011)。
 // 同一owner_idの2口座間の送金は`kind=furikae`と判定され、確認(J5/J6)を経由せず即座に
 // 開始される(J7)——このファイルの全テストがその前提の上で書かれている。
+//
+// 同一名義は、同一のCognito認証済み識別子(docs/adr/0016決定3)で送金元・送金先双方の口座を
+// 開設することで作る——owner_idはもはやリクエストボディの自己申告値ではない。
 import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { REJECTION_SETTLE_MS, settle, waitFor } from "../support/poll";
 import { openFreshAccount } from "../support/testAccount";
 import { createTransferCommandApi, createTransferQueryApi, waitForTransferState } from "../support/transferClient";
-
-const OWNER = "e2e-furikae-owner";
+import { signUpAndSignIn } from "../support/auth";
 
 describe("J1/J7: 振替(同一名義)は確認不要で即座に開始され、残高が反映される", () => {
   it("送金元が減り、送金先が同額増える", async () => {
     const outputs = await fetchStackOutputs();
-    const commandApi = createCommandApi(outputs.commandApiUrl);
-    const queryApi = createQueryApi(outputs.queryApiUrl);
-    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl);
-    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl);
-    const fromId = await openFreshAccount(commandApi, queryApi, "1000.00", OWNER);
-    const toId = await openFreshAccount(commandApi, queryApi, "0.00", OWNER);
+    const identity = await signUpAndSignIn(outputs.userPoolClientId);
+    const commandApi = createCommandApi(outputs.commandApiUrl, identity.idToken);
+    const queryApi = createQueryApi(outputs.queryApiUrl, identity.idToken);
+    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl, identity.idToken);
+    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identity.idToken);
+    const fromId = await openFreshAccount(commandApi, queryApi, "1000.00");
+    const toId = await openFreshAccount(commandApi, queryApi, "0.00");
     const transferId = crypto.randomUUID();
 
     const startResponse = await transferCommandApi.start({
@@ -51,12 +54,13 @@ describe("J1/J7: 振替(同一名義)は確認不要で即座に開始され、�
 describe("J2: 送金元の残高不足は送金先に一切影響しない", () => {
   it("出金コマンド自体が却下され、双方の残高が変化しない", async () => {
     const outputs = await fetchStackOutputs();
-    const commandApi = createCommandApi(outputs.commandApiUrl);
-    const queryApi = createQueryApi(outputs.queryApiUrl);
-    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl);
-    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl);
-    const fromId = await openFreshAccount(commandApi, queryApi, "100.00", OWNER);
-    const toId = await openFreshAccount(commandApi, queryApi, "0.00", OWNER);
+    const identity = await signUpAndSignIn(outputs.userPoolClientId);
+    const commandApi = createCommandApi(outputs.commandApiUrl, identity.idToken);
+    const queryApi = createQueryApi(outputs.queryApiUrl, identity.idToken);
+    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl, identity.idToken);
+    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identity.idToken);
+    const fromId = await openFreshAccount(commandApi, queryApi, "100.00");
+    const toId = await openFreshAccount(commandApi, queryApi, "0.00");
     const transferId = crypto.randomUUID();
 
     const startResponse = await transferCommandApi.start({
@@ -80,12 +84,13 @@ describe("J2: 送金元の残高不足は送金先に一切影響しない", () 
 describe("J3: 送金先が入金を受け付けられない場合、送金元へ補償される", () => {
   it("送金先が凍結中だと、出金は成功するが最終的に送金元へ全額補償される", async () => {
     const outputs = await fetchStackOutputs();
-    const commandApi = createCommandApi(outputs.commandApiUrl);
-    const queryApi = createQueryApi(outputs.queryApiUrl);
-    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl);
-    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl);
-    const fromId = await openFreshAccount(commandApi, queryApi, "1000.00", OWNER);
-    const toId = await openFreshAccount(commandApi, queryApi, "0.00", OWNER);
+    const identity = await signUpAndSignIn(outputs.userPoolClientId);
+    const commandApi = createCommandApi(outputs.commandApiUrl, identity.idToken);
+    const queryApi = createQueryApi(outputs.queryApiUrl, identity.idToken);
+    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl, identity.idToken);
+    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identity.idToken);
+    const fromId = await openFreshAccount(commandApi, queryApi, "1000.00");
+    const toId = await openFreshAccount(commandApi, queryApi, "0.00");
 
     const freezeResponse = await commandApi.freeze(toId, "CustomerRequest");
     expect(freezeResponse.status).toBe(202);
@@ -124,11 +129,12 @@ describe("J3: 送金先が入金を受け付けられない場合、送金元へ
 describe("J4: 同一口座への送金は要求時点で却下される", () => {
   it("サガは作成されず、残高も変化しない", async () => {
     const outputs = await fetchStackOutputs();
-    const commandApi = createCommandApi(outputs.commandApiUrl);
-    const queryApi = createQueryApi(outputs.queryApiUrl);
-    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl);
-    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl);
-    const accountId = await openFreshAccount(commandApi, queryApi, "100.00", OWNER);
+    const identity = await signUpAndSignIn(outputs.userPoolClientId);
+    const commandApi = createCommandApi(outputs.commandApiUrl, identity.idToken);
+    const queryApi = createQueryApi(outputs.queryApiUrl, identity.idToken);
+    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl, identity.idToken);
+    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identity.idToken);
+    const accountId = await openFreshAccount(commandApi, queryApi, "100.00");
     const transferId = crypto.randomUUID();
 
     await transferCommandApi.start({
@@ -161,12 +167,13 @@ describe("J4: 同一口座への送金は要求時点で却下される", () => 
 describe("FC13: 非正の金額でのStartは受付時点で却下される", () => {
   it.each([["ゼロ", "0"], ["負値", "-10"]])("%sの金額はサガを作成せず、残高も変化しない", async (_label, amount) => {
     const outputs = await fetchStackOutputs();
-    const commandApi = createCommandApi(outputs.commandApiUrl);
-    const queryApi = createQueryApi(outputs.queryApiUrl);
-    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl);
-    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl);
-    const fromId = await openFreshAccount(commandApi, queryApi, "100.00", OWNER);
-    const toId = await openFreshAccount(commandApi, queryApi, "0.00", OWNER);
+    const identity = await signUpAndSignIn(outputs.userPoolClientId);
+    const commandApi = createCommandApi(outputs.commandApiUrl, identity.idToken);
+    const queryApi = createQueryApi(outputs.queryApiUrl, identity.idToken);
+    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl, identity.idToken);
+    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identity.idToken);
+    const fromId = await openFreshAccount(commandApi, queryApi, "100.00");
+    const toId = await openFreshAccount(commandApi, queryApi, "0.00");
     const transferId = crypto.randomUUID();
 
     await transferCommandApi.start({ transferId, fromAccountId: fromId, toAccountId: toId, amount });

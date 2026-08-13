@@ -3,12 +3,14 @@ import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi, rawRequest } from "../support/httpClient";
 import { settle, waitFor } from "../support/poll";
 import { openFreshAccount } from "../support/testAccount";
+import { signUpAndSignIn } from "../support/auth";
 
 describe("C: 冪等性・重複配信", () => {
   it("C1: 同一Idempotency-Keyでの同一コマンド再送は二重適用されない", async () => {
     const outputs = await fetchStackOutputs();
-    const commandApi = createCommandApi(outputs.commandApiUrl);
-    const queryApi = createQueryApi(outputs.queryApiUrl);
+    const identity = await signUpAndSignIn(outputs.userPoolClientId);
+    const commandApi = createCommandApi(outputs.commandApiUrl, identity.idToken);
+    const queryApi = createQueryApi(outputs.queryApiUrl, identity.idToken);
     const accountId = await openFreshAccount(commandApi, queryApi, "100");
     const idempotencyKey = crypto.randomUUID();
 

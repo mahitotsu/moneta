@@ -6,6 +6,7 @@ import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { settle, waitFor } from "../support/poll";
 import { openFreshAccount } from "../support/testAccount";
+import { signUpAndSignIn } from "../support/auth";
 
 const CONCURRENT_DEPOSITS = 10;
 const DEPOSIT_AMOUNT = 10;
@@ -13,8 +14,9 @@ const DEPOSIT_AMOUNT = 10;
 describe("D2: 高頻度の同時書き込みでも取りこぼしがない", () => {
   it(`同一口座への${CONCURRENT_DEPOSITS}件の同時入金が、全件反映される`, async () => {
     const outputs = await fetchStackOutputs();
-    const commandApi = createCommandApi(outputs.commandApiUrl);
-    const queryApi = createQueryApi(outputs.queryApiUrl);
+    const identity = await signUpAndSignIn(outputs.userPoolClientId);
+    const commandApi = createCommandApi(outputs.commandApiUrl, identity.idToken);
+    const queryApi = createQueryApi(outputs.queryApiUrl, identity.idToken);
     const accountId = await openFreshAccount(commandApi, queryApi, "1000");
 
     const responses = await Promise.all(

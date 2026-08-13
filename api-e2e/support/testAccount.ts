@@ -20,17 +20,18 @@ export async function waitForStatus(
 // each test gets its own never-before-used UUID -- tests don't need shared fixtures or a
 // data reset between runs to stay isolated from each other.
 //
-// `ownerId` defaults to a fixed dummy customer name shared by most scenarios (they don't care
-// whose account it is). Transfer service scenarios (docs/adr/0011) that need to distinguish
-// furikae(同一名義)/furikomi(名義不一致) pass distinct owner ids explicitly.
-export async function openFreshAccount(
-  commandApi: CommandApi,
-  queryApi: QueryApi,
-  initialBalance: string,
-  ownerId = "e2e-test-customer",
-): Promise<string> {
+// There is no `ownerId` parameter (removed, docs/adr/0016決定3): the account's real owner is
+// no longer a string the client can assert in the request body -- OpenCommandModel no longer
+// even accepts an `owner_id` property. It is now entirely determined by *which* Cognito
+// identity `commandApi` was constructed with (`support/httpClient.ts`'s `createCommandApi`
+// `idToken` argument), via API Gateway VTL injecting `$context.authorizer.claims.sub` as
+// `requested_by`. Scenarios that need to distinguish furikae(同一名義)/furikomi(名義不一致)
+// must instead call this with two `commandApi` instances built from two separate
+// `support/auth.ts`'s `signUpAndSignIn()` results (same identity => furikae, different
+// identities => furikomi).
+export async function openFreshAccount(commandApi: CommandApi, queryApi: QueryApi, initialBalance: string): Promise<string> {
   const accountId = crypto.randomUUID();
-  const response = await commandApi.openAccount(accountId, initialBalance, ownerId);
+  const response = await commandApi.openAccount(accountId, initialBalance);
   if (response.status !== 202) {
     throw new Error(`openAccount(${accountId}) unexpected status ${response.status}: ${JSON.stringify(response.body)}`);
   }

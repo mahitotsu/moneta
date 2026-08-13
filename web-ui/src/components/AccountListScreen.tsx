@@ -1,12 +1,12 @@
 import { useState } from "react";
-import { useQueries } from "@tanstack/react-query";
+import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { OpenAccountForm } from "./OpenAccountForm";
 import { BrandAppBar } from "./AppBar";
 import { CustomerTabBar, type CustomerTab } from "./CustomerTabBar";
 import { PlusCircle } from "./icons";
-import { getAccount } from "../api/client";
-import { ACCOUNT_ID_PATTERN, formatAccountNumber, formatCurrency } from "../format";
-import { addAccountFor, getAccountsFor, removeAccountFor, signOut, type CustomerAccount } from "../customerSession";
+import { getAccount, getAccountNumber, getMyAccounts } from "../api/client";
+import { formatCurrency, formatFriendlyAccountNumber } from "../format";
+import { signOut } from "../auth";
 
 const STATUS_LABEL: Record<string, string> = { active: "有効", frozen: "凍結中", closed: "解約済み" };
 const STATUS_BADGE_CLASS: Record<string, string> = {
@@ -14,6 +14,10 @@ const STATUS_BADGE_CLASS: Record<string, string> = {
   frozen: "badge badge-pending",
   closed: "badge badge-neutral",
 };
+
+// customer-accounts-projectorの反映を見せつつも待たせすぎないポーリング間隔
+// (docs/adr/0016決定4、既存のbalanceQueries/numberQueriesと同じ考え方)。
+const POLL_INTERVAL_MS = 5000;
 
 interface Props {
   customerName: string;
@@ -23,11 +27,18 @@ interface Props {
 }
 
 export function AccountListScreen({ customerName, onSelectAccount, onSelectTab, onSignedOut }: Props) {
-  const [accounts, setAccounts] = useState<CustomerAccount[]>(() => getAccountsFor(customerName));
   const [addOpen, setAddOpen] = useState(false);
-  const [manualId, setManualId] = useState("");
+  const queryClient = useQueryClient();
 
-  const refresh = () => setAccounts(getAccountsFor(customerName));
+  // 「どの口座を自分が持っているか」はもうlocalStorageではなく、サーバー側の
+  // CustomerAccountsTable(docs/adr/0016決定4)——ownerIdはCognito JWTのsubから
+  // サーバー側が決めるため、他人の口座が紛れ込む余地がない。
+  const myAccountsQuery = useQuery({
+    queryKey: ["my-accounts"],
+    queryFn: () => getMyAccounts(),
+    refetchInterval: POLL_INTERVAL_MS,
+  });
+  const accounts = myAccountsQuery.data ?? [];
 
   // ダッシュボードの各口座カードに残高を出すため、一覧表示中は全口座を並行ポーリングする
   // (AccountViewと同じqueryKeyを使うので、詳細画面へ入った時点でキャッシュが温まっている)。
@@ -35,7 +46,17 @@ export function AccountListScreen({ customerName, onSelectAccount, onSelectTab, 
     queries: accounts.map((a) => ({
       queryKey: ["account", a.accountId],
       queryFn: () => getAccount(a.accountId),
-      refetchInterval: 5000,
+      refetchInterval: POLL_INTERVAL_MS,
+    })),
+  });
+
+  // 一覧の各カードにも自分の口座番号(docs/adr/0015)を出す。balanceQueriesと同じ理由
+  // (AccountViewとqueryKeyを共有し、詳細画面へ入った時点でキャッシュが温まっている)。
+  const numberQueries = useQueries({
+    queries: accounts.map((a) => ({
+      queryKey: ["account-number", a.accountId],
+      queryFn: () => getAccountNumber(a.accountId),
+      refetchInterval: POLL_INTERVAL_MS,
     })),
   });
 
@@ -63,54 +84,29 @@ export function AccountListScreen({ customerName, onSelectAccount, onSelectTab, 
           </div>
         )}
 
-        {accounts.length === 0 ? (
+        {myAccountsQuery.isLoading ? (
           <div className="panel">
-            <p>まだ口座がありません。下から口座を追加してください。</p>
+            <div className="skeleton skeleton-line" style={{ width: "60%" }} />
+          </div>
+        ) : accounts.length === 0 ? (
+          <div className="panel">
+            <p>まだ口座がありません。下から口座を開設してください。</p>
           </div>
         ) : (
           <ul className="account-list">
             {accounts.map((a, i) => {
-              const query = balanceQueries[i];
-              const account = query?.data;
-              // isSuccess && data===nullは確定404(バックエンドにこの口座が存在しない)。
-              // まだ読み込み中/反映待ち(dataがundefinedのまま)とは区別する——放置しても
-              // 解決しないので、一覧から削除する手段をここで用意する。
-              const isMissing = query?.isSuccess && account === null;
-
-              if (isMissing) {
-                return (
-                  <li key={a.accountId}>
-                    <div className="account-card account-card-missing">
-                      <span className="account-card-main">
-                        <span className="account-card-name">{a.nickname ?? "普通預金"}</span>
-                        <span className="account-card-number">
-                          ●●●●{formatAccountNumber(a.accountId).slice(-4)}
-                        </span>
-                        <span className="account-card-note">この口座は見つかりませんでした</span>
-                      </span>
-                      <button
-                        type="button"
-                        className="account-card-remove"
-                        onClick={() => {
-                          removeAccountFor(customerName, a.accountId);
-                          refresh();
-                        }}
-                      >
-                        一覧から削除
-                      </button>
-                    </div>
-                  </li>
-                );
-              }
+              const account = balanceQueries[i]?.data;
+              const accountNumber = numberQueries[i]?.data;
+              const accountNumberLabel = accountNumber
+                ? `${accountNumber.branchName} ${formatFriendlyAccountNumber(accountNumber.accountNumber)}`
+                : "口座番号を確認しています…";
 
               return (
                 <li key={a.accountId}>
                   <button type="button" className="account-card" onClick={() => onSelectAccount(a.accountId)}>
                     <span className="account-card-main">
-                      <span className="account-card-name">{a.nickname ?? "普通預金"}</span>
-                      <span className="account-card-number">
-                        ●●●●{formatAccountNumber(a.accountId).slice(-4)}
-                      </span>
+                      <span className="account-card-name">普通預金</span>
+                      <span className="account-card-number">{accountNumberLabel}</span>
                     </span>
                     <span className="account-card-side">
                       {account ? (
@@ -135,37 +131,14 @@ export function AccountListScreen({ customerName, onSelectAccount, onSelectTab, 
         </button>
 
         {addOpen && (
-          <>
-            <OpenAccountForm
-              customerName={customerName}
-              onOpened={(accountId) => {
-                addAccountFor(customerName, accountId);
-                refresh();
-              }}
-            />
-            <form
-              className="panel"
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (!ACCOUNT_ID_PATTERN.test(manualId)) return;
-                addAccountFor(customerName, manualId);
-                setManualId("");
-                refresh();
-              }}
-            >
-              <h2>既存の口座をこの一覧に追加</h2>
-              <div className="field-row">
-                <input
-                  placeholder="口座ID"
-                  value={manualId}
-                  onChange={(e) => setManualId(e.target.value)}
-                />
-                <button type="submit" disabled={!ACCOUNT_ID_PATTERN.test(manualId)}>
-                  追加
-                </button>
-              </div>
-            </form>
-          </>
+          <OpenAccountForm
+            onOpened={() => {
+              setAddOpen(false);
+              // customer-accounts-projectorの反映を待たず、まず取れる分だけ即座に再確認する
+              // (反映まではPOLL_INTERVAL_MSごとの自動ポーリングが拾う)。
+              void queryClient.invalidateQueries({ queryKey: ["my-accounts"] });
+            }}
+          />
         )}
       </div>
     </>

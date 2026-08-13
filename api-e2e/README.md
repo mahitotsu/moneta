@@ -95,6 +95,9 @@ DLQ自体は放置すべきではない)。`support/dlq.ts`の`waitForMatchingMe
 | FC10(同一口座却下) | `scenarios/transfer-furikae.e2e.test.ts` | 実装済み(却下系のため`settle`パターン、FCカテゴリ全体と同じ考え方) |
 | FC11 | `scenarios/transfer-furikomi.e2e.test.ts` | 実装済み(異なるowner_idの2口座間送金=furikomiとして、`Confirm`前後の状態・上限額超過での却下を検証) |
 | FC12 | `scenarios/transfer-recall.e2e.test.ts` | 実装済み(credited直後=時間窓内でのrecallと、残高不足・期限超過パターンを検証。期限超過は`support/sagaState.ts`の`backdateSagaUpdatedAt`で`updatedAt`を直接書き換えて模擬——実時間24時間待つ代わりの、この検証専用の裏口) |
+| FC16(docs/adr/0015) | `scenarios/account-number.e2e.test.ts` | 実装済み(口座開設後の支店+口座番号の反映待ち、口座番号→口座/口座→口座番号の両方向解決、同一account_idでの支店の決定性、存在しない口座番号の404を検証) |
+| FC17(docs/adr/0015、他行プレースホルダ) | `web-ui/src/components/TransferListScreen.test.tsx`・`ui-e2e/scenarios/transfer-other-bank.spec.ts` | 実装済み(UI固有の主張のため、このapi-e2eのHTTPベースのハーネスでは検証しない — FC9/E7と同じ理由) |
+| FC18(docs/adr/0016) | `scenarios/auth.e2e.test.ts` | 実装済み(セルフサインアップ+サインインした識別子での口座開設と`GET /customers/me/accounts`が自分の口座だけを返すこと、Authorizationヘッダー無しの保護エンドポイントが401になること、Deposit/Withdrawが引き続き無認証で動くことを検証) |
 
 **`docs/production-readiness-matrix.md`で🔴/🟡・未実装と判定された主要項目**(この表にファイルが
 存在しないもの): R2(OCCリトライの回復)・R3(SQS再配信の成功パス)・R8(複数発行元の同時競合)・
@@ -108,6 +111,13 @@ P2/P3(流量特性)・E2(順序逆転の意図的検証)・L1(資金保存則)�
 - `support/httpClient.ts`はWeb UI(`web-ui/src/api/`)と同じワイヤーフォーマットを別途
   定義したもの(コード共有はしていない — api-e2e/web-uiは独立したTSプロジェクトのため)。
   バックエンドの契約を変更したら両方を追随させる必要がある。
+- **`support/auth.ts`(docs/adr/0016)**: `web-ui/src/auth.ts`のセルフサインアップ+サインイン
+  (`USER_PASSWORD_AUTH`)と同じSDK呼び出しをNode/Jest向けに薄く再現した`signUpAndSignIn()`。
+  ほぼ全エンドポイントが認証必須になったため、シナリオは`createCommandApi`/`createQueryApi`/
+  transfer系クライアントに`idToken`を渡す。`support/testAccount.ts`の`openFreshAccount`から
+  `ownerId`引数が消えたのもこれが理由——口座の実名義はもはやリクエストボディの自己申告値では
+  なく、`commandApi`が束縛しているCognito識別子(のsub)で決まる(決定3)。furikae/furikomiの
+  作り分けは、同一/別々の`signUpAndSignIn()`結果を使うことで表現する。
 - `support/stackOutputs.ts`は`infra/support/stackOutputs.ts`(`clean-data.ts`が使う)と
   ほぼ同一の内容を意図的に複製している。CloudFormationの`DescribeStacks`を叩くだけの
   数十行のために、CDKアプリ本体の依存(`aws-cdk`/`aws-cdk-lib`/`constructs`等)ごと

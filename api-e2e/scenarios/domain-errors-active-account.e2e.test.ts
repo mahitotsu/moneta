@@ -9,6 +9,7 @@ import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { settle } from "../support/poll";
 import { openFreshAccount } from "../support/testAccount";
+import { signUpAndSignIn } from "../support/auth";
 
 describe("FC(Active fixture共有): ドメインエラーは状態を動かさない", () => {
   let commandApi: ReturnType<typeof createCommandApi>;
@@ -17,8 +18,11 @@ describe("FC(Active fixture共有): ドメインエラーは状態を動かさ�
 
   beforeAll(async () => {
     const outputs = await fetchStackOutputs();
-    commandApi = createCommandApi(outputs.commandApiUrl);
-    queryApi = createQueryApi(outputs.queryApiUrl);
+    // このフィクスチャの口座を開いた同じ認証済み識別子を、以降の全アサーション
+    // (再Open含む)で使い回す(docs/adr/0016決定3)。
+    const identity = await signUpAndSignIn(outputs.userPoolClientId);
+    commandApi = createCommandApi(outputs.commandApiUrl, identity.idToken);
+    queryApi = createQueryApi(outputs.queryApiUrl, identity.idToken);
     accountId = await openFreshAccount(commandApi, queryApi, "100");
   });
 

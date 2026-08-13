@@ -3,12 +3,14 @@ import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { waitFor } from "../support/poll";
 import { openFreshAccount } from "../support/testAccount";
+import { signUpAndSignIn } from "../support/auth";
 
 describe("A9: 取引履歴は新しい順に反映される", () => {
   it("開設・入金x2・出金の4件が新しい順で照会できる", async () => {
     const outputs = await fetchStackOutputs();
-    const commandApi = createCommandApi(outputs.commandApiUrl);
-    const queryApi = createQueryApi(outputs.queryApiUrl);
+    const identity = await signUpAndSignIn(outputs.userPoolClientId);
+    const commandApi = createCommandApi(outputs.commandApiUrl, identity.idToken);
+    const queryApi = createQueryApi(outputs.queryApiUrl, identity.idToken);
     const accountId = await openFreshAccount(commandApi, queryApi, "0");
 
     // Fired back-to-back into the same MessageGroupId (=accountId): FIFO ordering means they're

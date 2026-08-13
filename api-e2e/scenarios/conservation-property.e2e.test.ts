@@ -18,6 +18,7 @@ import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { settle } from "../support/poll";
 import { openFreshAccount } from "../support/testAccount";
 import { createTransferCommandApi, createTransferQueryApi, waitForTransferState } from "../support/transferClient";
+import { signUpAndSignIn } from "../support/auth";
 
 const ACCOUNT_COUNT = 4;
 const INITIAL_BALANCE_PER_ACCOUNT = 250;
@@ -36,17 +37,19 @@ describe("L1: 資金保存則(同一名義口座間の振替が閉じた系の�
     "ランダムな振替の組み合わせを何度実行しても、N口座の残高合計は常に一定",
     async () => {
       const outputs = await fetchStackOutputs();
-      const commandApi = createCommandApi(outputs.commandApiUrl);
-      const queryApi = createQueryApi(outputs.queryApiUrl);
-      const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl);
-      const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl);
+      // 全実行(numRuns)を通じて単一の識別子を使い回す——同一名義(furikae)であればよく、
+      // 実行間で名義を分ける必要は元々owner文字列の可読性のためだけだった(docs/adr/0016決定3)。
+      const identity = await signUpAndSignIn(outputs.userPoolClientId);
+      const commandApi = createCommandApi(outputs.commandApiUrl, identity.idToken);
+      const queryApi = createQueryApi(outputs.queryApiUrl, identity.idToken);
+      const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl, identity.idToken);
+      const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identity.idToken);
 
       await fc.assert(
         fc.asyncProperty(fc.array(transferArbitrary, { minLength: 5, maxLength: 15 }), async (transfers) => {
-          const owner = `e2e-l1-owner-${crypto.randomUUID()}`;
           const accountIds = await Promise.all(
             Array.from({ length: ACCOUNT_COUNT }, () =>
-              openFreshAccount(commandApi, queryApi, String(INITIAL_BALANCE_PER_ACCOUNT), owner),
+              openFreshAccount(commandApi, queryApi, String(INITIAL_BALANCE_PER_ACCOUNT)),
             ),
           );
 

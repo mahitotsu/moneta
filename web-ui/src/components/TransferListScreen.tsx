@@ -1,12 +1,12 @@
 import { useState } from "react";
-import { useQueries } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { BrandAppBar } from "./AppBar";
 import { CustomerTabBar, type CustomerTab } from "./CustomerTabBar";
 import { TransferForm, type StartedTransfer } from "./TransferForm";
 import { PlusCircle } from "./icons";
-import { getTransferStatus } from "../api/client";
+import { getMyAccounts, getTransferStatus } from "../api/client";
 import { addTransferFor, getTransfersFor, type CustomerTransfer } from "../transferHistory";
-import { getAccountsFor, signOut } from "../customerSession";
+import { signOut } from "../auth";
 import { formatAccountNumber, formatCurrency } from "../format";
 import { TRANSFER_KIND_LABEL, TRANSFER_STATE_LABEL, type TransferState } from "../api/types";
 
@@ -35,8 +35,18 @@ interface Props {
  * AccountListScreenと対になる、「送金」タブの中身。 */
 export function TransferListScreen({ customerName, onSelectTransfer, onSelectTab, onSignedOut }: Props) {
   const [transfers, setTransfers] = useState<CustomerTransfer[]>(() => getTransfersFor(customerName));
-  const [openForm, setOpenForm] = useState<"furikae" | "furikomi" | null>(null);
-  const accounts = getAccountsFor(customerName);
+  // "other-bank"は非機能なプレースホルダ(docs/adr/0015決定7)——選んでもTransferFormは出さず、
+  // 案内文だけを表示する。バックエンド呼び出しは一切発生しない。
+  const [openForm, setOpenForm] = useState<"furikae" | "furikomi" | "other-bank" | null>(null);
+
+  // どの口座が自分のものかはサーバー側のCustomerAccountsTable(docs/adr/0016決定4)から取る
+  // (AccountListScreenと同じ理由)。
+  const myAccountsQuery = useQuery({
+    queryKey: ["my-accounts"],
+    queryFn: () => getMyAccounts(),
+    refetchInterval: POLL_INTERVAL_MS,
+  });
+  const accounts = myAccountsQuery.data ?? [];
 
   // 一覧の各行のバッジを最新化するため、表示中の送金を並行ポーリングする
   // (AccountListScreenのbalanceQueriesと同じ理由・同じqueryKeyでTransferDetailScreenと
@@ -100,7 +110,11 @@ export function TransferListScreen({ customerName, onSelectTransfer, onSelectTab
           </ul>
         )}
 
-        {accounts.length === 0 ? (
+        {myAccountsQuery.isLoading ? (
+          <div className="panel">
+            <div className="skeleton skeleton-line" style={{ width: "60%" }} />
+          </div>
+        ) : accounts.length === 0 ? (
           <div className="panel">
             <p>送金を行うには、まず口座を開設してください。</p>
           </div>
@@ -124,15 +138,29 @@ export function TransferListScreen({ customerName, onSelectTransfer, onSelectTab
                 <PlusCircle />
                 振込
               </button>
+              <button
+                type="button"
+                className="add-account-tile"
+                onClick={() => setOpenForm(openForm === "other-bank" ? null : "other-bank")}
+              >
+                <PlusCircle />
+                振込(他行あて)
+              </button>
             </div>
             {accounts.length < 2 && <p className="subtitle">振替を行うには2つ以上の口座が必要です。</p>}
 
-            {openForm && (
+            {(openForm === "furikae" || openForm === "furikomi") && (
               <TransferForm
                 kind={openForm}
                 accounts={accounts}
                 onStarted={(started) => recordStarted(openForm, started)}
               />
+            )}
+
+            {openForm === "other-bank" && (
+              <div className="panel">
+                <p>他行あての振込は現在サポートしておりません。今後の検証テーマです。</p>
+              </div>
             )}
           </>
         )}

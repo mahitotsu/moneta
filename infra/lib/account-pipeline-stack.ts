@@ -6,6 +6,7 @@ import * as apigateway from "aws-cdk-lib/aws-apigateway";
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
+import * as cognito from "aws-cdk-lib/aws-cognito";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
 import * as targets from "aws-cdk-lib/aws-events-targets";
@@ -336,6 +337,100 @@ export class AccountPipelineStack extends cdk.Stack {
       }),
     );
 
+    // ==========================================================================
+    // Auth service (docs/adr/0016) — Amazon Cognitoによる実認証。
+    //
+    // account-service/query-service/transfer-serviceのどのテーブルにも触れない
+    // (crates/auth-serviceはaccount-domainにすら依存しない、[[0003]]のcrate境界の考え方の
+    // 延長——認証はアカウントのドメインとは独立の関心事)。CognitoのLambdaトリガーから直接
+    // domainEventBusへPutEventsする——account-serviceのようなDynamoDBアウトボックスは
+    // 不要(トリガー呼び出し自体が真実源であり、二重書き込み問題が存在しないため)。
+    // ==========================================================================
+
+    const authPostConfirmationFn = new lambda.Function(this, "AuthPostConfirmationFunction", {
+      runtime: lambda.Runtime.PROVIDED_AL2023,
+      architecture: lambda.Architecture.X86_64,
+      handler: "bootstrap",
+      timeout: cdk.Duration.seconds(10),
+      code: rustLambdaCode("auth-service", "auth-post-confirmation"),
+      environment: {
+        POST_CONFIRMATION_EVENT_BUS_NAME: domainEventBus.eventBusName,
+      },
+    });
+    domainEventBus.grantPutEventsTo(authPostConfirmationFn);
+
+    const authPostAuthenticationFn = new lambda.Function(this, "AuthPostAuthenticationFunction", {
+      runtime: lambda.Runtime.PROVIDED_AL2023,
+      architecture: lambda.Architecture.X86_64,
+      handler: "bootstrap",
+      timeout: cdk.Duration.seconds(10),
+      code: rustLambdaCode("auth-service", "auth-post-authentication"),
+      environment: {
+        POST_AUTHENTICATION_EVENT_BUS_NAME: domainEventBus.eventBusName,
+      },
+    });
+    domainEventBus.grantPutEventsTo(authPostAuthenticationFn);
+
+    const authPreSignUpFn = new lambda.Function(this, "AuthPreSignUpFunction", {
+      runtime: lambda.Runtime.PROVIDED_AL2023,
+      architecture: lambda.Architecture.X86_64,
+      handler: "bootstrap",
+      timeout: cdk.Duration.seconds(10),
+      code: rustLambdaCode("auth-service", "auth-pre-signup"),
+    });
+
+    // メール確認(SESセットアップ)を要求しないセルフサインアップにする(docs/adr/0016決定1)。
+    // PreSignUpトリガーが常にautoConfirmUser: trueを返すため、確認コード入力ステップが無い。
+    const userPool = new cognito.UserPool(this, "CustomerUserPool", {
+      userPoolName: "moneta-customers",
+      selfSignUpEnabled: true,
+      signInAliases: { username: true },
+      passwordPolicy: {
+        minLength: 8,
+        requireLowercase: false,
+        requireUppercase: false,
+        requireDigits: false,
+        requireSymbols: false,
+      },
+      // メール/電話番号を要求しないため、それらを使った復旧手段自体が存在しない。
+      accountRecovery: cognito.AccountRecovery.NONE,
+      lambdaTriggers: {
+        preSignUp: authPreSignUpFn,
+        postConfirmation: authPostConfirmationFn,
+        postAuthentication: authPostAuthenticationFn,
+      },
+      // PoCスタックのため自由に壊せるようにする(他のリソースと同じ方針)。
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    // SRPではなく単純なユーザー名+パスワード送信(docs/adr/0016決定1)——Amplifyの重いSRP
+    // クライアントを新規依存に追加しない単純化。TLSに保護される前提のトレードオフ。
+    const userPoolClient = userPool.addClient("CustomerUserPoolClient", {
+      authFlows: { userPassword: true },
+      generateSecret: false,
+    });
+
+    // 顧客向けAPIエンドポイント全てに認証を要求する(docs/adr/0016決定2)。CDKの
+    // CognitoUserPoolsAuthorizerは1つのインスタンスを複数のRestApiへまたがってaddMethodで
+    // 使うと"Cannot attach authorizer to two different rest APIs"で失敗する(実機ではなく
+    // cdk synth時点で判明——CLAUDE.mdの「AWS/ライブラリの挙動は推測せず検証する」を地で行く形
+    // になった)。同じuserPoolを指す別々のAuthorizerリソースを、RestApiごとに1つずつ持つ。
+    const accountQueryAuthorizer = new apigateway.CognitoUserPoolsAuthorizer(this, "AccountQueryAuthorizer", {
+      cognitoUserPools: [userPool],
+    });
+    const accountCommandAuthorizer = new apigateway.CognitoUserPoolsAuthorizer(this, "AccountCommandAuthorizer", {
+      cognitoUserPools: [userPool],
+    });
+    const accountNumberQueryAuthorizer = new apigateway.CognitoUserPoolsAuthorizer(this, "AccountNumberQueryAuthorizer", {
+      cognitoUserPools: [userPool],
+    });
+    const transferQueryAuthorizer = new apigateway.CognitoUserPoolsAuthorizer(this, "TransferQueryAuthorizer", {
+      cognitoUserPools: [userPool],
+    });
+    const transferCommandAuthorizer = new apigateway.CognitoUserPoolsAuthorizer(this, "TransferCommandAuthorizer", {
+      cognitoUserPools: [userPool],
+    });
+
     // --- [Query Service所有] 読み取りモデル(DynamoDB) -------------------------
     // account-serviceのaccountsテーブル(正規化された1口座1アイテム)をそのまま複製するの
     // ではなく、Query APIがそのまま返せるview(JSON)に変換して格納する場所として選んでいる
@@ -460,6 +555,8 @@ export class AccountPipelineStack extends cdk.Stack {
     const accountResource = accountsResource.addResource("{accountId}");
     accountResource.addMethod("GET", getAccountIntegration, {
       methodResponses: [{ statusCode: "200" }, { statusCode: "404" }],
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+      authorizer: accountQueryAuthorizer,
     });
 
     // --- [Query Service所有] 取引履歴API: API Gateway + DynamoDB Query直接統合 --
@@ -508,6 +605,258 @@ export class AccountPipelineStack extends cdk.Stack {
     const transactionsResource = accountResource.addResource("transactions");
     transactionsResource.addMethod("GET", listTransactionsIntegration, {
       methodResponses: [{ statusCode: "200" }],
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+      authorizer: accountQueryAuthorizer,
+    });
+
+    // --- [Query Service所有] 人間可読な口座番号(docs/adr/0015) -----------------
+    // UUIDのaccountIdをそのまま顧客に入力させる代わりに、支店(3桁)+口座番号(7桁)という
+    // 別名を発番して持つ。account.event.Openedだけを購読する専用の小さな投影
+    // (owner_projector.rsと同型、docs/adr/0011)——AccountViewTableの「洗い替え」投影には
+    // 相乗りしない(理由は同ファイルのコメント参照)。
+    const accountNumbersTable = new dynamodb.Table(this, "AccountNumbersTable", {
+      tableName: "moneta-account-numbers",
+      partitionKey: { name: "accountNumber", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+    // accountId→口座番号の逆引き用(自分の口座番号を表示する画面向け)。テーブルが小さい
+    // PoC規模なのでALL射影にし、branchCode/branchName/ownerIdも逆引き1回で取れるようにする。
+    accountNumbersTable.addGlobalSecondaryIndex({
+      indexName: "byAccountId",
+      partitionKey: { name: "accountId", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    const accountNumberProjectorFn = new lambda.Function(this, "AccountNumberProjectorFunction", {
+      runtime: lambda.Runtime.PROVIDED_AL2023,
+      architecture: lambda.Architecture.X86_64,
+      handler: "bootstrap",
+      timeout: cdk.Duration.seconds(30),
+      code: rustLambdaCode("query-service", "account-number-projector"),
+      environment: {
+        ACCOUNT_NUMBERS_TABLE_NAME: accountNumbersTable.tableName,
+      },
+    });
+    accountNumbersTable.grantWriteData(accountNumberProjectorFn);
+
+    new events.Rule(this, "AccountNumberObservationRule", {
+      eventBus: domainEventBus,
+      eventPattern: {
+        source: [EVENT_SOURCE],
+        detailType: ["account.event.Opened"],
+      },
+      targets: [new targets.LambdaFunction(accountNumberProjectorFn)],
+    });
+
+    // --- [Query Service所有] 口座番号照会API: API Gateway + DynamoDB直接統合 ---
+    const accountNumberQueryApiDynamoRole = new iam.Role(this, "AccountNumberQueryApiDynamoRole", {
+      assumedBy: new iam.ServicePrincipal("apigateway.amazonaws.com"),
+    });
+    accountNumberQueryApiDynamoRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["dynamodb:GetItem"],
+        resources: [accountNumbersTable.tableArn],
+      }),
+    );
+    accountNumberQueryApiDynamoRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["dynamodb:Query"],
+        resources: [`${accountNumbersTable.tableArn}/index/byAccountId`],
+      }),
+    );
+
+    const accountNumberQueryApi = new apigateway.RestApi(this, "AccountNumberQueryApi", {
+      restApiName: "moneta-account-number-query-api",
+      deployOptions: { stageName: "prod" },
+    });
+
+    // 口座番号→口座(振込の宛先解決用)。getAccountIntegrationと同じGetItem+404変換パターン。
+    const getAccountByNumberIntegration = new apigateway.AwsIntegration({
+      service: "dynamodb",
+      action: "GetItem",
+      options: {
+        credentialsRole: accountNumberQueryApiDynamoRole,
+        passthroughBehavior: apigateway.PassthroughBehavior.NEVER,
+        requestTemplates: {
+          "application/json": JSON.stringify({
+            TableName: accountNumbersTable.tableName,
+            Key: {
+              accountNumber: { S: "$input.params('accountNumber')" },
+            },
+          }),
+        },
+        integrationResponses: [
+          {
+            statusCode: "200",
+            responseTemplates: {
+              "application/json": [
+                '#if($input.path("$.Item") == "")',
+                "#set($context.responseOverride.status = 404)",
+                '{"message": "account number not found"}',
+                "#else",
+                "{",
+                '"accountId":"$input.path("$.Item.accountId.S")",',
+                '"ownerId":"$input.path("$.Item.ownerId.S")",',
+                '"accountNumber":"$input.path("$.Item.accountNumber.S")",',
+                '"branchCode":"$input.path("$.Item.branchCode.S")",',
+                '"branchName":"$input.path("$.Item.branchName.S")"',
+                "}",
+                "#end",
+              ].join("\n"),
+            },
+          },
+        ],
+      },
+    });
+
+    const accountNumbersResource = accountNumberQueryApi.root.addResource("account-numbers");
+    const accountNumberResource = accountNumbersResource.addResource("{accountNumber}");
+    accountNumberResource.addMethod("GET", getAccountByNumberIntegration, {
+      methodResponses: [{ statusCode: "200" }, { statusCode: "404" }],
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+      authorizer: accountNumberQueryAuthorizer,
+    });
+
+    // 口座→口座番号(自分の口座番号を表示する画面向け)。byAccountId GSIへのQuery。
+    // listTransactionsIntegrationと同じ#foreachパターンで単一件を取り出す(デプロイ後に
+    // test-invoke-methodで実機検証すること、docs/adr/0006の教訓を踏まえる)。
+    const getAccountNumberByAccountIntegration = new apigateway.AwsIntegration({
+      service: "dynamodb",
+      action: "Query",
+      options: {
+        credentialsRole: accountNumberQueryApiDynamoRole,
+        passthroughBehavior: apigateway.PassthroughBehavior.NEVER,
+        requestTemplates: {
+          "application/json": JSON.stringify({
+            TableName: accountNumbersTable.tableName,
+            IndexName: "byAccountId",
+            KeyConditionExpression: "accountId = :accountId",
+            ExpressionAttributeValues: {
+              ":accountId": { S: "$input.params('accountId')" },
+            },
+            Limit: 1,
+          }),
+        },
+        integrationResponses: [
+          {
+            statusCode: "200",
+            responseTemplates: {
+              "application/json": [
+                "#if($input.path('$.Items').size() == 0)",
+                "#set($context.responseOverride.status = 404)",
+                '{"message": "account number not found"}',
+                "#else",
+                "#foreach($item in $input.path('$.Items'))",
+                "{",
+                '"accountId":"$item.accountId.S",',
+                '"ownerId":"$item.ownerId.S",',
+                '"accountNumber":"$item.accountNumber.S",',
+                '"branchCode":"$item.branchCode.S",',
+                '"branchName":"$item.branchName.S"',
+                "}",
+                "#end",
+                "#end",
+              ].join("\n"),
+            },
+          },
+        ],
+      },
+    });
+
+    // account-numbers/{accountNumber}と同じAccountNumberQueryApi(=同じCloudFront prefix)配下に
+    // 置く。queryApi(既存のAccountQueryApi)側のaccountResourceは再利用しない——このAPIは
+    // account-service/query-serviceの境界とは独立な、口座番号専用の照会APIとして閉じておく
+    // (docs/adr/0015)。
+    const accountNumberAccountsResource = accountNumberQueryApi.root.addResource("accounts");
+    const accountNumberByAccountResource = accountNumberAccountsResource.addResource("{accountId}").addResource("account-number");
+    accountNumberByAccountResource.addMethod("GET", getAccountNumberByAccountIntegration, {
+      methodResponses: [{ statusCode: "200" }, { statusCode: "404" }],
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+      authorizer: accountNumberQueryAuthorizer,
+    });
+
+    // --- [Query Service所有] 本物の顧客-口座関係(docs/adr/0016決定4) ---------
+    // 認証(Cognito)の導入により、ownerIdはもはや検証済みの識別子になった——[[0009]]決定2が
+    // 「バックエンドに『顧客』という概念は一切追加しない…本物の顧客-口座関係が必要になれば
+    // 見直す」としていたのをここで見直す。account.event.Openedだけを購読する専用の小さな
+    // 投影(owner_projector.rs/account_number_projector.rsと同型)。
+    const customerAccountsTable = new dynamodb.Table(this, "CustomerAccountsTable", {
+      tableName: "moneta-customer-accounts",
+      partitionKey: { name: "ownerId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "accountId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    const customerAccountsProjectorFn = new lambda.Function(this, "CustomerAccountsProjectorFunction", {
+      runtime: lambda.Runtime.PROVIDED_AL2023,
+      architecture: lambda.Architecture.X86_64,
+      handler: "bootstrap",
+      timeout: cdk.Duration.seconds(30),
+      code: rustLambdaCode("query-service", "customer-accounts-projector"),
+      environment: {
+        CUSTOMER_ACCOUNTS_TABLE_NAME: customerAccountsTable.tableName,
+      },
+    });
+    customerAccountsTable.grantWriteData(customerAccountsProjectorFn);
+
+    new events.Rule(this, "CustomerAccountsObservationRule", {
+      eventBus: domainEventBus,
+      eventPattern: {
+        source: [EVENT_SOURCE],
+        detailType: ["account.event.Opened"],
+      },
+      targets: [new targets.LambdaFunction(customerAccountsProjectorFn)],
+    });
+
+    // GET /customers/me/accounts: ownerIdはリクエストパラメータではなくCognito JWTのsub
+    // クレームから取る(docs/adr/0016決定4)——クライアントは他人のownerIdを指定できない。
+    queryApiDynamoRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["dynamodb:Query"],
+        resources: [customerAccountsTable.tableArn],
+      }),
+    );
+
+    const listMyAccountsIntegration = new apigateway.AwsIntegration({
+      service: "dynamodb",
+      action: "Query",
+      options: {
+        credentialsRole: queryApiDynamoRole,
+        passthroughBehavior: apigateway.PassthroughBehavior.NEVER,
+        requestTemplates: {
+          "application/json": JSON.stringify({
+            TableName: customerAccountsTable.tableName,
+            KeyConditionExpression: "ownerId = :ownerId",
+            ExpressionAttributeValues: {
+              ":ownerId": { S: "$context.authorizer.claims.sub" },
+            },
+          }),
+        },
+        integrationResponses: [
+          {
+            statusCode: "200",
+            responseTemplates: {
+              "application/json": [
+                "#set($items = $input.path('$.Items'))",
+                "[",
+                "#foreach($item in $items)",
+                '{"accountId":"$item.accountId.S","openedAt":"$item.openedAt.S"}#if($foreach.hasNext),#end',
+                "#end",
+                "]",
+              ].join("\n"),
+            },
+          },
+        ],
+      },
+    });
+
+    const myAccountsResource = queryApi.root.addResource("customers").addResource("me").addResource("accounts");
+    myAccountsResource.addMethod("GET", listMyAccountsIntegration, {
+      methodResponses: [{ statusCode: "200" }],
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+      authorizer: accountQueryAuthorizer,
     });
 
     // ==========================================================================
@@ -562,21 +911,17 @@ export class AccountPipelineStack extends cdk.Stack {
     };
 
     // owner_id: 口座の名義(顧客識別子)。docs/adr/0011で、振替(同一名義間)/振込(名義不一致)を
-    // サーバ側で判定するための実データとしてAccount aggregateに追加した。空文字列は拒否する
-    // (Web UIは常にサインイン済み顧客名を送る——ダミーサインインであり認証ではない、
-    // ADR-0007/0009の「認証UIなし」は撤回しない)。
-    const ownerIdSchema: apigateway.JsonSchema = {
-      type: apigateway.JsonSchemaType.STRING,
-      minLength: 1,
-    };
-
+    // サーバ側で判定するための実データとしてAccount aggregateに追加した。docs/adr/0016決定3
+    // により、もはやリクエストボディでは受け取らない——認証済みユーザーのCognito subを
+    // $context.authorizer.claims.subから直接使う(下記openCommandJson)。クライアントが
+    // owner_idを自称できる余地自体を無くす。
     const openModel = commandApi.addModel("OpenCommandModel", {
       contentType: "application/json",
       schema: {
         schema: apigateway.JsonSchemaVersion.DRAFT4,
         type: apigateway.JsonSchemaType.OBJECT,
-        required: ["owner_id", "initial_balance"],
-        properties: { owner_id: ownerIdSchema, initial_balance: decimalStringSchema },
+        required: ["initial_balance"],
+        properties: { initial_balance: decimalStringSchema },
         additionalProperties: false,
       },
     });
@@ -615,7 +960,13 @@ export class AccountPipelineStack extends cdk.Stack {
     // request"になることをtest-invoke-methodで確認済み)。回避策として、`#set($q = '"')`で
     // 二重引用符1文字を単一引用符リテラル(エスケープ不要)に退避し、`${q}`という変数参照として
     // 埋め込むことでパーサーの引用符衝突そのものを避けている(docs/adr/0006)。
-    const sqsIntegration = (commandJsonFragment: string) =>
+    // requestedByField: Open/Freeze/Unfreeze/Closeの呼び出し側からだけ
+    // AUTHORIZED_REQUESTED_BY_FIELD(下記)を渡す、$context.authorizer.claims.sub
+    // (Cognito認証済みユーザーのsub)をMessageBodyの`requested_by`として注入するVTL断片
+    // (docs/adr/0016決定3)。account-service/src/persistence.rsのAccountCommandEnvelope側の
+    // フィールド名と一致させる。Deposit/Withdraw(外部チャネル、認証なし、ADR-0009決定1)は
+    // 空文字列を渡し、この項目自体を付与しない。
+    const sqsIntegration = (commandJsonFragment: string, requestedByField: string) =>
       new apigateway.AwsIntegration({
         service: "sqs",
         // SQSクラシック(Query プロトコル)エンドポイントの形。QueueUrlをform paramとして
@@ -640,7 +991,7 @@ export class AccountPipelineStack extends cdk.Stack {
               "Action=SendMessage",
               "&MessageGroupId=$util.urlEncode($input.params('accountId'))",
               "&MessageDeduplicationId=$util.urlEncode($input.params().header.get('Idempotency-Key'))",
-              `&MessageBody=$util.urlEncode("{\${q}account_id\${q}:\${q}$input.params('accountId')\${q},\${q}command\${q}:${commandJsonFragment}}")`,
+              `&MessageBody=$util.urlEncode("{\${q}account_id\${q}:\${q}$input.params('accountId')\${q},\${q}command\${q}:${commandJsonFragment}${requestedByField}}")`,
             ].join(""),
           },
           // SQSのSendMessageレスポンスはXML(Queryプロトコル)であり、そこからMessageIdを
@@ -666,7 +1017,9 @@ export class AccountPipelineStack extends cdk.Stack {
         },
       });
 
-    const openCommandJson = `{\${q}Open\${q}:{\${q}owner_id\${q}:\${q}$util.escapeJavaScript($input.path('$.owner_id'))\${q},\${q}initial_balance\${q}:\${q}$util.escapeJavaScript($input.path('$.initial_balance'))\${q}}}`;
+    // owner_idはリクエストボディからではなく、常にCognito認証済みユーザーのsubから取る
+    // (docs/adr/0016決定3)——OpenCommandModelがowner_idを要求しなくなったのと対称。
+    const openCommandJson = `{\${q}Open\${q}:{\${q}owner_id\${q}:\${q}$context.authorizer.claims.sub\${q},\${q}initial_balance\${q}:\${q}$util.escapeJavaScript($input.path('$.initial_balance'))\${q}}}`;
     const depositCommandJson = `{\${q}Deposit\${q}:{\${q}amount\${q}:\${q}$util.escapeJavaScript($input.path('$.amount'))\${q}}}`;
     const withdrawCommandJson = `{\${q}Withdraw\${q}:{\${q}amount\${q}:\${q}$util.escapeJavaScript($input.path('$.amount'))\${q}}}`;
     const freezeCommandJson = `{\${q}Freeze\${q}:{\${q}reason\${q}:\${q}$util.escapeJavaScript($input.path('$.reason'))\${q}}}`;
@@ -674,6 +1027,11 @@ export class AccountPipelineStack extends cdk.Stack {
     // では素のJSON文字列になる(account.rsにtag属性なし。{"Unfreeze":{}}ではない)。
     const unfreezeCommandJson = `\${q}Unfreeze\${q}`;
     const closeCommandJson = `\${q}Close\${q}`;
+
+    // Open/Freeze/Unfreeze/Closeのsqsintegration呼び出しに渡す(docs/adr/0016決定3)。
+    // Deposit/Withdrawには渡さず、空文字列(この項目自体を付与しない)を使う。
+    const AUTHORIZED_REQUESTED_BY_FIELD = `,\${q}requested_by\${q}:\${q}$context.authorizer.claims.sub\${q}`;
+    const NO_REQUESTED_BY_FIELD = "";
 
     const requireIdempotencyKey = {
       "method.request.header.Idempotency-Key": true,
@@ -685,44 +1043,54 @@ export class AccountPipelineStack extends cdk.Stack {
     // クライアントがUUIDを生成し、PUTで口座IDを指定して開設する(docs/adr/0006) —
     // AccountCommandEnvelopeがOpenを含む全コマンドでaccount_idを事前に要求する設計と一致し、
     // タイムアウト後の再送でも同じIDを使い回せる(べき等)。
-    commandAccountResource.addMethod("PUT", sqsIntegration(openCommandJson), {
+    commandAccountResource.addMethod("PUT", sqsIntegration(openCommandJson, AUTHORIZED_REQUESTED_BY_FIELD), {
       requestValidator: commandRequestValidator,
       requestParameters: requireIdempotencyKey,
       requestModels: { "application/json": openModel },
       methodResponses: [{ statusCode: "202" }, { statusCode: "502" }],
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+      authorizer: accountCommandAuthorizer,
     });
 
-    commandAccountResource.addResource("deposits").addMethod("POST", sqsIntegration(depositCommandJson), {
+    // Deposit/Withdraw(外部チャネル、認証なし、ADR-0009決定1)は引き続き認証を要求しない
+    // (docs/adr/0016決定2)。
+    commandAccountResource.addResource("deposits").addMethod("POST", sqsIntegration(depositCommandJson, NO_REQUESTED_BY_FIELD), {
       requestValidator: commandRequestValidator,
       requestParameters: requireIdempotencyKey,
       requestModels: { "application/json": amountModel },
       methodResponses: [{ statusCode: "202" }, { statusCode: "502" }],
     });
 
-    commandAccountResource.addResource("withdrawals").addMethod("POST", sqsIntegration(withdrawCommandJson), {
+    commandAccountResource.addResource("withdrawals").addMethod("POST", sqsIntegration(withdrawCommandJson, NO_REQUESTED_BY_FIELD), {
       requestValidator: commandRequestValidator,
       requestParameters: requireIdempotencyKey,
       requestModels: { "application/json": amountModel },
       methodResponses: [{ statusCode: "202" }, { statusCode: "502" }],
     });
 
-    commandAccountResource.addResource("freeze").addMethod("POST", sqsIntegration(freezeCommandJson), {
+    commandAccountResource.addResource("freeze").addMethod("POST", sqsIntegration(freezeCommandJson, AUTHORIZED_REQUESTED_BY_FIELD), {
       requestValidator: commandRequestValidator,
       requestParameters: requireIdempotencyKey,
       requestModels: { "application/json": freezeModel },
       methodResponses: [{ statusCode: "202" }, { statusCode: "502" }],
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+      authorizer: accountCommandAuthorizer,
     });
 
-    commandAccountResource.addResource("unfreeze").addMethod("POST", sqsIntegration(unfreezeCommandJson), {
+    commandAccountResource.addResource("unfreeze").addMethod("POST", sqsIntegration(unfreezeCommandJson, AUTHORIZED_REQUESTED_BY_FIELD), {
       requestValidator: commandParamsOnlyValidator,
       requestParameters: requireIdempotencyKey,
       methodResponses: [{ statusCode: "202" }, { statusCode: "502" }],
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+      authorizer: accountCommandAuthorizer,
     });
 
-    commandAccountResource.addResource("close").addMethod("POST", sqsIntegration(closeCommandJson), {
+    commandAccountResource.addResource("close").addMethod("POST", sqsIntegration(closeCommandJson, AUTHORIZED_REQUESTED_BY_FIELD), {
       requestValidator: commandParamsOnlyValidator,
       requestParameters: requireIdempotencyKey,
       methodResponses: [{ statusCode: "202" }, { statusCode: "502" }],
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+      authorizer: accountCommandAuthorizer,
     });
 
     // ==========================================================================
@@ -967,6 +1335,8 @@ export class AccountPipelineStack extends cdk.Stack {
     const transferResource = transfersResource.addResource("{transferId}");
     transferResource.addMethod("GET", getTransferIntegration, {
       methodResponses: [{ statusCode: "200" }, { statusCode: "404" }],
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+      authorizer: transferQueryAuthorizer,
     });
 
     // --- 送金受付API: API Gateway REST API + SQS直接統合(決定2〜4) ------------
@@ -1087,6 +1457,8 @@ export class AccountPipelineStack extends cdk.Stack {
       requestValidator: transferCommandRequestValidator,
       requestModels: { "application/json": startTransferModel },
       methodResponses: [{ statusCode: "202" }, { statusCode: "502" }],
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+      authorizer: transferCommandAuthorizer,
     });
 
     transferCommandTransferResource
@@ -1094,6 +1466,8 @@ export class AccountPipelineStack extends cdk.Stack {
       .addMethod("POST", transferSqsIntegration(confirmCommandJson, "confirm"), {
         requestValidator: transferCommandParamsOnlyValidator,
         methodResponses: [{ statusCode: "202" }, { statusCode: "502" }],
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+        authorizer: transferCommandAuthorizer,
       });
 
     transferCommandTransferResource
@@ -1101,6 +1475,8 @@ export class AccountPipelineStack extends cdk.Stack {
       .addMethod("POST", transferSqsIntegration(cancelCommandJson, "cancel"), {
         requestValidator: transferCommandParamsOnlyValidator,
         methodResponses: [{ statusCode: "202" }, { statusCode: "502" }],
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+        authorizer: transferCommandAuthorizer,
       });
 
     // 組戻し。パスの{transferId}は組戻し自身の新しいサガID、取消対象はbodyのoriginal_transfer_id
@@ -1111,6 +1487,8 @@ export class AccountPipelineStack extends cdk.Stack {
         requestValidator: transferCommandRequestValidator,
         requestModels: { "application/json": recallTransferModel },
         methodResponses: [{ statusCode: "202" }, { statusCode: "502" }],
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+        authorizer: transferCommandAuthorizer,
       });
 
     // ==========================================================================
@@ -1192,10 +1570,47 @@ export class AccountPipelineStack extends cdk.Stack {
       ),
     });
 
+    // 口座番号照会API(docs/adr/0015)。account-service/transfer-serviceのものとは別プレフィックス
+    // にする理由は上記2つと同じ。
+    const accountNumberQueryApiPrefixFunction = new cloudfront.Function(this, "AccountNumberQueryApiPrefixFunction", {
+      runtime: cloudfront.FunctionRuntime.JS_2_0,
+      code: cloudfront.FunctionCode.fromInline(
+        [
+          "function handler(event) {",
+          "  var request = event.request;",
+          '  request.uri = request.uri.replace(/^\\/account-number-query-api/, "") || "/";',
+          "  return request;",
+          "}",
+        ].join("\n"),
+      ),
+    });
+
     // CloudFrontはデフォルトで任意ヘッダーをオリジンへ転送しないため、Idempotency-Key
-    // (ADR-0006決定3)を明示的に転送する。
+    // (ADR-0006決定3)を明示的に転送する(command-apiのみ必要)。
     const commandApiOriginRequestPolicy = new cloudfront.OriginRequestPolicy(this, "CommandApiOriginRequestPolicy", {
       headerBehavior: cloudfront.OriginRequestHeaderBehavior.allowList("Idempotency-Key", "Content-Type"),
+    });
+
+    // Authorization(docs/adr/0016、Cognito IDトークン)は5つのbehavior全てで必要だが、
+    // OriginRequestPolicyのallowListにAuthorizationを含めることはCDK/CloudFront自体が拒否する
+    // ("you cannot pass `Authorization` or `Accept-Encoding` as header values" — cdk synth時点で
+    // 判明)。AuthorizationはCachePolicy側のheaderBehaviorでのみ転送できる。加えて、
+    // 全TTLを0(=CACHING_DISABLED相当)にした状態でheaderBehaviorを指定すると、今度は実際の
+    // デプロイ時点で"HeaderBehavior is invalid for policy with caching disabled"というCloudFront
+    // 側のバリデーションで拒否されることが判明した(cdk synthは通るが実機で失敗する——
+    // CLAUDE.mdの「AWS/ライブラリの挙動は推測せず検証する」を二重に地で行く形になった)。
+    // やむを得ずTTLを1秒だけ持たせる——結果整合性のラグ(最大約1分)を既に許容しているこの
+    // システム全体からすれば、1秒のキャッシュ窓は無視できるほど小さく、ADR-0007の
+    // 「結果整合性のあるレスポンスをCDNにキャッシュさせない」という意図を実質的に損なわない。
+    // headerBehaviorにAuthorizationを含めることで、キャッシュキー自体がトークンごとに
+    // 分かれる(他人のレスポンスが誤って返る心配もない)。
+    const authCachePolicy = new cloudfront.CachePolicy(this, "AuthCachePolicy", {
+      defaultTtl: cdk.Duration.seconds(1),
+      minTtl: cdk.Duration.seconds(0),
+      maxTtl: cdk.Duration.seconds(1),
+      headerBehavior: cloudfront.CacheHeaderBehavior.allowList("Authorization"),
+      queryStringBehavior: cloudfront.CacheQueryStringBehavior.none(),
+      cookieBehavior: cloudfront.CacheCookieBehavior.none(),
     });
 
     const webUiDistribution = new cloudfront.Distribution(this, "WebUiDistribution", {
@@ -1203,11 +1618,9 @@ export class AccountPipelineStack extends cdk.Stack {
         origin: origins.S3BucketOrigin.withOriginAccessControl(webUiBucket),
       },
       additionalBehaviors: {
-        // 結果整合性のあるレスポンスをCDNにキャッシュさせないため、API系はどちらも
-        // CACHING_DISABLED(ADR-0007)。
         "/query-api/*": {
           origin: new origins.RestApiOrigin(queryApi),
-          cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+          cachePolicy: authCachePolicy,
           functionAssociations: [
             { function: queryApiPrefixFunction, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST },
           ],
@@ -1217,7 +1630,7 @@ export class AccountPipelineStack extends cdk.Stack {
           // デフォルト(ALLOW_GET_HEAD)だとPUT/POSTが403になる(実機検証で発見)。書き込み
           // コマンドはPUT(Open)とPOST(Deposit等)のため明示的に全メソッドを許可する。
           allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
-          cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+          cachePolicy: authCachePolicy,
           originRequestPolicy: commandApiOriginRequestPolicy,
           functionAssociations: [
             { function: commandApiPrefixFunction, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST },
@@ -1225,7 +1638,7 @@ export class AccountPipelineStack extends cdk.Stack {
         },
         "/transfer-query-api/*": {
           origin: new origins.RestApiOrigin(transferQueryApi),
-          cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+          cachePolicy: authCachePolicy,
           functionAssociations: [
             { function: transferQueryApiPrefixFunction, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST },
           ],
@@ -1235,9 +1648,16 @@ export class AccountPipelineStack extends cdk.Stack {
           // account-serviceのcommand-apiと同じ理由(デフォルトのALLOW_GET_HEADだとPUT/POSTが
           // 403になる)。
           allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
-          cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+          cachePolicy: authCachePolicy,
           functionAssociations: [
             { function: transferCommandApiPrefixFunction, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST },
+          ],
+        },
+        "/account-number-query-api/*": {
+          origin: new origins.RestApiOrigin(accountNumberQueryApi),
+          cachePolicy: authCachePolicy,
+          functionAssociations: [
+            { function: accountNumberQueryApiPrefixFunction, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST },
           ],
         },
       },
@@ -1270,6 +1690,13 @@ export class AccountPipelineStack extends cdk.Stack {
     new cdk.CfnOutput(this, "AccountHistoryTableName", { value: accountHistoryTable.tableName });
     new cdk.CfnOutput(this, "QueryProjectorFunctionName", { value: queryProjectorFn.functionName });
     new cdk.CfnOutput(this, "QueryApiUrl", { value: queryApi.url });
+    new cdk.CfnOutput(this, "AccountNumbersTableName", { value: accountNumbersTable.tableName });
+    new cdk.CfnOutput(this, "AccountNumberProjectorFunctionName", { value: accountNumberProjectorFn.functionName });
+    new cdk.CfnOutput(this, "AccountNumberQueryApiUrl", { value: accountNumberQueryApi.url });
+    new cdk.CfnOutput(this, "UserPoolId", { value: userPool.userPoolId });
+    new cdk.CfnOutput(this, "UserPoolClientId", { value: userPoolClient.userPoolClientId });
+    new cdk.CfnOutput(this, "CustomerAccountsTableName", { value: customerAccountsTable.tableName });
+    new cdk.CfnOutput(this, "CustomerAccountsProjectorFunctionName", { value: customerAccountsProjectorFn.functionName });
     new cdk.CfnOutput(this, "CommandApiUrl", { value: commandApi.url });
     new cdk.CfnOutput(this, "WebUiUrl", { value: `https://${webUiDistribution.domainName}` });
     new cdk.CfnOutput(this, "TransferSagaTableName", { value: transferSagaTable.tableName });

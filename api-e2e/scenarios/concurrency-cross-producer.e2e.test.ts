@@ -10,19 +10,21 @@ import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { waitFor } from "../support/poll";
 import { openFreshAccount } from "../support/testAccount";
 import { createTransferCommandApi, createTransferQueryApi, waitForTransferState } from "../support/transferClient";
+import { signUpAndSignIn } from "../support/auth";
 
 describe("R8: 直接コマンドとtransfer-service発行コマンドが同一口座を同時に取り合っても破綻しない", () => {
   it("合計が残高を超える2件(直接出金+振替)の同時要求は、片方だけ成功し残高が負にならない", async () => {
     const outputs = await fetchStackOutputs();
-    const commandApi = createCommandApi(outputs.commandApiUrl);
-    const queryApi = createQueryApi(outputs.queryApiUrl);
-    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl);
-    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl);
+    // 同一名義(furikae)にするため、単一のCognito識別子で両方の口座を開設する(docs/adr/0016決定3)。
+    const identity = await signUpAndSignIn(outputs.userPoolClientId);
+    const commandApi = createCommandApi(outputs.commandApiUrl, identity.idToken);
+    const queryApi = createQueryApi(outputs.queryApiUrl, identity.idToken);
+    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl, identity.idToken);
+    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identity.idToken);
 
-    const owner = `e2e-r8-owner-${crypto.randomUUID()}`;
-    const accountId = await openFreshAccount(commandApi, queryApi, "100", owner);
-    // furikaeの送金先(同一owner、口座間送金の相手役)。
-    const transferToId = await openFreshAccount(commandApi, queryApi, "0.00", owner);
+    const accountId = await openFreshAccount(commandApi, queryApi, "100");
+    // furikaeの送金先(同一名義、口座間送金の相手役)。
+    const transferToId = await openFreshAccount(commandApi, queryApi, "0.00");
     const transferId = crypto.randomUUID();
 
     // 直接の出金(80)と、transfer-service経由の振替(80、内部的にはWithdrawコマンドとして

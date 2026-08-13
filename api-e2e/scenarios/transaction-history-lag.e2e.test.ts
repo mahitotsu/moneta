@@ -7,14 +7,16 @@ import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { waitFor } from "../support/poll";
 import { openFreshAccount } from "../support/testAccount";
+import { signUpAndSignIn } from "../support/auth";
 
 describe("F2: 取引履歴も結果整合性の遅延窓を持つ", () => {
   it(
     "入金直後の取引履歴は反映されないことがあるが、まもなく新しいエントリが現れる",
     async () => {
       const outputs = await fetchStackOutputs();
-      const commandApi = createCommandApi(outputs.commandApiUrl);
-      const queryApi = createQueryApi(outputs.queryApiUrl);
+      const identity = await signUpAndSignIn(outputs.userPoolClientId);
+      const commandApi = createCommandApi(outputs.commandApiUrl, identity.idToken);
+      const queryApi = createQueryApi(outputs.queryApiUrl, identity.idToken);
       const accountId = await openFreshAccount(commandApi, queryApi, "0");
 
       const initialHistory = await queryApi.getTransactionHistory(accountId);

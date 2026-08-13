@@ -4,12 +4,14 @@
 import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { settle } from "../support/poll";
+import { signUpAndSignIn } from "../support/auth";
 
 describe("B4: 存在しない口座への操作は却下される", () => {
   it("存在しない口座への入金は却下され、口座は作られない", async () => {
     const outputs = await fetchStackOutputs();
-    const commandApi = createCommandApi(outputs.commandApiUrl);
-    const queryApi = createQueryApi(outputs.queryApiUrl);
+    const identity = await signUpAndSignIn(outputs.userPoolClientId);
+    const commandApi = createCommandApi(outputs.commandApiUrl, identity.idToken);
+    const queryApi = createQueryApi(outputs.queryApiUrl, identity.idToken);
     const accountId = crypto.randomUUID();
 
     const response = await commandApi.deposit(accountId, "10");

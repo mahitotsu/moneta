@@ -17,6 +17,11 @@ export interface StackOutputs {
   transferCommandApiUrl: string;
   transferQueryApiUrl: string;
   transferAccountOwnersTableName: string;
+  // 人間可読な口座番号(docs/adr/0015)。owner indexと違い公開APIがあるので、DynamoDBを直接
+  // 読まずこちらをHTTP経由でポーリングする(support/accountNumber.ts)。
+  accountNumberQueryApiUrl: string;
+  // Amazon Cognitoによる実認証(docs/adr/0016)。support/auth.tsのsignUpAndSignInに渡す。
+  userPoolClientId: string;
 }
 
 const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
@@ -26,6 +31,8 @@ const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
   transferCommandApiUrl: "TransferCommandApiUrl",
   transferQueryApiUrl: "TransferQueryApiUrl",
   transferAccountOwnersTableName: "TransferAccountOwnersTableName",
+  accountNumberQueryApiUrl: "AccountNumberQueryApiUrl",
+  userPoolClientId: "UserPoolClientId",
 };
 
 export async function fetchStackOutputs(): Promise<StackOutputs> {

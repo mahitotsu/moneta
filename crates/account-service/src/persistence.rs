@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use account_domain::{Account, AccountId, AccountState, Command, Decimal, FreezeReason, OffsetDateTime, Rfc3339, Uuid};
+use account_domain::{Account, AccountId, AccountState, Command, Decimal, DomainError, FreezeReason, OffsetDateTime, Rfc3339, Uuid};
 use aws_sdk_dynamodb::error::SdkError;
 use aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError;
 use aws_sdk_dynamodb::types::{AttributeValue, ConditionCheck, Put, TransactWriteItem, Update};
@@ -21,6 +21,12 @@ pub struct AccountCommandEnvelope {
     /// 欠落しており、その場合は`None`として扱う。
     #[serde(default)]
     pub correlation_id: Option<String>,
+    /// 認証済みユーザーの識別子(docs/adr/0016)。API Gatewayの`Open`/`Freeze`/`Unfreeze`/
+    /// `Close`リソースにつけたVTLが`$context.authorizer.claims.sub`から注入する——顧客が
+    /// 送るリクエストボディの一部ではない。外部チャネル(Deposit/Withdraw、認証なし、
+    /// ADR-0009決定1)からのメッセージやtransfer-serviceが直接送るメッセージには存在しない。
+    #[serde(default)]
+    pub requested_by: Option<String>,
 }
 
 /// account-serviceが書き込む3テーブルの名前(docs/adr/0013)。
@@ -341,6 +347,32 @@ fn classify_transact_error(
     Err(ApplyCommandError::Infra(Box::new(err)))
 }
 
+/// Openはボディのowner_idを信用せず、`requested_by`(API Gateway VTLが
+/// `$context.authorizer.claims.sub`から注入する、Cognito認証済みユーザーのsub)があれば
+/// それで上書きする(docs/adr/0016)——認証済みだが他人のowner_idを名乗って口座を開設する、
+/// というなりすましを防ぐ。`requested_by`が無い(Open以外、またはVTL非経由の呼び出し)場合は
+/// 元のコマンドをそのまま返す。
+fn resolve_owner_id(command: Command, requested_by: Option<&str>) -> Command {
+    match (command, requested_by) {
+        (Command::Open { initial_balance, .. }, Some(requested_by)) => {
+            Command::Open { owner_id: requested_by.to_string(), initial_balance }
+        }
+        (command, _) => command,
+    }
+}
+
+/// Freeze/Unfreeze/Closeは、既存口座の名義(`current_owner_id`)と`requested_by`が一致しない
+/// 限りNotOwnerとして却下する(docs/adr/0016、他人の口座を操作させない)。口座がまだ存在しない
+/// 場合(`is_new_account`)は`apply_to_absent`が従来通り`AccountNotFound`を返すべきなので対象外
+/// にする——存在しない口座の`current_owner_id`はプレースホルダーの空文字列であり、比較すると
+/// 誤検知する。`requested_by`が無い(Deposit/Withdraw、外部チャネル・認証なし、ADR-0009決定1)
+/// 場合もチェックしない。
+fn is_ownership_violation(command: &Command, is_new_account: bool, current_owner_id: &str, requested_by: Option<&str>) -> bool {
+    !is_new_account
+        && matches!(command, Command::Freeze { .. } | Command::Unfreeze | Command::Close)
+        && requested_by.is_some_and(|requested_by| requested_by != current_owner_id)
+}
+
 /// 1メッセージの処理本体：現在の状態のロード（存在しなければ`apply_to_absent`、存在すれば
 /// `apply`） → 結果（イベントor却下記録）の永続化を1回の`TransactWriteItems`で行う
 /// (docs/adr/0002・0013)。
@@ -371,10 +403,18 @@ pub async fn apply_command(
         None => (Account::rehydrate(account_id, String::new(), AccountState::Active { balance: Decimal::ZERO }), None),
     };
 
-    let outcome = if is_new_account {
-        Account::apply_to_absent(account_id, envelope.command.clone(), now)
+    // 認可(docs/adr/0016)。AWS依存のない純粋関数に切り出してunit testできるようにする
+    // (このcrateの既存方針: classify_transact_error等と同じくロジック部分だけを分離する)。
+    let command = resolve_owner_id(envelope.command.clone(), envelope.requested_by.as_deref());
+    let ownership_violation =
+        is_ownership_violation(&command, is_new_account, base_account.owner_id(), envelope.requested_by.as_deref());
+
+    let outcome = if ownership_violation {
+        Err(DomainError::NotOwner)
+    } else if is_new_account {
+        Account::apply_to_absent(account_id, command, now)
     } else {
-        base_account.apply(envelope.command.clone(), now)
+        base_account.apply(command, now)
     };
 
     let (kind, payload) = match &outcome {
@@ -421,4 +461,61 @@ pub struct UnpublishedEvent {
     pub payload: Value,
     pub created_at: OffsetDateTime,
     pub correlation_id: Option<String>,
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    #[test]
+    fn open_command_owner_id_is_overridden_by_requested_by_when_present() {
+        let command = Command::Open { owner_id: "claimed-by-body".to_string(), initial_balance: dec!(100) };
+        let resolved = resolve_owner_id(command, Some("real-cognito-sub"));
+        assert_eq!(resolved, Command::Open { owner_id: "real-cognito-sub".to_string(), initial_balance: dec!(100) });
+    }
+
+    #[test]
+    fn open_command_owner_id_is_kept_when_requested_by_is_absent() {
+        // 外部からの直接SQS送信等、VTLを経由しない呼び出し(現状は存在しないが、将来の
+        // 呼び出し元を壊さないための後方互換)。
+        let command = Command::Open { owner_id: "body-owner".to_string(), initial_balance: dec!(100) };
+        let resolved = resolve_owner_id(command, None);
+        assert_eq!(resolved, Command::Open { owner_id: "body-owner".to_string(), initial_balance: dec!(100) });
+    }
+
+    #[test]
+    fn non_open_commands_are_never_modified() {
+        let command = Command::Withdraw { amount: dec!(10) };
+        assert_eq!(resolve_owner_id(command.clone(), Some("someone")), command);
+    }
+
+    #[test]
+    fn freeze_unfreeze_close_are_violations_when_requested_by_does_not_match_the_owner() {
+        for command in [Command::Freeze { reason: FreezeReason::CustomerRequest }, Command::Unfreeze, Command::Close] {
+            assert!(is_ownership_violation(&command, false, "actual-owner", Some("someone-else")));
+            assert!(!is_ownership_violation(&command, false, "actual-owner", Some("actual-owner")));
+        }
+    }
+
+    #[test]
+    fn ownership_is_not_checked_when_the_account_does_not_exist_yet() {
+        // 存在しない口座へのFreeze/Unfreeze/Closeは、認可チェックではなく
+        // apply_to_absentのAccountNotFoundに委ねる(base_accountのowner_idは
+        // プレースホルダーの空文字列なので、ここで誤ってNotOwnerにしない)。
+        assert!(!is_ownership_violation(&Command::Close, true, "", Some("someone")));
+    }
+
+    #[test]
+    fn ownership_is_not_checked_when_requested_by_is_absent() {
+        // Deposit/Withdrawと同じ「外部チャネル」経路をFreeze等が通ることは実際にはないが、
+        // requested_by自体が無い限りチェックしない、という関数の契約を単体で固定する。
+        assert!(!is_ownership_violation(&Command::Close, false, "actual-owner", None));
+    }
+
+    #[test]
+    fn deposit_and_withdraw_are_never_ownership_violations() {
+        assert!(!is_ownership_violation(&Command::Deposit { amount: dec!(10) }, false, "actual-owner", Some("someone-else")));
+        assert!(!is_ownership_violation(&Command::Withdraw { amount: dec!(10) }, false, "actual-owner", Some("someone-else")));
+    }
 }

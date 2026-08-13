@@ -9,14 +9,16 @@ import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { waitFor } from "../support/poll";
 import { openFreshAccount } from "../support/testAccount";
+import { signUpAndSignIn } from "../support/auth";
 
 describe("F1: 結果整合性は失敗ではなく、境界のある遅延として収束する", () => {
   it(
     "入金直後の照会は古い残高を返しうるが、まもなく新残高へ収束する",
     async () => {
       const outputs = await fetchStackOutputs();
-      const commandApi = createCommandApi(outputs.commandApiUrl);
-      const queryApi = createQueryApi(outputs.queryApiUrl);
+      const identity = await signUpAndSignIn(outputs.userPoolClientId);
+      const commandApi = createCommandApi(outputs.commandApiUrl, identity.idToken);
+      const queryApi = createQueryApi(outputs.queryApiUrl, identity.idToken);
       const accountId = await openFreshAccount(commandApi, queryApi, "0");
 
       const response = await commandApi.deposit(accountId, "10");

@@ -9,12 +9,16 @@ import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { waitFor } from "../support/poll";
 import { openFreshAccount } from "../support/testAccount";
+import { signUpAndSignIn } from "../support/auth";
 
 describe("A2→A3: 入金・出金は最終的に残高へ反映される", () => {
   it("入金で残高が増え、続く出金で減る", async () => {
     const outputs = await fetchStackOutputs();
-    const commandApi = createCommandApi(outputs.commandApiUrl);
-    const queryApi = createQueryApi(outputs.queryApiUrl);
+    // Deposit/Withdraw自体は認証不要(ADR-0009決定1)だが、口座の開設(PUT)と残高照会(GET)は
+    // 必要なため、識別子を1つ用意して使い回す(docs/adr/0016決定2)。
+    const identity = await signUpAndSignIn(outputs.userPoolClientId);
+    const commandApi = createCommandApi(outputs.commandApiUrl, identity.idToken);
+    const queryApi = createQueryApi(outputs.queryApiUrl, identity.idToken);
     const accountId = await openFreshAccount(commandApi, queryApi, "100");
 
     const depositResponse = await commandApi.deposit(accountId, "50");

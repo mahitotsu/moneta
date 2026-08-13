@@ -98,6 +98,13 @@ pub enum DomainError {
     AccountNotFound,
     #[error("account already exists")]
     AccountAlreadyExists,
+    /// 認可(この口座は自分のものか)の却下(docs/adr/0016)。`Account::apply`/`apply_to_absent`
+    /// 自身はこのバリアントを一切返さない——認可はドメインの外(account-serviceのサービス層、
+    /// `persistence::apply_command`)の関心事として意図的に切り離しており、`owner_id`の比較は
+    /// `Account::owner_id()`を呼び出し側が読んで行う。ここに定義するのは、他のDomainErrorと
+    /// 同じくADR-0002の却下分類(`account.rejection.*`として発行)にそのまま乗せるため。
+    #[error("requested by a different owner than the account's")]
+    NotOwner,
 }
 
 #[derive(Debug, Clone, PartialEq)]

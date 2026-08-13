@@ -101,6 +101,43 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
   over HTTP and into `localStorage` rather than driven through the browser, so specs stay focused
   on the one thing HTTP-only testing and mocked-API component tests can't reach: the transfer
   screens' (`0012` decision 6) actual DOM/event-handler wiring against the live backend.
+- `0015`: replaces furikomi's raw-UUID destination entry with a human-readable account number
+  (3-digit branch code + 7-digit number) — `accountId` (UUID, ADR-0006 decision 2) stays the
+  sole canonical identifier; the number is a read-only alias added by a new `query-service`
+  binary (`account-number-projector`) that, like `0011`'s `owner_projector.rs`, subscribes only
+  to `account.event.Opened` and writes a dedicated small table (conditional-put-with-retry for
+  the number's uniqueness, deterministic hash-of-`account_id` for the branch — branch has no
+  per-branch business separation in this single-bank PoC, so it isn't part of the uniqueness
+  key). A new Lambda-less `AccountNumberQueryApi` (same GetItem/Query direct-integration pattern
+  as `0012`'s `TransferQueryApi`) exposes both lookup directions. `TransferForm.tsx`'s furikomi
+  path becomes branch-select + number-entry + explicit lookup/confirm (showing the resolved
+  owner name and branch) before submit; `startTransfer`'s wire request is unchanged. The
+  transfer entry point also gets a same-bank/other-bank branch — other-bank is a non-functional,
+  clearly-labeled placeholder only (no backend), leaving actual interbank connectivity as the
+  still-unstarted `production-readiness-matrix.md` D4 gap.
+- `0016`: replaces the dummy, unauthenticated sign-in (`web-ui/src/customerSession.ts`, deleted)
+  with real Amazon Cognito authentication, after manual testing surfaced that the account number
+  scheme (`0015`) was enumerable and the "add an existing account to my list" UI feature let
+  anyone attach any account UUID to their session with zero verification. A Cognito User Pool
+  (self-signup, username+password only, `PreSignUp` trigger auto-confirms — no email
+  verification) backs a `CognitoUserPoolsAuthorizer` required on every customer-facing endpoint
+  except Deposit/Withdraw (external channel, `0009` decision 1). `owner_id` is no longer
+  client-supplied: API Gateway VTL injects the verified JWT `sub` as `requested_by`;
+  account-service's `persistence::resolve_owner_id`/`is_ownership_violation` use it to source
+  `Open`'s owner and reject `Freeze`/`Unfreeze`/`Close` from a non-owner (new
+  `DomainError::NotOwner`, `account.rejection.NotOwner`, same ADR-0002 classification — no
+  `account-domain` changes). A new `CustomerAccountsTable` (populated by a `query-service`
+  projection subscribing only to `account.event.Opened`, same shape as `0011`'s
+  `owner_projector.rs`) backs a new `GET /customers/me/accounts` (ownerId from the JWT claim,
+  never client input) that replaces the deleted manual-add feature — accounts appear in the
+  owner's list automatically the moment they're opened. A new `auth-service` crate (depends only
+  on nothing account-related, `0003`'s crate-boundary philosophy) publishes
+  `auth.event.SignedUp`/`auth.event.SignedIn` straight to `domainEventBus` from Cognito's
+  `PostConfirmation`/`PostAuthentication` Lambda triggers — no DynamoDB outbox needed since the
+  trigger invocation itself is the source of truth; nothing subscribes to these two events yet
+  (documented as future work). Known residual gap (documented in the ADR's trade-offs): read-side
+  item-level authorization isn't implemented — an authenticated user who knows another customer's
+  `accountId` can still `GET /accounts/{id}` directly.
 
 ## Commands
 

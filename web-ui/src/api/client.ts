@@ -1,4 +1,13 @@
-import type { AccountView, CommandAcceptedResponse, FreezeReasonRequest, TransactionEntry, TransferStatusView } from "./types";
+import { getIdToken } from "../auth";
+import type {
+  AccountNumberLookup,
+  AccountView,
+  CommandAcceptedResponse,
+  FreezeReasonRequest,
+  MyAccount,
+  TransactionEntry,
+  TransferStatusView,
+} from "./types";
 
 // 相対パスのみを叩く。本番はCloudFrontのbehavior(/query-api/*, /command-api/*)、
 // ローカル開発はvite.config.tsのserver.proxyが、それぞれ実際のAPI Gatewayへ転送する
@@ -8,6 +17,8 @@ const COMMAND_API_BASE = "/command-api";
 // Transfer serviceの顧客向けAPI(docs/adr/0012決定5)。account-serviceのものとは別プレフィックス。
 const TRANSFER_QUERY_API_BASE = "/transfer-query-api";
 const TRANSFER_COMMAND_API_BASE = "/transfer-command-api";
+// 人間可読な口座番号(支店+7桁)の照会API(docs/adr/0015)。読み取り専用、他の2つとも別プレフィックス。
+const ACCOUNT_NUMBER_QUERY_API_BASE = "/account-number-query-api";
 
 // 画面にはHTTPステータスやレスポンス本文といった内部実装を一切出さず、業務的な文言だけを
 // 見せる。生の失敗内容は開発者向けにconsole.errorへ残す(このPoCにサーバーサイドの
@@ -27,6 +38,19 @@ const RETRY_BASE_DELAY_MS = 500;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * 顧客向けエンドポイント(docs/adr/0016決定2)にAuthorizationヘッダーを付ける。
+ * Deposit/Withdraw(外部チャネル、認証なし、ADR-0009決定1)にも同じ呼び出し経路
+ * (postCommand)を通すが、それらのAPI Gatewayリソースには元々Cognito Authorizerが
+ * 付いていないため、ヘッダーが付いていても付いていなくても影響しない。サインインして
+ * いなければ(getIdTokenがnullを返せば)何も付けず、保護されたエンドポイントは401になる
+ * ——これが「サインアウト状態」の実際の観測される挙動になる。
+ */
+async function authHeaders(): Promise<Record<string, string>> {
+  const token = await getIdToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 async function fetchOrThrow(input: string, init: RequestInit, businessMessage: string, logLabel: string): Promise<Response> {
@@ -66,6 +90,7 @@ async function postCommand(path: string, body?: unknown): Promise<CommandAccepte
         // 全コマンドで必須(ADR-0006決定3)。SQSのMessageDeduplicationIdにそのままマップされる。
         // fetchOrThrow内でのリトライはこの同一ヘッダーを使い回す。
         "Idempotency-Key": crypto.randomUUID(),
+        ...(await authHeaders()),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     },
@@ -76,12 +101,11 @@ async function postCommand(path: string, body?: unknown): Promise<CommandAccepte
 }
 
 /**
- * 口座IDはクライアント側で生成し、PUTで開設する(ADR-0006決定2)。
- * ownerIdはサインイン済み顧客名(customerSession.tsのgetSignedInCustomer)をそのまま渡す——
- * 振替(同一名義間)/振込(名義不一致)をサーバ側で判定するための実データ(docs/adr/0011)。
- * ダミーサインインの値をそのまま使うだけで、新しい入力項目や認証機構を追加するものではない。
+ * 口座IDはクライアント側で生成し、PUTで開設する(ADR-0006決定2)。owner_idはリクエストに
+ * 含めない——サーバー側がCognito認証済みユーザーのsubを使う(docs/adr/0016決定3)。
+ * クライアントが自称するownerIdは(以前は存在したが)もう信用されない。
  */
-export async function openAccount(ownerId: string, initialBalance: string): Promise<CommandAcceptedResponse> {
+export async function openAccount(initialBalance: string): Promise<CommandAcceptedResponse> {
   const accountId = crypto.randomUUID();
   const response = await fetchOrThrow(
     `${COMMAND_API_BASE}/accounts/${accountId}`,
@@ -90,8 +114,9 @@ export async function openAccount(ownerId: string, initialBalance: string): Prom
       headers: {
         "Content-Type": "application/json",
         "Idempotency-Key": crypto.randomUUID(),
+        ...(await authHeaders()),
       },
-      body: JSON.stringify({ owner_id: ownerId, initial_balance: initialBalance }),
+      body: JSON.stringify({ initial_balance: initialBalance }),
     },
     COMMAND_FAILURE_MESSAGE,
     "openAccount",
@@ -123,7 +148,7 @@ export function closeAccount(accountId: string): Promise<CommandAcceptedResponse
 export async function getAccount(accountId: string): Promise<AccountView | null> {
   let response: Response;
   try {
-    response = await fetch(`${QUERY_API_BASE}/accounts/${accountId}`);
+    response = await fetch(`${QUERY_API_BASE}/accounts/${accountId}`, { headers: await authHeaders() });
   } catch (cause) {
     console.error("getAccount: network error", cause);
     throw new Error(QUERY_FAILURE_MESSAGE);
@@ -142,11 +167,27 @@ export async function getAccount(accountId: string): Promise<AccountView | null>
 export async function getTransactionHistory(accountId: string): Promise<TransactionEntry[]> {
   const response = await fetchOrThrow(
     `${QUERY_API_BASE}/accounts/${accountId}/transactions`,
-    {},
+    { headers: await authHeaders() },
     QUERY_FAILURE_MESSAGE,
     "getTransactionHistory",
   );
   return response.json() as Promise<TransactionEntry[]>;
+}
+
+/**
+ * サインイン中の顧客が開設した口座の一覧(docs/adr/0016決定4)。ownerIdはリクエストに
+ * 含めない——API Gateway側がCognito JWTのsubクレームから直接引く(`$context.authorizer.claims.sub`)
+ * ため、他人の一覧を指定する余地自体がない。口座開設直後はcustomer-accounts-projectorの
+ * 反映待ちで、新しい口座がまだ現れないことがある(結果整合性、他の投影と同じ扱い)。
+ */
+export async function getMyAccounts(): Promise<MyAccount[]> {
+  const response = await fetchOrThrow(
+    `${QUERY_API_BASE}/customers/me/accounts`,
+    { headers: await authHeaders() },
+    QUERY_FAILURE_MESSAGE,
+    "getMyAccounts",
+  );
+  return response.json() as Promise<MyAccount[]>;
 }
 
 /**
@@ -163,7 +204,7 @@ async function transferCommand(method: string, path: string, body?: unknown): Pr
     `${TRANSFER_COMMAND_API_BASE}${path}`,
     {
       method,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...(await authHeaders()) },
       body: body === undefined ? undefined : JSON.stringify(body),
     },
     COMMAND_FAILURE_MESSAGE,
@@ -207,7 +248,7 @@ export function recallTransfer(transferId: string, originalTransferId: string): 
 export async function getTransferStatus(transferId: string): Promise<TransferStatusView | null> {
   let response: Response;
   try {
-    response = await fetch(`${TRANSFER_QUERY_API_BASE}/transfers/${transferId}`);
+    response = await fetch(`${TRANSFER_QUERY_API_BASE}/transfers/${transferId}`, { headers: await authHeaders() });
   } catch (cause) {
     console.error("getTransferStatus: network error", cause);
     throw new Error(QUERY_FAILURE_MESSAGE);
@@ -220,4 +261,56 @@ export async function getTransferStatus(transferId: string): Promise<TransferSta
     throw new Error(QUERY_FAILURE_MESSAGE);
   }
   return response.json() as Promise<TransferStatusView>;
+}
+
+/**
+ * 口座番号(支店+7桁、docs/adr/0015)から口座を解決する。振込(furikomi)の宛先入力で、顧客が
+ * 入力した口座番号から実際のaccountIdを引くために使う。見つからない場合は`null`
+ * (`getAccount`/`getTransferStatus`と同じ404変換 — 誤入力なのかまだ反映されていないだけ
+ * なのかはここでは区別しない)。
+ */
+export async function lookupAccountByNumber(accountNumber: string): Promise<AccountNumberLookup | null> {
+  let response: Response;
+  try {
+    response = await fetch(`${ACCOUNT_NUMBER_QUERY_API_BASE}/account-numbers/${accountNumber}`, {
+      headers: await authHeaders(),
+    });
+  } catch (cause) {
+    console.error("lookupAccountByNumber: network error", cause);
+    throw new Error(QUERY_FAILURE_MESSAGE);
+  }
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    console.error(`lookupAccountByNumber: ${response.status} ${await response.text()}`);
+    throw new Error(QUERY_FAILURE_MESSAGE);
+  }
+  return response.json() as Promise<AccountNumberLookup>;
+}
+
+/**
+ * accountIdから、自分の口座番号(支店+7桁)を逆引きする(docs/adr/0015)。口座開設直後は
+ * まだ`account-number-projector`が反映していないことがあり、その間は404を返す——`AccountView`
+ * が口座本体のデータについて既にしている「反映待ちは失敗ではない」の扱いと同じく、`null`は
+ * 呼び出し側で穏やかな「確認中」表示に変換する。
+ */
+export async function getAccountNumber(accountId: string): Promise<AccountNumberLookup | null> {
+  let response: Response;
+  try {
+    response = await fetch(`${ACCOUNT_NUMBER_QUERY_API_BASE}/accounts/${accountId}/account-number`, {
+      headers: await authHeaders(),
+    });
+  } catch (cause) {
+    console.error("getAccountNumber: network error", cause);
+    throw new Error(QUERY_FAILURE_MESSAGE);
+  }
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    console.error(`getAccountNumber: ${response.status} ${await response.text()}`);
+    throw new Error(QUERY_FAILURE_MESSAGE);
+  }
+  return response.json() as Promise<AccountNumberLookup>;
 }

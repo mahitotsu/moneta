@@ -70,7 +70,8 @@ describe("AccountPipelineStack", () => {
   // ロールバック後の再デプロイが「テーブルは既に存在する」で失敗した(TransferSagaTable)。
   // 全てのDynamoDBテーブルがこの落とし穴を回避できているかを固定する回帰テスト
   // (docs/adr/0011でTransferAccountOwnersTableを、docs/adr/0013でaccount-service自身の
-  // 3テーブルを、docs/adr/0012でTransferStatusViewTableを追加)。
+  // 3テーブルを、docs/adr/0012でTransferStatusViewTableを、docs/adr/0015でAccountNumbersTable
+  // を追加)。
   test("all DynamoDB tables are set to DESTROY on stack/changeset rollback, not the RETAIN default", () => {
     const tables = template.findResources("AWS::DynamoDB::Table");
     const tableNames = Object.values(tables).map((table) => table.Properties.TableName);
@@ -78,8 +79,10 @@ describe("AccountPipelineStack", () => {
       [
         "moneta-account-events",
         "moneta-account-history",
+        "moneta-account-numbers",
         "moneta-account-views",
         "moneta-accounts",
+        "moneta-customer-accounts",
         "moneta-processed-messages",
         "moneta-transfer-account-owners",
         "moneta-transfer-sagas",
@@ -124,8 +127,19 @@ describe("AccountPipelineStack", () => {
     });
   });
 
-  test("creates exactly nine Lambda functions: write path, outbox projector, query projector, the four transfer-service functions (command intake, saga step, owner projector, status projector), and the two Web UI hosting custom-resource handlers (S3 auto-delete-objects, BucketDeployment sync)", () => {
-    template.resourceCountIs("AWS::Lambda::Function", 9);
+  test("creates exactly fourteen Lambda functions: write path, outbox projector, query projector, account number projector, customer accounts projector, the three auth-service functions (pre sign-up, post confirmation, post authentication), the four transfer-service functions (command intake, saga step, owner projector, status projector), and the two Web UI hosting custom-resource handlers (S3 auto-delete-objects, BucketDeployment sync)", () => {
+    template.resourceCountIs("AWS::Lambda::Function", 14);
+  });
+
+  // docs/adr/0015: owner_projector.rs(docs/adr/0011)と同じ理由でaccount.event.Openedのみ
+  // 購読する(口座番号は不変データなので、開設イベント以外を見る必要がない)。
+  test("account number projector subscribes only to account.event.Opened", () => {
+    template.hasResourceProperties("AWS::Events::Rule", {
+      EventPattern: {
+        source: ["account-service"],
+        "detail-type": ["account.event.Opened"],
+      },
+    });
   });
 
   // docs/adr/0013: grantReadWriteData()はdynamodb:TransactWriteItemsを含まないため
@@ -198,6 +212,59 @@ describe("AccountPipelineStack", () => {
         { AttributeName: "accountId", KeyType: "HASH" },
         { AttributeName: "sk", KeyType: "RANGE" },
       ],
+    });
+  });
+
+  // docs/adr/0015: 口座番号(PK)↔accountId(GSI)を両方向で引けることを固定する。
+  test("creates the account numbers table with a byAccountId GSI for the reverse lookup", () => {
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      TableName: "moneta-account-numbers",
+      BillingMode: "PAY_PER_REQUEST",
+      KeySchema: [{ AttributeName: "accountNumber", KeyType: "HASH" }],
+      GlobalSecondaryIndexes: Match.arrayWith([
+        Match.objectLike({
+          IndexName: "byAccountId",
+          KeySchema: [{ AttributeName: "accountId", KeyType: "HASH" }],
+          Projection: { ProjectionType: "ALL" },
+        }),
+      ]),
+    });
+  });
+
+  test("exposes GET /account-numbers/{accountNumber} as a direct DynamoDB GetItem integration", () => {
+    template.hasResourceProperties("AWS::ApiGateway::Method", {
+      HttpMethod: "GET",
+      Integration: Match.objectLike({
+        Type: "AWS",
+        IntegrationHttpMethod: "POST",
+        RequestTemplates: Match.objectLike({
+          "application/json": Match.objectLike({
+            "Fn::Join": Match.arrayWith([
+              Match.arrayWith([Match.stringLikeRegexp("TableName"), Match.stringLikeRegexp("accountNumber")]),
+            ]),
+          }),
+        }),
+      }),
+    });
+  });
+
+  // 取引履歴API(178行目)と同じ判定手法: Uriの末尾がaction/Queryかどうかで、GetItem統合の
+  // GET /account-numbers/{accountNumber}と区別する。
+  test("exposes GET /accounts/{accountId}/account-number as a direct DynamoDB Query integration against the byAccountId GSI", () => {
+    template.hasResourceProperties("AWS::ApiGateway::Method", {
+      HttpMethod: "GET",
+      Integration: Match.objectLike({
+        Type: "AWS",
+        IntegrationHttpMethod: "POST",
+        Uri: Match.objectLike({
+          "Fn::Join": Match.arrayWith([Match.arrayWith([Match.stringLikeRegexp("action/Query$")])]),
+        }),
+        RequestTemplates: Match.objectLike({
+          "application/json": Match.objectLike({
+            "Fn::Join": Match.arrayWith([Match.arrayWith([Match.stringLikeRegexp("byAccountId")])]),
+          }),
+        }),
+      }),
     });
   });
 
@@ -332,6 +399,19 @@ describe("AccountPipelineStack", () => {
     });
   });
 
+  test("routes /account-number-query-api/* to the account number query REST API (docs/adr/0015)", () => {
+    template.hasResourceProperties("AWS::CloudFront::Distribution", {
+      DistributionConfig: Match.objectLike({
+        CacheBehaviors: Match.arrayWith([
+          Match.objectLike({
+            PathPattern: "/account-number-query-api/*",
+            FunctionAssociations: Match.arrayWith([Match.objectLike({ EventType: "viewer-request" })]),
+          }),
+        ]),
+      }),
+    });
+  });
+
   // docs/adr/0006決定5: 金額の精度は小数点以下2桁まで(実デプロイでDBラウンドトリップ由来の
   // スケールのブレを発見したことを契機に、APIの仕様として明示した)。3桁以上はAPI Gatewayの
   // リクエスト検証で構造的に拒否する(account-domainのAMOUNT_DECIMAL_PLACESと合わせる)。
@@ -359,20 +439,18 @@ describe("AccountPipelineStack", () => {
   // から始まるため、CloudFrontのcache behavior(パスのみで振り分け)では区別できない——
   // /query-api・/command-apiというprefix + CloudFront Functionによるprefix剥がしで
   // 区別している、という設計の要である振り分けが実際に合成されることを確認する。
-  test("routes /query-api/* and /command-api/* to their respective REST APIs with caching disabled", () => {
+  test("routes /query-api/* and /command-api/* to their respective REST APIs", () => {
     template.hasResourceProperties("AWS::CloudFront::Distribution", {
       DistributionConfig: Match.objectLike({
         CacheBehaviors: Match.arrayWith([
           Match.objectLike({
             PathPattern: "/query-api/*",
-            CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", // AWS managed: CachingDisabled
             FunctionAssociations: Match.arrayWith([
               Match.objectLike({ EventType: "viewer-request" }),
             ]),
           }),
           Match.objectLike({
             PathPattern: "/command-api/*",
-            CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
             FunctionAssociations: Match.arrayWith([
               Match.objectLike({ EventType: "viewer-request" }),
             ]),
@@ -403,5 +481,151 @@ describe("AccountPipelineStack", () => {
         RestrictPublicBuckets: true,
       },
     });
+  });
+
+  // --- docs/adr/0016: Amazon Cognitoによる実認証 ----------------------------
+
+  test("Cognito User Pool allows self-signup and wires PreSignUp/PostConfirmation/PostAuthentication triggers", () => {
+    template.resourceCountIs("AWS::Cognito::UserPool", 1);
+    template.hasResourceProperties("AWS::Cognito::UserPool", {
+      AdminCreateUserConfig: Match.objectLike({ AllowAdminCreateUserOnly: false }),
+      LambdaConfig: Match.objectLike({
+        PreSignUp: Match.anyValue(),
+        PostConfirmation: Match.anyValue(),
+        PostAuthentication: Match.anyValue(),
+      }),
+    });
+  });
+
+  test("Cognito User Pool Client uses USER_PASSWORD_AUTH (docs/adr/0016決定1のトレードオフ)", () => {
+    template.hasResourceProperties("AWS::Cognito::UserPoolClient", {
+      ExplicitAuthFlows: Match.arrayWith(["ALLOW_USER_PASSWORD_AUTH"]),
+      GenerateSecret: false,
+    });
+  });
+
+  // CDKのCognitoUserPoolsAuthorizerは1つのインスタンスを複数のRestApiへまたがって使うと
+  // "Cannot attach authorizer to two different rest APIs"でsynth自体が失敗する(cdk synth時点で
+  // 判明した実際の制約)。5つのRestApi(AccountQueryApi・AccountCommandApi・TransferQueryApi・
+  // TransferCommandApi・AccountNumberQueryApi)それぞれに1つずつ、同じuserPoolを指す別々の
+  // Authorizerリソースを持つ。
+  test("one Cognito User Pools authorizer per protected REST API (5 total), all backed by the same User Pool", () => {
+    const authorizers = template.findResources("AWS::ApiGateway::Authorizer");
+    const values = Object.values(authorizers);
+    expect(values).toHaveLength(5);
+    for (const authorizer of values) {
+      expect(authorizer.Properties.Type).toBe("COGNITO_USER_POOLS");
+    }
+    const userPoolRefs = new Set(
+      values.map((a) => JSON.stringify(a.Properties.ProviderARNs)),
+    );
+    // 全AuthorizerのProviderARNsが同じUser Poolを指している(別々のUser Poolを誤って
+    // 作っていないことの確認)。
+    expect(userPoolRefs.size).toBe(1);
+  });
+
+  // docs/adr/0016決定2: Deposit/Withdraw(外部チャネル、ADR-0009決定1)だけは認証を要求しない。
+  // それ以外の全メソッド(15個中13個 + 新設のGET /customers/me/accounts = 14個)は
+  // Cognito認証必須にする——この非対称こそが今回の変更の核心なので、個数を固定する。
+  test("14 of 16 API methods require Cognito auth; Deposit/Withdraw are the only two exceptions", () => {
+    const methods = template.findResources("AWS::ApiGateway::Method");
+    const allMethods = Object.values(methods);
+    const authorized = allMethods.filter((m) => m.Properties?.AuthorizationType === "COGNITO_USER_POOLS");
+    const unauthorized = allMethods.filter((m) => m.Properties?.AuthorizationType !== "COGNITO_USER_POOLS");
+
+    expect(allMethods).toHaveLength(16);
+    expect(authorized).toHaveLength(14);
+    expect(unauthorized).toHaveLength(2);
+    // 認証なしの2つが、まさにdeposits/withdrawalsのSQS統合であることを確認する
+    // (Uriにキューの論理IDが現れる、既存のtransfer command API判定テストと同じ手法)。
+    for (const method of unauthorized) {
+      expect(JSON.stringify(method.Properties?.Integration?.Uri ?? "")).toContain("AccountCommandQueue");
+    }
+  });
+
+  test("creates the customer accounts table (docs/adr/0016決定4) keyed by ownerId+accountId", () => {
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      TableName: "moneta-customer-accounts",
+      BillingMode: "PAY_PER_REQUEST",
+      KeySchema: [
+        { AttributeName: "ownerId", KeyType: "HASH" },
+        { AttributeName: "accountId", KeyType: "RANGE" },
+      ],
+    });
+  });
+
+  test("customer accounts projector subscribes only to account.event.Opened (same reasoning as owner_projector.rs/account_number_projector.rs)", () => {
+    template.hasResourceProperties("AWS::Events::Rule", {
+      EventPattern: {
+        source: ["account-service"],
+        "detail-type": ["account.event.Opened"],
+      },
+    });
+  });
+
+  test("exposes GET /customers/me/accounts as a direct DynamoDB Query integration keyed off the Cognito sub claim, not a client-supplied ownerId", () => {
+    template.hasResourceProperties("AWS::ApiGateway::Method", {
+      HttpMethod: "GET",
+      AuthorizationType: "COGNITO_USER_POOLS",
+      Integration: Match.objectLike({
+        Type: "AWS",
+        IntegrationHttpMethod: "POST",
+        Uri: Match.objectLike({
+          "Fn::Join": Match.arrayWith([Match.arrayWith([Match.stringLikeRegexp("action/Query$")])]),
+        }),
+        RequestTemplates: Match.objectLike({
+          "application/json": Match.objectLike({
+            "Fn::Join": Match.arrayWith([
+              Match.arrayWith([Match.stringLikeRegexp("authorizer\\.claims\\.sub")]),
+            ]),
+          }),
+        }),
+      }),
+    });
+  });
+
+  // docs/adr/0016: CloudFrontはOriginRequestPolicyのallowListにAuthorizationを含めることを
+  // 拒否する("you cannot pass `Authorization`..."、cdk synth時点で判明)——CachePolicy側の
+  // headerBehaviorでのみ転送できる。さらにTTLを全て0(=CACHING_DISABLED相当)にすると
+  // 今度は実機デプロイ時点で"HeaderBehavior is invalid for policy with caching disabled"を
+  // 返される(cdk synthは通るが実デプロイで判明)ため、1秒だけTTLを持たせている——結果整合性の
+  // 最大約1分のラグを既に許容しているこのシステムからすれば無視できる窓であり、ADR-0007が
+  // 意図した「結果整合性のあるレスポンスをCDNにキャッシュさせない」という性質を実質的に保つ。
+  test("forwards the Authorization header to every customer-facing API origin via a near-zero-TTL CachePolicy (not OriginRequestPolicy)", () => {
+    template.hasResourceProperties("AWS::CloudFront::CachePolicy", {
+      CachePolicyConfig: Match.objectLike({
+        DefaultTTL: 1,
+        MinTTL: 0,
+        MaxTTL: 1,
+        ParametersInCacheKeyAndForwardedToOrigin: Match.objectLike({
+          HeadersConfig: {
+            HeaderBehavior: "whitelist",
+            Headers: ["Authorization"],
+          },
+        }),
+      }),
+    });
+    // どのOriginRequestPolicyにもAuthorizationが紛れ込んでいないこと(CloudFront自体が拒否する
+    // ため通常起こり得ないが、意図の固定として)。
+    const originRequestPolicies = template.findResources("AWS::CloudFront::OriginRequestPolicy");
+    for (const policy of Object.values(originRequestPolicies)) {
+      const headers = policy.Properties?.OriginRequestPolicyConfig?.HeadersConfig?.Headers ?? [];
+      expect(headers).not.toContain("Authorization");
+    }
+  });
+
+  test("all 5 customer-facing CloudFront behaviors use the Authorization-forwarding CachePolicy, not the AWS-managed CachingDisabled policy", () => {
+    const distributions = template.findResources("AWS::CloudFront::Distribution");
+    const [distribution] = Object.values(distributions);
+    const behaviors = distribution.Properties.DistributionConfig.CacheBehaviors as { PathPattern: string; CachePolicyId: unknown }[];
+    const apiBehaviors = behaviors.filter((b) =>
+      ["/query-api/*", "/command-api/*", "/transfer-query-api/*", "/transfer-command-api/*", "/account-number-query-api/*"].includes(
+        b.PathPattern,
+      ),
+    );
+    expect(apiBehaviors).toHaveLength(5);
+    for (const behavior of apiBehaviors) {
+      expect(JSON.stringify(behavior.CachePolicyId)).not.toContain("4135ea2d-6df8-44a3-9df3-4b5a84be39ad");
+    }
   });
 });

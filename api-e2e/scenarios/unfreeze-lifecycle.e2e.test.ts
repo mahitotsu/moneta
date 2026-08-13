@@ -10,14 +10,17 @@ import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { waitFor } from "../support/poll";
 import { openFreshAccount, waitForStatus } from "../support/testAccount";
+import { signUpAndSignIn } from "../support/auth";
 
 describe("A7: 凍結解除後は再度操作可能になる", () => {
   it(
     "凍結 → 凍結解除 → 入金が成功し、残高が増加する",
     async () => {
       const outputs = await fetchStackOutputs();
-      const commandApi = createCommandApi(outputs.commandApiUrl);
-      const queryApi = createQueryApi(outputs.queryApiUrl);
+      // Freeze/Unfreezeは口座を開いた識別子と同じでなければならない(docs/adr/0016決定3)。
+      const identity = await signUpAndSignIn(outputs.userPoolClientId);
+      const commandApi = createCommandApi(outputs.commandApiUrl, identity.idToken);
+      const queryApi = createQueryApi(outputs.queryApiUrl, identity.idToken);
       const accountId = await openFreshAccount(commandApi, queryApi, "100");
 
       await commandApi.freeze(accountId, "CustomerRequest");

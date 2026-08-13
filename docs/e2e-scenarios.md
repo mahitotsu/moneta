@@ -24,7 +24,8 @@
 
 ## アクター
 
-- **顧客** (`CustomerFlow.tsx`、ダミーサインイン): 口座一覧・残高・履歴閲覧、凍結/凍結解除/解約。
+- **顧客** (`CustomerFlow.tsx`、Amazon Cognitoによる実サインアップ/サインイン、`docs/adr/0016`):
+  口座一覧・残高・履歴閲覧、凍結/凍結解除/解約。
 - **外部チャネル** (`ChannelEmulatorScreen.tsx`、サインイン不要): ATM入出金、他行からの振込、収納機関への支払い。
   中身は`Deposit`/`Withdraw`コマンドそのもの。
 - **APIクライアント(生)**: UIを介さず`Idempotency-Key`等を直接制御してコマンドAPI/照会APIを呼ぶ。
@@ -165,6 +166,40 @@ Startは202を返しサガが作られないため、エラー表示ではなく
 ADR-0012決定6の既存トレードオフ(結果整合性のラグと真に存在しないIDを区別しない)の延長。
 小数点3桁以上の`InvalidAmountPrecision`はAPIGWの構造検証が先に4xx拒否するためE2E到達不能。
 FC7と同じ理由で単体テストのみに留める)
+
+**FC16: 人間可読な口座番号(支店+7桁)からの宛先解決**
+Given `Active`な口座
+When 口座開設から十分な時間が経ってから`GET /accounts/{accountId}/account-number`を呼ぶ
+Then 最終的に支店(3桁)+口座番号(7桁)が返る。その口座番号で`GET /account-numbers/{accountNumber}`
+を呼ぶと同じ`accountId`・`ownerId`・`branchCode`へ解決する。同じ`accountId`に対して繰り返し
+呼んでも常に同じ支店が返る(決定的割り当て)。存在しない口座番号は404になる
+→ [[0015-friendly-account-numbers-and-branch-and-other-bank-placeholder]]決定2〜4 — **P1** —
+`account-number.e2e.test.ts`
+
+**FC17: 振込の自行/他行分岐 — 他行は非機能なプレースホルダ**
+Given 顧客としてサインイン、口座を1つ以上保有
+When 「送金」タブから「振込(他行あて)」を選ぶ
+Then バックエンド呼び出しは一切発生せず、「サポートしておりません」という案内文のみが表示される
+(振替/振込の既存フォームとは排他的に切り替わる)
+→ [[0015-friendly-account-numbers-and-branch-and-other-bank-placeholder]]決定7 — **P2・UI固有の
+主張のためコンポーネント単体テスト(`TransferListScreen.test.tsx`)で検証、api-e2eのHTTPベースの
+ハーネスでは検証できない(FC9と同じ理由)** — `TransferListScreen.test.tsx`・
+`ui-e2e/scenarios/transfer-other-bank.spec.ts`
+
+**FC18: Amazon Cognitoによる実認証 — サインアップ/サインイン/認可の境界**
+Given 未登録のユーザー名+8文字以上のパスワード
+When ユーザー名+パスワードでセルフサインアップする
+Then 確認コード入力なしに即座にサインイン済みになる(`PreSignUp`トリガーが自動確認)。
+その認証済み識別子で口座を開設すると`owner_id`はJWTの`sub`から決まり(リクエストボディの
+自己申告は無視される)、`GET /customers/me/accounts`は開設したその口座だけを返す——手動で
+「一覧に追加」する操作はもう存在しない。認証情報の無いリクエストは保護対象の全エンドポイント
+(`Deposit`/`Withdraw`を除く)で`401`になる。誤ったユーザー名/パスワードでのサインインは
+業務的な文言のみを表示し、Cognitoの内部例外名を画面に一切出さない
+→ [[0016-cognito-authentication]]決定1〜4 — **P0** — `auth.e2e.test.ts`(HTTPレベル:
+`GET /customers/me/accounts`が自分の口座だけを返すこと、保護エンドポイントの401、
+Deposit/Withdrawの無認証継続)・`ui-e2e/scenarios/auth.spec.ts`(実サインアップ/サインイン
+画面のDOM配線、開設した口座が手入力なしに一覧へ自動的に現れること、誤った認証情報での
+エラー表示)
 
 ---
 

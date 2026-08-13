@@ -19,6 +19,14 @@ export interface TransactionEntry {
   reason: FreezeReasonView | null;
 }
 
+// `GET /customers/me/accounts`のレスポンス配列の要素(docs/adr/0016決定4)。ownerIdはCognito
+// JWTのsubクレームから常にサーバー側で決まるため、レスポンス自体には含まれない
+// (web-ui/src/api/types.tsのMyAccountと同じ形)。
+export interface MyAccountEntry {
+  accountId: string;
+  openedAt: string;
+}
+
 export interface RawResponse<T = unknown> {
   status: number;
   body: T;
@@ -34,8 +42,16 @@ export async function rawRequest<T = unknown>(url: string, init: RequestInit = {
   return { status: response.status, body };
 }
 
-function jsonHeaders(idempotencyKey?: string): Record<string, string> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+// 顧客向けエンドポイント(docs/adr/0016決定2)向けのAuthorizationヘッダー。`idToken`未指定なら
+// 何も付けない——意図的に未認証のリクエストを送りたい呼び出し側(認可エンドポイントの401検証、
+// Deposit/Withdrawのような元々認証不要なエンドポイント)のために、必須ではなくオプショナルに
+// している。web-ui/src/api/client.tsのauthHeaders()と同じ形。
+export function authHeaders(idToken?: string): Record<string, string> {
+  return idToken !== undefined ? { Authorization: `Bearer ${idToken}` } : {};
+}
+
+function jsonHeaders(idToken?: string, idempotencyKey?: string): Record<string, string> {
+  const headers: Record<string, string> = { "Content-Type": "application/json", ...authHeaders(idToken) };
   if (idempotencyKey !== undefined) {
     headers["Idempotency-Key"] = idempotencyKey;
   }
@@ -43,9 +59,7 @@ function jsonHeaders(idempotencyKey?: string): Record<string, string> {
 }
 
 export interface CommandApi {
-  // ownerId: docs/adr/0011。省略時は固定のダミー顧客名を使う(このハーネスはowner_idの
-  // 中身自体を検証対象にしていないシナリオが大半のため、既存の呼び出し箇所を壊さない)。
-  openAccount(accountId: string, initialBalance: string, ownerId?: string, idempotencyKey?: string): Promise<RawResponse>;
+  openAccount(accountId: string, initialBalance: string, idempotencyKey?: string): Promise<RawResponse>;
   deposit(accountId: string, amount: string, idempotencyKey?: string): Promise<RawResponse>;
   withdraw(accountId: string, amount: string, idempotencyKey?: string): Promise<RawResponse>;
   freeze(accountId: string, reason: FreezeReasonRequest, idempotencyKey?: string): Promise<RawResponse>;
@@ -56,41 +70,49 @@ export interface CommandApi {
 // `idempotencyKey` defaults to a fresh UUID per call (matching web-ui's behavior of one key
 // per distinct customer action, docs/adr/0006決定3) but can be pinned by scenarios that need
 // to force a specific dedup/omission case (E1 in docs/e2e-scenarios.md, 旧C1/C2).
-export function createCommandApi(baseUrl: string): CommandApi {
+//
+// `idToken`(docs/adr/0016決定2)は省略可能——Deposit/Withdrawは外部チャネルとして引き続き
+// 認証不要(ADR-0009決定1)なままなので付けなくても動くが、付けても害はない(それらの
+// リソースにはそもそもCognito Authorizerが付いていない)。Open/Freeze/Unfreeze/Closeは省略すると
+// 401になる。openAccount()はもはやowner_idをリクエストボディに含めない——OpenCommandModelが
+// `additionalProperties: false`かつowner_idをプロパティとして持たなくなった(VTLが
+// `$context.authorizer.claims.sub`を直接使う、docs/adr/0016決定3)ため、ボディに含めると
+// むしろAPIGWのリクエスト検証で拒否される。
+export function createCommandApi(baseUrl: string, idToken?: string): CommandApi {
   return {
-    openAccount: (accountId, initialBalance, ownerId = "e2e-test-customer", idempotencyKey = crypto.randomUUID()) =>
+    openAccount: (accountId, initialBalance, idempotencyKey = crypto.randomUUID()) =>
       rawRequest(`${baseUrl}/accounts/${accountId}`, {
         method: "PUT",
-        headers: jsonHeaders(idempotencyKey),
-        body: JSON.stringify({ owner_id: ownerId, initial_balance: initialBalance }),
+        headers: jsonHeaders(idToken, idempotencyKey),
+        body: JSON.stringify({ initial_balance: initialBalance }),
       }),
     deposit: (accountId, amount, idempotencyKey = crypto.randomUUID()) =>
       rawRequest(`${baseUrl}/accounts/${accountId}/deposits`, {
         method: "POST",
-        headers: jsonHeaders(idempotencyKey),
+        headers: jsonHeaders(idToken, idempotencyKey),
         body: JSON.stringify({ amount }),
       }),
     withdraw: (accountId, amount, idempotencyKey = crypto.randomUUID()) =>
       rawRequest(`${baseUrl}/accounts/${accountId}/withdrawals`, {
         method: "POST",
-        headers: jsonHeaders(idempotencyKey),
+        headers: jsonHeaders(idToken, idempotencyKey),
         body: JSON.stringify({ amount }),
       }),
     freeze: (accountId, reason, idempotencyKey = crypto.randomUUID()) =>
       rawRequest(`${baseUrl}/accounts/${accountId}/freeze`, {
         method: "POST",
-        headers: jsonHeaders(idempotencyKey),
+        headers: jsonHeaders(idToken, idempotencyKey),
         body: JSON.stringify({ reason }),
       }),
     unfreeze: (accountId, idempotencyKey = crypto.randomUUID()) =>
       rawRequest(`${baseUrl}/accounts/${accountId}/unfreeze`, {
         method: "POST",
-        headers: jsonHeaders(idempotencyKey),
+        headers: jsonHeaders(idToken, idempotencyKey),
       }),
     close: (accountId, idempotencyKey = crypto.randomUUID()) =>
       rawRequest(`${baseUrl}/accounts/${accountId}/close`, {
         method: "POST",
-        headers: jsonHeaders(idempotencyKey),
+        headers: jsonHeaders(idToken, idempotencyKey),
       }),
   };
 }
@@ -98,12 +120,15 @@ export function createCommandApi(baseUrl: string): CommandApi {
 export interface QueryApi {
   getAccount(accountId: string): Promise<AccountView | null>;
   getTransactionHistory(accountId: string): Promise<TransactionEntry[]>;
+  getMyAccounts(): Promise<MyAccountEntry[]>;
 }
 
-export function createQueryApi(baseUrl: string): QueryApi {
+// `idToken`省略時は無認証でリクエストする(docs/adr/0016決定2の401挙動をscenarios/auth.e2e.test.ts
+// が直接検証するために使う)。
+export function createQueryApi(baseUrl: string, idToken?: string): QueryApi {
   return {
     getAccount: async (accountId) => {
-      const response = await rawRequest<AccountView>(`${baseUrl}/accounts/${accountId}`);
+      const response = await rawRequest<AccountView>(`${baseUrl}/accounts/${accountId}`, { headers: authHeaders(idToken) });
       if (response.status === 404) return null;
       if (response.status !== 200) {
         throw new Error(`getAccount(${accountId}) unexpected status ${response.status}: ${JSON.stringify(response.body)}`);
@@ -111,9 +136,20 @@ export function createQueryApi(baseUrl: string): QueryApi {
       return response.body;
     },
     getTransactionHistory: async (accountId) => {
-      const response = await rawRequest<TransactionEntry[]>(`${baseUrl}/accounts/${accountId}/transactions`);
+      const response = await rawRequest<TransactionEntry[]>(`${baseUrl}/accounts/${accountId}/transactions`, {
+        headers: authHeaders(idToken),
+      });
       if (response.status !== 200) {
         throw new Error(`getTransactionHistory(${accountId}) unexpected status ${response.status}: ${JSON.stringify(response.body)}`);
+      }
+      return response.body;
+    },
+    getMyAccounts: async () => {
+      const response = await rawRequest<MyAccountEntry[]>(`${baseUrl}/customers/me/accounts`, {
+        headers: authHeaders(idToken),
+      });
+      if (response.status !== 200) {
+        throw new Error(`getMyAccounts() unexpected status ${response.status}: ${JSON.stringify(response.body)}`);
       }
       return response.body;
     },

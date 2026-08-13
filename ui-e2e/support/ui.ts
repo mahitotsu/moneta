@@ -21,13 +21,20 @@ export async function startFurikae(
   await page.getByRole("button", { name: "振替を実行する" }).click();
 }
 
+// 送金先は支店選択+口座番号入力+検索確認という4ステップ(docs/adr/0015決定6)。呼び出し側は
+// あらかじめsupport/accountNumber.tsのwaitForAccountNumberで宛先のbranchCode/accountNumberを
+// 解決しておく(furikaeが自分の口座一覧から選ぶのと同じく、送金先の識別はこのヘルパーの外側の
+// 関心事)。
 export async function startFurikomi(
   page: Page,
-  params: { fromAccountId: string; toAccountId: string; amount: string },
+  params: { fromAccountId: string; branchCode: string; accountNumber: string; amount: string },
 ): Promise<void> {
   await page.getByRole("button", { name: "振込", exact: true }).click();
   await page.getByLabel("送金元の口座").selectOption({ value: params.fromAccountId });
-  await page.getByLabel("送金先の口座ID").fill(params.toAccountId);
+  await page.getByLabel("送金先の支店").selectOption({ value: params.branchCode });
+  await page.getByLabel("送金先の口座番号").fill(params.accountNumber);
+  await page.getByRole("button", { name: "確認する" }).click();
+  await expect(page.getByText(/宛先名義:/)).toBeVisible();
   await page.getByLabel("金額").fill(params.amount);
   await page.getByRole("button", { name: "振込を依頼する" }).click();
 }

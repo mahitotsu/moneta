@@ -9,14 +9,16 @@ import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { waitFor } from "../support/poll";
 import { openFreshAccount } from "../support/testAccount";
 import { waitForMatchingMessage } from "../support/dlq";
+import { signUpAndSignIn } from "../support/auth";
 
 describe("E1: 無関係な口座は互いに影響しない", () => {
   it(
     "不正なaccountIdへの操作が持続的に失敗していても、別口座への入金は通常通り反映される",
     async () => {
       const outputs = await fetchStackOutputs();
-      const commandApi = createCommandApi(outputs.commandApiUrl);
-      const queryApi = createQueryApi(outputs.queryApiUrl);
+      const identity = await signUpAndSignIn(outputs.userPoolClientId);
+      const commandApi = createCommandApi(outputs.commandApiUrl, identity.idToken);
+      const queryApi = createQueryApi(outputs.queryApiUrl, identity.idToken);
 
       // Not a UUID, so persistence.rs's deserialization fails for every delivery attempt -- an
       // infra failure that SQS retries into its own group, independent of any other account's

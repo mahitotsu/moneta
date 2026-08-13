@@ -28,6 +28,8 @@ dependencies = [
  "aws_lambda_events",
  "lambda_runtime",
  "rand",
+ "rust_decimal",
+ "rust_decimal_macros",
  "serde",
  "serde_dynamo",
  "serde_json",
@@ -123,6 +125,23 @@ name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
+
+[[package]]
+name = "auth-service"
+version = "0.1.0"
+dependencies = [
+ "aws-config",
+ "aws-sdk-eventbridge",
+ "aws_lambda_events",
+ "lambda_runtime",
+ "serde",
+ "serde_json",
+ "time",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
 
 [[package]]
 name = "autocfg"
@@ -2203,6 +2222,7 @@ dependencies = [
  "aws-sdk-dynamodb",
  "aws_lambda_events",
  "lambda_runtime",
+ "rand",
  "rust_decimal",
  "rust_decimal_macros",
  "serde_json",

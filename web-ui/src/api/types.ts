@@ -37,6 +37,16 @@ export interface CommandAcceptedResponse {
 }
 
 /**
+ * `GET /customers/me/accounts`のレスポンス配列の要素(docs/adr/0016決定4)。ownerIdは
+ * リクエストに含めない——Cognito JWTのsubクレームから常にサーバー側で決まるため、
+ * レスポンス自体にも含まれない(呼び出し側は「自分」の一覧だと分かっている)。
+ */
+export interface MyAccount {
+  accountId: string;
+  openedAt: string;
+}
+
+/**
  * `GET /accounts/{id}/transactions`のレスポンス配列の要素
  * (query-service/src/history.rsのhistory_entry_from_eventが単一の真実源、docs/adr/0009)。
  * amountはopened/frozen/unfrozen/closedでは無い(null)——それらは金額の増減を伴わない。
@@ -81,6 +91,19 @@ export interface TransferStatusView {
   kind: TransferKind;
   state: TransferState;
   updatedAt: string;
+}
+
+/**
+ * `GET /account-numbers/{accountNumber}`と`GET /accounts/{accountId}/account-number`の
+ * レスポンス(どちらも同じ形、docs/adr/0015)。accountIdはUUIDのまま変わらず、これは人間可読な
+ * 別名(支店+7桁の口座番号)への・からの読み取り専用マッピングにすぎない。
+ */
+export interface AccountNumberLookup {
+  accountId: string;
+  ownerId: string;
+  accountNumber: string;
+  branchCode: string;
+  branchName: string;
 }
 
 export const TRANSFER_KIND_LABEL: Record<TransferKind, string> = {

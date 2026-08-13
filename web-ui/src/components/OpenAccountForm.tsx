@@ -2,16 +2,10 @@ import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { openAccount } from "../api/client";
 
-export function OpenAccountForm({
-  customerName,
-  onOpened,
-}: {
-  customerName: string;
-  onOpened: (accountId: string) => void;
-}) {
+export function OpenAccountForm({ onOpened }: { onOpened: (accountId: string) => void }) {
   const [initialBalance, setInitialBalance] = useState("0.00");
   const mutation = useMutation({
-    mutationFn: (balance: string) => openAccount(customerName, balance),
+    mutationFn: (balance: string) => openAccount(balance),
   });
 
   return (

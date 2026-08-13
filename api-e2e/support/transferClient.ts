@@ -1,4 +1,4 @@
-import { rawRequest, RawResponse } from "./httpClient";
+import { authHeaders, rawRequest, RawResponse } from "./httpClient";
 import { waitFor, WaitForOptions } from "./poll";
 
 // Transfer serviceの顧客向けAPI(docs/adr/0012)。account-serviceのhttpClient.tsと同じ役割
@@ -50,24 +50,32 @@ export interface TransferCommandApi {
 // docs/adr/0012決定3: Idempotency-Keyヘッダーは要求しない(transferIdとアクション名の組が
 // VTL側で導出する冪等性キーになるため)。account-serviceのcreateCommandApiと異なり、呼び出し側
 // がヘッダーを用意する必要はない。
-export function createTransferCommandApi(baseUrl: string): TransferCommandApi {
+//
+// `idToken`(docs/adr/0016決定2、TransferCommandApiも認証必須)は省略可能——httpClient.tsの
+// createCommandApiと同じ形。account-serviceのFreeze/Unfreeze/Closeと違い、Start/Confirm/
+// Cancel/Recallは呼び出し元がどの口座の名義かを検証しない(決定2の対象エンドポイント一覧に
+// 含まれるのは「認証必須」のみで、決定3の所有者検証はaccount-service側だけの話)ため、
+// どの認証済みidTokenを使っても構わない。
+export function createTransferCommandApi(baseUrl: string, idToken?: string): TransferCommandApi {
   return {
     start: (input) =>
       rawRequest(`${baseUrl}/transfers/${input.transferId}`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders(idToken) },
         body: JSON.stringify({
           from_account_id: input.fromAccountId,
           to_account_id: input.toAccountId,
           amount: input.amount,
         }),
       }),
-    confirm: (transferId) => rawRequest(`${baseUrl}/transfers/${transferId}/confirm`, { method: "POST" }),
-    cancel: (transferId) => rawRequest(`${baseUrl}/transfers/${transferId}/cancel`, { method: "POST" }),
+    confirm: (transferId) =>
+      rawRequest(`${baseUrl}/transfers/${transferId}/confirm`, { method: "POST", headers: authHeaders(idToken) }),
+    cancel: (transferId) =>
+      rawRequest(`${baseUrl}/transfers/${transferId}/cancel`, { method: "POST", headers: authHeaders(idToken) }),
     recall: (input) =>
       rawRequest(`${baseUrl}/transfers/${input.transferId}/recall`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders(idToken) },
         body: JSON.stringify({ original_transfer_id: input.originalTransferId }),
       }),
   };
@@ -77,10 +85,12 @@ export interface TransferQueryApi {
   getTransferStatus(transferId: string): Promise<TransferStatusView | null>;
 }
 
-export function createTransferQueryApi(baseUrl: string): TransferQueryApi {
+export function createTransferQueryApi(baseUrl: string, idToken?: string): TransferQueryApi {
   return {
     getTransferStatus: async (transferId) => {
-      const response = await rawRequest<TransferStatusView>(`${baseUrl}/transfers/${transferId}`);
+      const response = await rawRequest<TransferStatusView>(`${baseUrl}/transfers/${transferId}`, {
+        headers: authHeaders(idToken),
+      });
       if (response.status === 404) return null;
       if (response.status !== 200) {
         throw new Error(

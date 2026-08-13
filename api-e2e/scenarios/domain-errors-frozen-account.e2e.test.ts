@@ -8,6 +8,7 @@ import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { settle } from "../support/poll";
 import { openFreshAccount, waitForStatus } from "../support/testAccount";
+import { signUpAndSignIn } from "../support/auth";
 
 describe("B(Frozen fixture共有): ドメインエラーは状態を動かさない", () => {
   let commandApi: ReturnType<typeof createCommandApi>;
@@ -16,8 +17,10 @@ describe("B(Frozen fixture共有): ドメインエラーは状態を動かさな
 
   beforeAll(async () => {
     const outputs = await fetchStackOutputs();
-    commandApi = createCommandApi(outputs.commandApiUrl);
-    queryApi = createQueryApi(outputs.queryApiUrl);
+    // Freeze/再Freezeも口座を開いた識別子と同じでなければならない(docs/adr/0016決定3)。
+    const identity = await signUpAndSignIn(outputs.userPoolClientId);
+    commandApi = createCommandApi(outputs.commandApiUrl, identity.idToken);
+    queryApi = createQueryApi(outputs.queryApiUrl, identity.idToken);
     accountId = await openFreshAccount(commandApi, queryApi, "100");
     await commandApi.freeze(accountId, "CourtOrder");
     await waitForStatus(queryApi, accountId, "frozen");
@@ -60,8 +63,9 @@ describe("B(Frozen fixture共有): ドメインエラーは状態を動かさな
 describe("FC5(専用フィクスチャ): Frozenな口座は凍結解除を経由せず直接解約できる", () => {
   it("凍結中の口座をCloseすると、最終的にClosed・final_balanceを返す", async () => {
     const outputs = await fetchStackOutputs();
-    const commandApi = createCommandApi(outputs.commandApiUrl);
-    const queryApi = createQueryApi(outputs.queryApiUrl);
+    const identity = await signUpAndSignIn(outputs.userPoolClientId);
+    const commandApi = createCommandApi(outputs.commandApiUrl, identity.idToken);
+    const queryApi = createQueryApi(outputs.queryApiUrl, identity.idToken);
     const accountId = await openFreshAccount(commandApi, queryApi, "100");
     await commandApi.freeze(accountId, "CourtOrder");
     await waitForStatus(queryApi, accountId, "frozen");

@@ -2,31 +2,34 @@
 // 送金元・送金先が異なるowner_idの2口座間の送金は`kind=furikomi`と判定され、確認
 // (`Confirm`)が呼ばれるまでaccount-serviceには何も発行されない(J5)。確認後はfurikaeと
 // 同じ経路で着金する(J6)。furikomi固有の上限額(J8)も併せて検証する。
+//
+// 名義不一致は、2つの別々のCognito認証済み識別子(docs/adr/0016決定3)でそれぞれの口座を
+// 開設することで作る——owner_idはもはやリクエストボディの自己申告値ではない。
 import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { REJECTION_SETTLE_MS, settle, waitFor } from "../support/poll";
 import { waitForOwnerIndexed } from "../support/sagaState";
 import { openFreshAccount } from "../support/testAccount";
 import { createTransferCommandApi, createTransferQueryApi, waitForTransferState } from "../support/transferClient";
+import { signUpAndSignIn, TestIdentity } from "../support/auth";
 
-// 送金元・送金先で異なる名義にするため、テストごとにユニークな2つのowner_idを使う
-// (同じowner_idを複数テストで使い回すと、名義そのものは衝突しても実害はないが、
-// 意図が読み取りにくくなるため避ける)。
-function distinctOwners(): [string, string] {
-  const suffix = crypto.randomUUID();
-  return [`e2e-furikomi-owner-a-${suffix}`, `e2e-furikomi-owner-b-${suffix}`];
+// 送金元・送金先で異なる名義にするため、テストごとに2つの別々のCognito識別子を新規作成する
+// (同じ識別子を複数テストで使い回さない——テスト間の独立性、support/testAccount.tsと同じ哲学)。
+async function distinctIdentities(clientId: string): Promise<[TestIdentity, TestIdentity]> {
+  return Promise.all([signUpAndSignIn(clientId), signUpAndSignIn(clientId)]);
 }
 
 describe("J5/J6: 振込(名義不一致)は確認前は出金されず、確認すると着金する", () => {
   it("Startではpending_confirmationで停止し、Confirmで最終的に残高が反映される", async () => {
     const outputs = await fetchStackOutputs();
-    const commandApi = createCommandApi(outputs.commandApiUrl);
-    const queryApi = createQueryApi(outputs.queryApiUrl);
-    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl);
-    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl);
-    const [ownerA, ownerB] = distinctOwners();
-    const fromId = await openFreshAccount(commandApi, queryApi, "1000.00", ownerA);
-    const toId = await openFreshAccount(commandApi, queryApi, "0.00", ownerB);
+    const [identityA, identityB] = await distinctIdentities(outputs.userPoolClientId);
+    const commandApiA = createCommandApi(outputs.commandApiUrl, identityA.idToken);
+    const commandApiB = createCommandApi(outputs.commandApiUrl, identityB.idToken);
+    const queryApi = createQueryApi(outputs.queryApiUrl, identityA.idToken);
+    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl, identityA.idToken);
+    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identityA.idToken);
+    const fromId = await openFreshAccount(commandApiA, queryApi, "1000.00");
+    const toId = await openFreshAccount(commandApiB, queryApi, "0.00");
 
     // 送金元・送金先双方の名義インデックスへの反映を待ってからStartする——反映前に送ると
     // command_intake.rs側でInfra扱いの再試行になり(docs/adr/0011)、テストが遅くなるだけで
@@ -75,13 +78,14 @@ describe("J5/J6: 振込(名義不一致)は確認前は出金されず、確認�
 describe("J8: 振込の上限額超過は受付時点で却下される", () => {
   it("サガは作成されず、残高も変化しない", async () => {
     const outputs = await fetchStackOutputs();
-    const commandApi = createCommandApi(outputs.commandApiUrl);
-    const queryApi = createQueryApi(outputs.queryApiUrl);
-    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl);
-    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl);
-    const [ownerA, ownerB] = distinctOwners();
-    const fromId = await openFreshAccount(commandApi, queryApi, "1000.00", ownerA);
-    const toId = await openFreshAccount(commandApi, queryApi, "0.00", ownerB);
+    const [identityA, identityB] = await distinctIdentities(outputs.userPoolClientId);
+    const commandApiA = createCommandApi(outputs.commandApiUrl, identityA.idToken);
+    const commandApiB = createCommandApi(outputs.commandApiUrl, identityB.idToken);
+    const queryApi = createQueryApi(outputs.queryApiUrl, identityA.idToken);
+    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl, identityA.idToken);
+    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identityA.idToken);
+    const fromId = await openFreshAccount(commandApiA, queryApi, "1000.00");
+    const toId = await openFreshAccount(commandApiB, queryApi, "0.00");
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, fromId);
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, toId);
 
@@ -109,13 +113,14 @@ describe("J8: 振込の上限額超過は受付時点で却下される", () => 
 describe("FC14: 確認済み(credited)の振込への二重Confirmは却下され、二重に着金しない", () => {
   it("2回目のConfirmは残高に一切影響しない", async () => {
     const outputs = await fetchStackOutputs();
-    const commandApi = createCommandApi(outputs.commandApiUrl);
-    const queryApi = createQueryApi(outputs.queryApiUrl);
-    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl);
-    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl);
-    const [ownerA, ownerB] = distinctOwners();
-    const fromId = await openFreshAccount(commandApi, queryApi, "1000.00", ownerA);
-    const toId = await openFreshAccount(commandApi, queryApi, "0.00", ownerB);
+    const [identityA, identityB] = await distinctIdentities(outputs.userPoolClientId);
+    const commandApiA = createCommandApi(outputs.commandApiUrl, identityA.idToken);
+    const commandApiB = createCommandApi(outputs.commandApiUrl, identityB.idToken);
+    const queryApi = createQueryApi(outputs.queryApiUrl, identityA.idToken);
+    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl, identityA.idToken);
+    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identityA.idToken);
+    const fromId = await openFreshAccount(commandApiA, queryApi, "1000.00");
+    const toId = await openFreshAccount(commandApiB, queryApi, "0.00");
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, fromId);
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, toId);
 

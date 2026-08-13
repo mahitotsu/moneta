@@ -1,7 +1,8 @@
 // 顧客が開始した送金の一覧を、web-uiのlocalStorageだけで表現する(docs/adr/0012決定6)。
-// customerSession.tsのgetAccountsFor/addAccountForと同じ考え方(docs/adr/0009決定2)を
-// 「顧客が開始した送金の履歴」にも適用したもので、バックエンドに対応する概念を追加しない。
-// ブラウザ・端末をまたいでは共有されない同じ割り切りを受け入れる。
+// 口座一覧(かつてのcustomerSession.ts)は認証の導入(docs/adr/0016)でサーバー側の
+// CustomerAccountsTableに置き換わったが、送金履歴は今回のセキュリティ上の懸念(口座の
+// 閲覧・操作)の対象外でありスコープに含めていない——バックエンドに対応する概念を追加せず、
+// ブラウザ・端末をまたいでは共有されないという割り切りを引き続き受け入れる。
 
 import type { TransferKind } from "./api/types";
 

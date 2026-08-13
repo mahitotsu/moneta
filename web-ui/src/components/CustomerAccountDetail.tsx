@@ -20,15 +20,7 @@ import { useAccount } from "../hooks/useAccount";
  * Unfreeze/Close のみ有効(Freezeは`AlreadyFrozen`で拒否)、Closedはどのコマンドも
  * `AccountClosed`で拒否される終端状態なので管理セクション自体を出さない。
  */
-export function CustomerAccountDetail({
-  accountId,
-  customerName,
-  onBack,
-}: {
-  accountId: string;
-  customerName: string;
-  onBack: () => void;
-}) {
+export function CustomerAccountDetail({ accountId, onBack }: { accountId: string; onBack: () => void }) {
   const [managingOpen, setManagingOpen] = useState(false);
   const { data: account, isSuccess } = useAccount(accountId);
   const isMissing = isSuccess && account === null;
@@ -37,7 +29,7 @@ export function CustomerAccountDetail({
     <>
       <DetailAppBar title="口座詳細" onBack={onBack} />
       <div className="bank-body">
-        <AccountView accountId={accountId} customerName={customerName} onRemoved={onBack} />
+        <AccountView accountId={accountId} onRemoved={onBack} />
         {!isMissing && <TransactionHistory accountId={accountId} />}
 
         {account && account.status !== "closed" && (

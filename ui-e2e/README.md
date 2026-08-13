@@ -33,12 +33,16 @@ npm test                     # 3. 今デプロイされている断面に対し�
 生HTTP呼び出しのみで、実際のWeb UI(ブラウザ)は駆動していない。ブラウザ自動化
 (Playwright等)が別途必要」と明記していた。このディレクトリがその隙間を埋める。
 
-- **口座開設・サインイン画面自体はブラウザで再現しない**(`docs/adr/0014`決定2)。
-  `support/seed.ts`が生HTTPで口座を用意し、`support/session.ts`が
-  `web-ui/src/customerSession.ts`のlocalStorageスキーマへ直接注入する
-  (`BrowserContext.addInitScript`)。サインイン画面・口座一覧への追加操作自体は
-  非機能なダミー(`docs/adr/0009`決定2)であり、`api-e2e/`・vitestコンポーネントテスト
-  (`web-ui/src/components/*.test.tsx`)のどちらのカバー範囲にも新たに寄与しない。
+- **口座開設・サインイン画面自体は原則ブラウザで再現しない**(`docs/adr/0014`決定2の方針を
+  `docs/adr/0016`後も維持)。`support/seed.ts`が生HTTPで口座を用意し、`support/auth.ts`が
+  実際のCognitoユーザーをサインアップ+サインインしてトークンを取得、`support/session.ts`が
+  `web-ui/src/auth.ts`のlocalStorageスキーマ(`moneta.auth.*`)へそのトークンを直接注入する
+  (`BrowserContext.addInitScript`)。**唯一の例外が`scenarios/auth.spec.ts`**——サインアップ/
+  サインイン画面自体の実DOM配線を検証するのがこのシナリオの主題なので、ここだけは
+  `support/session.ts`を使わず実際にフォームへ入力してボタンを押す。口座はもはや
+  「開設後に一覧へ手で追加する」ものではない(`docs/adr/0016`決定4がその手入力機能自体を
+  廃止した)ので、`support/seed.ts`で開いた口座は同じ識別子(idToken)でサインインしている限り
+  自動的に一覧へ現れる。
 - **検証するのはTransfer serviceの顧客向け画面(振替/振込/確認/取消/組戻し、
   `docs/adr/0012`決定6)に絞る**。既存のUI表示ロジックの主張(反映待ちの文言等)は
   `web-ui/src/components/*.test.tsx`(Vitest、モックAPI)が既にコンポーネント単体で
@@ -52,17 +56,26 @@ npm test                     # 3. 今デプロイされている断面に対し�
 | FC12(旧J9) | `scenarios/transfer-recall.spec.ts` |
 | FC15(2026-08-12追加) | `scenarios/transfer-furikae.spec.ts`(振替完了画面に「組戻す」ボタンが描画されないことを確認) |
 | FC13(2026-08-12追加) | `scenarios/transfer-furikae.spec.ts`(非正の金額を送信しても反映待ち画面のまま留まることを確認) |
+| FC17(2026-08-13追加、docs/adr/0015) | `scenarios/transfer-other-bank.spec.ts`(振込(他行あて)は選んでも案内文のみで、実際のAPI呼び出しが発生しないことを確認) |
+| FC18(2026-08-14追加、docs/adr/0016) | `scenarios/auth.spec.ts`(実際のサインアップ/ログイン画面を操作し、新規登録直後に自動サインイン、開設した口座が手入力なしに一覧へ現れること、誤った認証情報ではCognitoの内部例外名を出さず業務文言のみでログイン失敗すること、を確認) |
 
 旧J2/J3/J4/J8/J10相当(ドメイン却下・入力検証系)はUI固有の主張を含まず、`api-e2e/`が既に
 HTTPレベルで検証済みのため、ここでは繰り返さない。
 
 ## 実装上の注意
 
-- `support/stackOutputs.ts`・`support/ownerIndex.ts`は`api-e2e/`の同名ファイルと役割が
-  重複するが、あえて別々に持つ(`api-e2e/`・`web-ui/`が独立したTSプロジェクトである理由と
-  同じ、`docs/adr/0014`)。`support/seed.ts`は`api-e2e/support/testAccount.ts`の
-  `CommandApi`/`QueryApi`抽象を丸ごと複製せず、口座開設+active待ちの2関数だけを
-  自己完結で持つ(振込・確認・取消しかこのハーネスは呼ばないため)。
+- `support/stackOutputs.ts`・`support/ownerIndex.ts`・`support/auth.ts`は`api-e2e/`の
+  同名ファイルと役割が重複するが、あえて別々に持つ(`api-e2e/`・`web-ui/`が独立したTS
+  プロジェクトである理由と同じ、`docs/adr/0014`)。`support/auth.ts`は`api-e2e/support/auth.ts`
+  と違い、idToken・subだけでなくaccessToken/refreshTokenも返す——`web-ui/src/auth.ts`が
+  この3つ全てをlocalStorageに保持するため、`support/session.ts`が実ブラウザへ「サインイン
+  済み」を再現するには3つとも要る。`support/seed.ts`は`api-e2e/support/testAccount.ts`の
+  `CommandApi`/`QueryApi`抽象を丸ごと複製せず、口座開設+active待ち+
+  (`docs/adr/0016`決定4の)`CustomerAccountsTable`反映待ちの1関数(`openFreshAccount`)だけを
+  自己完結で持つ(振込・確認・取消しかこのハーネスは呼ばないため)。AccountCommandApi/
+  AccountQueryApi/AccountNumberQueryApiは全てCognito認証必須になった(`docs/adr/0016`決定2)
+  ため、`support/seed.ts`・`support/accountNumber.ts`の生HTTP呼び出しは全て呼び出し元から
+  受け取ったidTokenを`Authorization`ヘッダーに付与する。
 - `support/ui.ts`はweb-uiの実際の表示文言(ボタンラベル・ラベルテキスト)でセレクタを
   組み立てる。test-id属性は現状web-ui側に無いため、実際の顧客が読むのと同じ文言を頼りに
   する——文言変更がこのテストを壊すのは意図通りで、それこそがこのハーネスが検出すべき

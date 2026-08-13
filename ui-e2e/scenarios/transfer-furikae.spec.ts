@@ -5,16 +5,17 @@
 import { test, expect } from "@playwright/test";
 import { fetchStackOutputs } from "../support/stackOutputs";
 import { openFreshAccount } from "../support/seed";
-import { seedCustomerSession } from "../support/session";
+import { signUpAndSignIn } from "../support/auth";
+import { seedAuthSession } from "../support/session";
 import { expectKindLabel, expectPendingPlaceholder, expectStateBadge, goToTransfersTab, startFurikae } from "../support/ui";
 
 test("J1/J7: 振替は確認不要で即座に開始され、UI上で完了まで反映される", async ({ page, context }) => {
   const outputs = await fetchStackOutputs();
-  const customerName = `ui-e2e-furikae-${crypto.randomUUID().slice(0, 8)}`;
-  const fromId = await openFreshAccount(outputs, customerName, "1000.00");
-  const toId = await openFreshAccount(outputs, customerName, "0.00");
+  const identity = await signUpAndSignIn(outputs.userPoolClientId);
+  const fromId = await openFreshAccount(outputs, identity.idToken, "1000.00");
+  const toId = await openFreshAccount(outputs, identity.idToken, "0.00");
 
-  await seedCustomerSession(context, customerName, [{ accountId: fromId }, { accountId: toId }]);
+  await seedAuthSession(context, identity);
   await page.goto(outputs.webUiUrl);
 
   await goToTransfersTab(page);
@@ -43,11 +44,11 @@ test("J1/J7: 振替は確認不要で即座に開始され、UI上で完了ま�
 // ことだと判明した。
 test("FC13: 非正の金額を送信すると、サガが一度も作られないため反映待ち画面のまま留まる", async ({ page, context }) => {
   const outputs = await fetchStackOutputs();
-  const customerName = `ui-e2e-furikae-invalid-${crypto.randomUUID().slice(0, 8)}`;
-  const fromId = await openFreshAccount(outputs, customerName, "1000.00");
-  const toId = await openFreshAccount(outputs, customerName, "0.00");
+  const identity = await signUpAndSignIn(outputs.userPoolClientId);
+  const fromId = await openFreshAccount(outputs, identity.idToken, "1000.00");
+  const toId = await openFreshAccount(outputs, identity.idToken, "0.00");
 
-  await seedCustomerSession(context, customerName, [{ accountId: fromId }, { accountId: toId }]);
+  await seedAuthSession(context, identity);
   await page.goto(outputs.webUiUrl);
 
   await goToTransfersTab(page);

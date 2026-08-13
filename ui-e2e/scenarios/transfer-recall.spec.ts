@@ -6,7 +6,9 @@ import { test } from "@playwright/test";
 import { fetchStackOutputs } from "../support/stackOutputs";
 import { openFreshAccount } from "../support/seed";
 import { waitForOwnerIndexed } from "../support/ownerIndex";
-import { seedCustomerSession } from "../support/session";
+import { waitForAccountNumber } from "../support/accountNumber";
+import { signUpAndSignIn } from "../support/auth";
+import { seedAuthSession } from "../support/session";
 import {
   clickConfirmTransfer,
   clickRecall,
@@ -18,19 +20,24 @@ import {
 
 test("J9: creditedになった振込は組戻すボタンで組戻され、新しい送金として完了する", async ({ page, context }) => {
   const outputs = await fetchStackOutputs();
-  const suffix = crypto.randomUUID().slice(0, 8);
-  const ownerA = `ui-e2e-recall-a-${suffix}`;
-  const ownerB = `ui-e2e-recall-b-${suffix}`;
-  const fromId = await openFreshAccount(outputs, ownerA, "1000.00");
-  const toId = await openFreshAccount(outputs, ownerB, "0.00");
+  const identityA = await signUpAndSignIn(outputs.userPoolClientId);
+  const identityB = await signUpAndSignIn(outputs.userPoolClientId);
+  const fromId = await openFreshAccount(outputs, identityA.idToken, "1000.00");
+  const toId = await openFreshAccount(outputs, identityB.idToken, "0.00");
   await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, fromId);
   await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, toId);
+  const toNumber = await waitForAccountNumber(outputs, toId, identityA.idToken);
 
-  await seedCustomerSession(context, ownerA, [{ accountId: fromId }]);
+  await seedAuthSession(context, identityA);
   await page.goto(outputs.webUiUrl);
 
   await goToTransfersTab(page);
-  await startFurikomi(page, { fromAccountId: fromId, toAccountId: toId, amount: "300.00" });
+  await startFurikomi(page, {
+    fromAccountId: fromId,
+    branchCode: toNumber.branchCode,
+    accountNumber: toNumber.accountNumber,
+    amount: "300.00",
+  });
   await expectStateBadge(page, "確認待ち");
   await clickConfirmTransfer(page);
   await expectStateBadge(page, "完了");

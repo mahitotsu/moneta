@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { useAccount } from "../hooks/useAccount";
-import { formatAccountNumber, formatCurrency, formatDateTime } from "../format";
+import { useAccountNumber } from "../hooks/useAccountNumber";
+import { formatCurrency, formatDateTime, formatFriendlyAccountNumber } from "../format";
 import { FREEZE_REASON_VIEW_LABEL } from "../api/types";
 import { Eye, EyeOff } from "./icons";
-import { removeAccountFor } from "../customerSession";
 
 const STATUS_LABEL: Record<string, string> = {
   active: "有効",
@@ -17,17 +17,10 @@ const STATUS_BADGE_CLASS: Record<string, string> = {
   closed: "badge badge-neutral",
 };
 
-export function AccountView({
-  accountId,
-  customerName,
-  onRemoved,
-}: {
-  accountId: string;
-  customerName: string;
-  onRemoved: () => void;
-}) {
+export function AccountView({ accountId, onRemoved }: { accountId: string; onRemoved: () => void }) {
   const [hidden, setHidden] = useState(false);
   const { data, isLoading, isFetching, isSuccess } = useAccount(accountId);
+  const { data: accountNumber } = useAccountNumber(accountId);
 
   if (isLoading) {
     return (
@@ -39,21 +32,16 @@ export function AccountView({
   }
 
   // isSuccess && data===nullは「確定して存在しない(404)」であり、下のまだ反映されて
-  // いないだけのケースとは違って、待っても解決しない。ここだけは区別して、一覧から
-  // 削除する手段を用意する(さもないと永久にこの画面から出られなくなる)。
+  // いないだけのケースとは違って、待っても解決しない。口座一覧はもうサーバー側の
+  // CustomerAccountsTable(docs/adr/0016決定4)が真実源で、顧客がここから手動で外す
+  // 手段自体がないため、一覧画面へ戻る導線だけを用意する(さもないと永久にこの画面から
+  // 出られなくなる)。
   if (isSuccess && data === null) {
     return (
       <div className="balance-hero">
         <p>この口座は見つかりませんでした。</p>
-        <button
-          type="button"
-          className="settings-item-action settings-item-action-danger"
-          onClick={() => {
-            removeAccountFor(customerName, accountId);
-            onRemoved();
-          }}
-        >
-          一覧から削除する
+        <button type="button" className="settings-item-action" onClick={onRemoved}>
+          一覧に戻る
         </button>
       </div>
     );
@@ -82,7 +70,12 @@ export function AccountView({
   return (
     <div className="balance-hero">
       <div className="balance-hero-top">
-        <span className="account-type">普通預金 ●●●●{formatAccountNumber(accountId).slice(-4)}</span>
+        <span className="account-type">
+          普通預金{" "}
+          {accountNumber
+            ? `${accountNumber.branchName}(${accountNumber.branchCode}) ${formatFriendlyAccountNumber(accountNumber.accountNumber)}`
+            : "口座番号を確認しています…"}
+        </span>
         <span className="hero-top-right">
           <span
             className={`live-dot${isFetching ? " live-dot-active" : ""}`}

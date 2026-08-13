@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { getSignedInCustomer, signIn } from "../customerSession";
+import { getCurrentSession } from "../auth";
 import { SignInForm } from "./SignInForm";
 import { AccountListScreen } from "./AccountListScreen";
 import { CustomerAccountDetail } from "./CustomerAccountDetail";
@@ -16,40 +16,34 @@ type View =
 const tabView = (tab: CustomerTab): View => (tab === "accounts" ? { screen: "accounts" } : { screen: "transfers" });
 
 /** サインイン → (口座一覧|送金一覧)タブ → 各詳細、という顧客向けの画面遷移
- * (docs/adr/0009、docs/adr/0012決定6)。実際の銀行アプリらしい見た目にするため、全画面を
- * `.bank-frame`(カード状のアプリ外枠)で包む(docs/adr/0009へ追記の「顧客向けWeb UIの実物寄せ」)。 */
+ * (docs/adr/0009、docs/adr/0012決定6、docs/adr/0016)。実際の銀行アプリらしい見た目にするため、
+ * 全画面を`.bank-frame`(カード状のアプリ外枠)で包む(docs/adr/0009へ追記の
+ * 「顧客向けWeb UIの実物寄せ」)。 */
 export function CustomerFlow() {
-  const [customerName, setCustomerName] = useState<string | null>(() => getSignedInCustomer());
+  const [session, setSession] = useState(() => getCurrentSession());
   const [view, setView] = useState<View>({ screen: "accounts" });
 
   const onSignedOut = () => {
-    setCustomerName(null);
+    setSession(null);
     setView({ screen: "accounts" });
   };
 
   let content: ReactNode;
-  if (!customerName) {
+  if (!session) {
     content = (
       <SignInForm
-        onSignedIn={(name) => {
-          signIn(name);
-          setCustomerName(name);
+        onSignedIn={(newSession) => {
+          setSession(newSession);
           setView({ screen: "accounts" });
         }}
       />
     );
   } else if (view.screen === "account-detail") {
-    content = (
-      <CustomerAccountDetail
-        accountId={view.accountId}
-        customerName={customerName}
-        onBack={() => setView({ screen: "accounts" })}
-      />
-    );
+    content = <CustomerAccountDetail accountId={view.accountId} onBack={() => setView({ screen: "accounts" })} />;
   } else if (view.screen === "transfers") {
     content = (
       <TransferListScreen
-        customerName={customerName}
+        customerName={session.username}
         onSelectTransfer={(transferId) => setView({ screen: "transfer-detail", transferId })}
         onSelectTab={(tab) => setView(tabView(tab))}
         onSignedOut={onSignedOut}
@@ -59,7 +53,7 @@ export function CustomerFlow() {
     content = (
       <TransferDetailScreen
         transferId={view.transferId}
-        customerName={customerName}
+        customerName={session.username}
         onBack={() => setView({ screen: "transfers" })}
         onRecalled={(newTransferId) => setView({ screen: "transfer-detail", transferId: newTransferId })}
       />
@@ -67,7 +61,7 @@ export function CustomerFlow() {
   } else {
     content = (
       <AccountListScreen
-        customerName={customerName}
+        customerName={session.username}
         onSelectAccount={(accountId) => setView({ screen: "account-detail", accountId })}
         onSelectTab={(tab) => setView(tabView(tab))}
         onSignedOut={onSignedOut}
