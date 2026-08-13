@@ -5,6 +5,8 @@ module.exports = {
   transform: {
     '^.+\\.tsx?$': ['@swc/jest']
   },
+  // signUpAndSignIn()した使い捨てCognitoユーザーのteardown(jest.setup.ts参照)。
+  setupFilesAfterEnv: ['<rootDir>/jest.setup.ts'],
   // `waitFor` (support/poll.ts) triggers the outbox relay directly by default, so most
   // eventual-consistency waits collapse to well under the relay's natural ~1-minute cadence --
   // see support/relay.ts. 180s gives headroom for a couple of accelerated waits in sequence

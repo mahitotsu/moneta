@@ -11,6 +11,11 @@ import {
   ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { PurgeQueueCommand, PurgeQueueInProgress, SQSClient } from "@aws-sdk/client-sqs";
+import {
+  AdminDeleteUserCommand,
+  CognitoIdentityProviderClient,
+  ListUsersCommand,
+} from "@aws-sdk/client-cognito-identity-provider";
 import { fetchStackOutputs, REGION, STACK_NAME, StackOutputs } from "../support/stackOutputs";
 
 export { fetchStackOutputs };
@@ -104,7 +109,34 @@ export async function cleanSqs(outputs: StackOutputs): Promise<void> {
   }
 }
 
-const CLEAN_TARGETS = ["dynamodb", "sqs"] as const;
+// api-e2e/support/auth.ts・ui-e2e/support/auth.tsのsignUpAndSignIn()が作る使い捨てユーザーの
+// ユーザー名プレフィックス。本物の(手動で試した)ユーザーを誤って消さないよう、このプレフィックス
+// に一致するものだけを対象にする。両ハーネスとも今はテストごとのteardown(jest.setup.ts/
+// support/fixtures.ts)で自動削除するようになったが、2026-08-14時点でteardown導入前に溜まった
+// 分と、teardownが何らかの理由で走らなかった分(異常終了等)の掃き出し用にこのtargetを残す。
+const E2E_COGNITO_USERNAME_PREFIXES = ["e2e-", "ui-e2e-"];
+
+export async function cleanCognito(outputs: StackOutputs): Promise<number> {
+  const cognito = new CognitoIdentityProviderClient({ region: REGION });
+  let deleted = 0;
+  let paginationToken: string | undefined;
+  do {
+    const page = await cognito.send(
+      new ListUsersCommand({ UserPoolId: outputs.userPoolId, PaginationToken: paginationToken }),
+    );
+    const targets = (page.Users ?? []).filter(
+      (u) => u.Username && E2E_COGNITO_USERNAME_PREFIXES.some((prefix) => u.Username!.startsWith(prefix)),
+    );
+    for (const user of targets) {
+      await cognito.send(new AdminDeleteUserCommand({ UserPoolId: outputs.userPoolId, Username: user.Username! }));
+      deleted += 1;
+    }
+    paginationToken = page.PaginationToken;
+  } while (paginationToken);
+  return deleted;
+}
+
+const CLEAN_TARGETS = ["dynamodb", "sqs", "cognito"] as const;
 type CleanTarget = (typeof CLEAN_TARGETS)[number];
 
 function parseArgs(argv: string[]): { yes: boolean; only: CleanTarget[] } {
@@ -159,6 +191,12 @@ async function main(): Promise<void> {
   if (only.includes("sqs")) {
     console.log(`  - SQS queues: ${outputs.commandQueueUrl}, ${outputs.deadLetterQueueUrl}`);
   }
+  if (only.includes("cognito")) {
+    console.log(
+      `  - Cognito User Pool ${outputs.userPoolId}: users whose username starts with ` +
+        `${E2E_COGNITO_USERNAME_PREFIXES.join(" or ")} (leaves any manually-created user alone)`,
+    );
+  }
 
   if (!yes && !(await confirm("\nProceed? [y/N] "))) {
     console.log("Aborted.");
@@ -173,6 +211,10 @@ async function main(): Promise<void> {
   }
   if (only.includes("sqs")) {
     await cleanSqs(outputs);
+  }
+  if (only.includes("cognito")) {
+    const deleted = await cleanCognito(outputs);
+    console.log(`[cognito] deleted ${deleted} test user(s) from ${outputs.userPoolId}`);
   }
 
   console.log("\nDone.");

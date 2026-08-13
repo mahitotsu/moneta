@@ -59,6 +59,14 @@ DynamoDBへ移行し、アウトボックスもEventBridge Schedulerの1分間�
 データ量を定期的にリセットする運用スクリプトという位置づけのまま残し、E2E実行の前提には
 していない。
 
+**例外はCognitoの使い捨てユーザー(docs/adr/0016)。** `support/auth.ts`の`signUpAndSignIn`は
+呼ばれるたびにセルフサインアップするが、口座と違いUser Poolのユーザー一覧はテスト実行後も
+そのまま残ると`list-users`のノイズとして目に見える形で積み上がる(2026-08-14発覚: teardown
+未実装のまま60件超が溜まっていた)。そのため`jest.setup.ts`(`setupFilesAfterEnv`)が
+テストファイル単位で`afterAll`を登録し、`signUpAndSignIn`が内部で溜めたaccessTokenを
+セルフサービスの`DeleteUser`(追加のIAM権限不要)で一括削除する——DynamoDBの口座データとは
+異なり、こちらは実行のたびに実際に片付く。
+
 **例外はDLQに到達するシナリオ(FC8・R5)。** これらは意図的に持続的なインフラ失敗を起こす
 ため、後片付けしないとDLQにメッセージが実行のたびに溜まり続ける(ADR-0002決定6が構想する
 CloudWatchアラームは`docs/production-readiness-matrix.md` O1の通り未実装だが、それとは無関係に

@@ -4,6 +4,7 @@
 // リフレッシュは、テスト実行が短命(1テストの寿命を超えて生き続ける必要がない)なため持たない。
 import {
   CognitoIdentityProviderClient,
+  DeleteUserCommand,
   InitiateAuthCommand,
   SignUpCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
@@ -14,6 +15,11 @@ function client(): CognitoIdentityProviderClient {
   if (!cachedClient) cachedClient = new CognitoIdentityProviderClient({ region: REGION });
   return cachedClient;
 }
+
+// signUpAndSignIn()が作った使い捨てユーザーのaccessTokenを溜めておき、jest.setup.tsの
+// afterAllからcleanupSignedUpUsers()で一括削除する。これが無いと、npm testを回すたびに
+// User Poolへユーザーが際限なく積み上がる(2026-08-14発覚: 実際に60件超が溜まっていた)。
+const accessTokensPendingCleanup: string[] = [];
 
 // IDトークン(JWT)のペイロードをbase64url decode+JSON.parseするだけの最小限のヘルパー
 // (web-ui/src/auth.tsのdecodeJwtPayloadと同じ役割、Node向けにBufferで書き直したもの)。
@@ -54,9 +60,11 @@ export async function signUpAndSignIn(clientId: string): Promise<TestIdentity> {
     }),
   );
   const idToken = result.AuthenticationResult?.IdToken;
-  if (!idToken) {
-    throw new Error(`signUpAndSignIn(${username}): InitiateAuth did not return an IdToken`);
+  const accessToken = result.AuthenticationResult?.AccessToken;
+  if (!idToken || !accessToken) {
+    throw new Error(`signUpAndSignIn(${username}): InitiateAuth did not return an IdToken/AccessToken`);
   }
+  accessTokensPendingCleanup.push(accessToken);
 
   const claims = decodeJwtPayload(idToken);
   const sub = claims.sub;
@@ -64,4 +72,21 @@ export async function signUpAndSignIn(clientId: string): Promise<TestIdentity> {
     throw new Error(`signUpAndSignIn(${username}): IdToken payload has no string "sub" claim`);
   }
   return { idToken, sub };
+}
+
+/** jest.setup.tsのafterAllから呼ぶ、テストファイル単位の一括クリーンアップ。セルフサービスの
+ * DeleteUser(有効なaccessTokenさえあれば呼べる、追加のIAM権限は不要)で1件ずつ削除する。
+ * 1件の削除失敗が他の削除やテスト結果そのものを巻き込まないよう、失敗はログに残すのみで
+ * 例外を投げない(ベストエフォート、auth-serviceのPutEvents失敗時の扱いと同じ考え方)。 */
+export async function cleanupSignedUpUsers(): Promise<void> {
+  const tokens = accessTokensPendingCleanup.splice(0, accessTokensPendingCleanup.length);
+  await Promise.all(
+    tokens.map(async (accessToken) => {
+      try {
+        await client().send(new DeleteUserCommand({ AccessToken: accessToken }));
+      } catch (err) {
+        console.warn(`cleanupSignedUpUsers: failed to delete a test user: ${String(err)}`);
+      }
+    }),
+  );
 }

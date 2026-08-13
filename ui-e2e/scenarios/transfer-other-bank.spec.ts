@@ -4,7 +4,7 @@
 // 同じ主張をモックAPIで既に検証しているが、あちらは「実際にAPI呼び出しが発生していないこと」
 // までは見ていない——ここでは実デプロイ環境に対して、クリック後もネットワークが動かず案内文
 // だけが表示されることを確認する。
-import { test, expect } from "@playwright/test";
+import { test, expect } from "../support/fixtures";
 import { fetchStackOutputs } from "../support/stackOutputs";
 import { openFreshAccount } from "../support/seed";
 import { signUpAndSignIn } from "../support/auth";

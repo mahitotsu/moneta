@@ -3,7 +3,7 @@
 // anything is debited -- api-e2e/scenarios/transfer-furikomi.e2e.test.ts already proves this at
 // the HTTP layer, this proves the UI actually shows the right screen and the button actually
 // drives Confirm.
-import { test } from "@playwright/test";
+import { test } from "../support/fixtures";
 import { fetchStackOutputs } from "../support/stackOutputs";
 import { openFreshAccount } from "../support/seed";
 import { waitForOwnerIndexed } from "../support/ownerIndex";

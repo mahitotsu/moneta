@@ -6,6 +6,7 @@
 // 実ブラウザに「サインイン済み」を再現するには3つとも要る。
 import {
   CognitoIdentityProviderClient,
+  DeleteUserCommand,
   InitiateAuthCommand,
   SignUpCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
@@ -16,6 +17,11 @@ function client(): CognitoIdentityProviderClient {
   if (!cachedClient) cachedClient = new CognitoIdentityProviderClient({ region: REGION });
   return cachedClient;
 }
+
+// signUpAndSignIn()が作った使い捨てユーザーのaccessTokenを溜めておき、support/fixtures.tsの
+// worker終了時フックからcleanupSignedUpUsers()で一括削除する。これが無いと、npm testを回す
+// たびにUser Poolへユーザーが際限なく積み上がる(2026-08-14発覚: 実際に60件超が溜まっていた)。
+const accessTokensPendingCleanup: string[] = [];
 
 // web-ui/src/auth.tsのdecodeJwtPayloadと同じ役割(署名検証はしない——サーバー側の
 // CognitoUserPoolsAuthorizerが検証する側であり、ここではsubクレームを読むためだけに使う)。
@@ -56,6 +62,7 @@ export async function signUpAndSignIn(clientId: string): Promise<TestIdentity> {
   if (!auth?.IdToken || !auth.AccessToken || !auth.RefreshToken) {
     throw new Error(`signUpAndSignIn(${username}): InitiateAuth did not return a full token set`);
   }
+  accessTokensPendingCleanup.push(auth.AccessToken);
 
   const claims = decodeJwtPayload(auth.IdToken);
   const sub = claims.sub;
@@ -63,4 +70,29 @@ export async function signUpAndSignIn(clientId: string): Promise<TestIdentity> {
     throw new Error(`signUpAndSignIn(${username}): IdToken payload has no string "sub" claim`);
   }
   return { username, idToken: auth.IdToken, accessToken: auth.AccessToken, refreshToken: auth.RefreshToken, sub };
+}
+
+/** auth.spec.tsのように実際のサインイン画面(web-ui/src/auth.ts)を通してサインアップした
+ * ユーザーは、このモジュールのsignUpAndSignIn()を経由しないためcleanupSignedUpUsers()の
+ * 対象に自動では乗らない。ブラウザのlocalStorage(`moneta.auth.accessToken`)から直接取り出した
+ * accessTokenを渡して、同じクリーンアップ待ち行列に加えるためのヘルパー。 */
+export function registerAccessTokenForCleanup(accessToken: string): void {
+  accessTokensPendingCleanup.push(accessToken);
+}
+
+/** support/fixtures.tsのworker-scopedフィクスチャから呼ぶ、ワーカー単位の一括クリーンアップ。
+ * セルフサービスのDeleteUser(有効なaccessTokenさえあれば呼べる、追加のIAM権限は不要)で
+ * 1件ずつ削除する。1件の削除失敗が他の削除やテスト結果そのものを巻き込まないよう、失敗は
+ * ログに残すのみで例外を投げない(api-e2e/support/auth.tsの同名関数と同じ考え方)。 */
+export async function cleanupSignedUpUsers(): Promise<void> {
+  const tokens = accessTokensPendingCleanup.splice(0, accessTokensPendingCleanup.length);
+  await Promise.all(
+    tokens.map(async (accessToken) => {
+      try {
+        await client().send(new DeleteUserCommand({ AccessToken: accessToken }));
+      } catch (err) {
+        console.warn(`cleanupSignedUpUsers: failed to delete a test user: ${String(err)}`);
+      }
+    }),
+  );
 }

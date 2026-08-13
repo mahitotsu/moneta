@@ -76,6 +76,18 @@ HTTPレベルで検証済みのため、ここでは繰り返さない。
   AccountQueryApi/AccountNumberQueryApiは全てCognito認証必須になった(`docs/adr/0016`決定2)
   ため、`support/seed.ts`・`support/accountNumber.ts`の生HTTP呼び出しは全て呼び出し元から
   受け取ったidTokenを`Authorization`ヘッダーに付与する。
+- **Cognitoの使い捨てユーザーのteardown(2026-08-14追加)**: `support/auth.ts`の
+  `signUpAndSignIn`が呼ばれるたびにセルフサインアップしたユーザーが片付かずに残ると、
+  `npm test`を回すたびにUser Poolへユーザーが積み上がる(発覚時点で60件超)。
+  `playwright.config.ts`は`fullyParallel: true`なので、ファイル単位の`afterAll`相当では
+  同じファイルのテストが別ワーカーへ分散され得て信頼できない——`support/fixtures.ts`が
+  Playwrightの`test`をworker-scoped・autoなフィクスチャ(`cognitoCleanup`)で拡張し、
+  ワーカー終了時に必ず1回`cleanupSignedUpUsers`(セルフサービスの`DeleteUser`、追加のIAM
+  権限不要)を呼ぶ。各specファイルは`@playwright/test`ではなく`../support/fixtures`から
+  `test`/`expect`をimportするだけでよい。`scenarios/auth.spec.ts`だけは例外——実際の
+  サインアップ画面を通してユーザーを作るため`signUpAndSignIn`を経由せず、
+  `registerAccessTokenForCleanup`でブラウザのlocalStorageから取り出したaccessTokenを
+  明示的に同じ待ち行列へ加えている。
 - `support/ui.ts`はweb-uiの実際の表示文言(ボタンラベル・ラベルテキスト)でセレクタを
   組み立てる。test-id属性は現状web-ui側に無いため、実際の顧客が読むのと同じ文言を頼りに
   する——文言変更がこのテストを壊すのは意図通りで、それこそがこのハーネスが検出すべき

@@ -7,8 +7,9 @@
 // support/session.ts's seedAuthSession -- bypassing the sign-in screen is exactly what those
 // specs want (their subject is the transfer screens), but here the sign-up/sign-in screen itself
 // is the subject.
-import { test, expect } from "@playwright/test";
+import { test, expect } from "../support/fixtures";
 import { fetchStackOutputs } from "../support/stackOutputs";
+import { registerAccessTokenForCleanup } from "../support/auth";
 import { goToTransfersTab } from "../support/ui";
 
 test("FC18: サインアップ→ログインした本人の口座一覧に、開設した口座が自動的に現れる", async ({ page }) => {
@@ -28,6 +29,13 @@ test("FC18: サインアップ→ログインした本人の口座一覧に、�
   // 済みの状態で口座一覧(空)へ遷移する(docs/adr/0016決定1、SignInForm.tsxのsignUpの実装)。
   await expect(page.getByText(`${username} 様`)).toBeVisible();
   await expect(page.getByText("まだ口座がありません。下から口座を開設してください。")).toBeVisible();
+
+  // このユーザーはsupport/auth.tsのsignUpAndSignIn()を経由せず実際のサインイン画面から
+  // 作られたため、cleanupSignedUpUsers()の自動追跡に乗らない——localStorageから直接
+  // accessTokenを取り出し、他のテストと同じクリーンアップ待ち行列に加える
+  // (2026-08-14発覚: このtest固有の漏れがあった)。
+  const accessToken = await page.evaluate(() => localStorage.getItem("moneta.auth.accessToken"));
+  if (accessToken) registerAccessTokenForCleanup(accessToken);
 
   // 「既存の口座をこの一覧に追加」という手入力フォームはもう存在しない(docs/adr/0016決定4、
   // 今回のセキュリティ修正の根本原因だった機能そのものの廃止)。

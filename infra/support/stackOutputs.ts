@@ -23,6 +23,9 @@ export interface StackOutputs {
   transferCommandQueueUrl: string;
   transferSagaTableName: string;
   transferAccountOwnersTableName: string;
+  // Amazon Cognitoによる実認証(docs/adr/0016)。clean-data.tsのCognitoテストユーザー掃除
+  // (AdminDeleteUser/ListUsersはUserPoolClientIdではなくUserPoolIdで引く)に使う。
+  userPoolId: string;
 }
 
 const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
@@ -39,6 +42,7 @@ const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
   transferCommandQueueUrl: "TransferCommandQueueUrl",
   transferSagaTableName: "TransferSagaTableName",
   transferAccountOwnersTableName: "TransferAccountOwnersTableName",
+  userPoolId: "UserPoolId",
 };
 
 export async function fetchStackOutputs(): Promise<StackOutputs> {
