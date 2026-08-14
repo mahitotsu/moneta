@@ -12,7 +12,8 @@
     "deploy": "npm run cdk -- deploy",
     "postdeploy": "bash scripts/sweep-rust-lambda-docker-cache.sh",
     "destroy": "npm run cdk -- destroy",
-    "clean-data": "NODE_OPTIONS=\"--require ./force-ipv4.cjs\" tsx scripts/clean-data.ts"
+    "clean-data": "NODE_OPTIONS=\"--require ./force-ipv4.cjs\" tsx scripts/clean-data.ts",
+    "seed-demo-data": "NODE_OPTIONS=\"--require ./force-ipv4.cjs\" tsx scripts/seed-demo-data.ts"
   },
   "devDependencies": {
     "@aws-sdk/client-cloudformation": "^3.1101.0",

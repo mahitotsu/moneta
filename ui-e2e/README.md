@@ -88,6 +88,19 @@ HTTPレベルで検証済みのため、ここでは繰り返さない。
   サインアップ画面を通してユーザーを作るため`signUpAndSignIn`を経由せず、
   `registerAccessTokenForCleanup`でブラウザのlocalStorageから取り出したaccessTokenを
   明示的に同じ待ち行列へ加えている。
+- **口座データのteardown、口座のみ・送金は対象外(2026-08-14追加)**: `support/seed.ts`の
+  `openFreshAccount`が開設成功のたびに(`accountId`, `ownerId`)を`support/testDataCleanup.ts`へ
+  自動登録し、`support/fixtures.ts`の同じworker-scopedフィクスチャが`cleanupSignedUpUsers`と
+  同じタイミングで`accounts`/`account-views`/`account-history`/`account-numbers`/
+  `customer-accounts`/`transfer-account-owners`の該当行を削除する
+  (`api-e2e/support/testDataCleanup.ts`の同型コピー)。**送金(`transfer-sagas`/
+  `transfer-status-view`)は対象外**——api-e2e/はTransferCommandApiを直接呼ぶので`start()`の
+  戻り値からtransferIdをそのまま追跡できるが、ui-e2e/はTransferForm.tsxを実ブラウザ経由で
+  操作するだけで、transferId自体を取得できるchoke pointがない(ADR-0007の通りルーターを
+  使わないSPAで、URLにも反映されない)。React内部を無理に`page.evaluate()`で覗くよりは、
+  このギャップを正直に記録した上で`infra/scripts/clean-data.ts`の定期的な一括ワイプに任せる
+  方を選んだ——ui-e2e/が1回の実行で作る送金は数件程度で、口座データほど深刻な蓄積速度では
+  ないため。
 - `support/ui.ts`はweb-uiの実際の表示文言(ボタンラベル・ラベルテキスト)でセレクタを
   組み立てる。test-id属性は現状web-ui側に無いため、実際の顧客が読むのと同じ文言を頼りに
   する——文言変更がこのテストを壊すのは意図通りで、それこそがこのハーネスが検出すべき

@@ -51,21 +51,33 @@ DynamoDBへ移行し、アウトボックスもEventBridge Schedulerの1分間�
 (`DEFAULT_TIMEOUT_MS`/`DEFAULT_INTERVAL_MS`)。実測値は実行のたびに変わりうるため、
 正確な収束時間を主張に組み込みたい場合は実行結果を都度確認すること。
 
-## テストの独立性(クリーンアップ不要)
+## テストの独立性とクリーンアップ
 
 口座IDはクライアント生成(ADR-0006決定2)であるため、各テストは`crypto.randomUUID()`で
-毎回新しい口座を使う。これによりテスト間の依存やクリーンアップは不要で、`clean-data.ts`
-(`infra/scripts/`)を都度実行する必要はない。`clean-data.ts`は開発中のDynamoDBの
-データ量を定期的にリセットする運用スクリプトという位置づけのまま残し、E2E実行の前提には
-していない。
+毎回新しい口座を使う——UUIDが衝突しないので、テスト間の依存を避けるための共有フィクスチャや
+実行前のリセットは要らない。ただし**これは「クリーンアップが要らない」ことを意味しない**:
+2026-08-14、Cognitoの使い捨てユーザーが60件超・DynamoDBのテストデータが5000件超溜まっている
+のが発覚し(いずれもUUIDが衝突しないことを理由に後片付けを省略してきた結果)、両方に自動
+teardownを追加した。
 
-**例外はCognitoの使い捨てユーザー(docs/adr/0016)。** `support/auth.ts`の`signUpAndSignIn`は
-呼ばれるたびにセルフサインアップするが、口座と違いUser Poolのユーザー一覧はテスト実行後も
-そのまま残ると`list-users`のノイズとして目に見える形で積み上がる(2026-08-14発覚: teardown
-未実装のまま60件超が溜まっていた)。そのため`jest.setup.ts`(`setupFilesAfterEnv`)が
-テストファイル単位で`afterAll`を登録し、`signUpAndSignIn`が内部で溜めたaccessTokenを
-セルフサービスの`DeleteUser`(追加のIAM権限不要)で一括削除する——DynamoDBの口座データとは
-異なり、こちらは実行のたびに実際に片付く。
+- **Cognitoの使い捨てユーザー**: `support/auth.ts`の`signUpAndSignIn`が内部で溜めた
+  accessTokenを、`jest.setup.ts`(`setupFilesAfterEnv`)がテストファイル単位の`afterAll`で
+  セルフサービスの`DeleteUser`(追加のIAM権限不要)により一括削除する。
+- **口座・送金データ**: `support/httpClient.ts`の`createCommandApi`が`openAccount`成功のたびに
+  (`accountId`, `ownerId`)を、`support/transferClient.ts`の`createTransferCommandApi`が
+  `start`成功のたびに`transferId`を、それぞれ`support/testDataCleanup.ts`へ自動登録する
+  ——呼び出し元のシナリオファイルが個別に何かする必要はない。同じ`jest.setup.ts`の`afterAll`が
+  `accounts`/`account-views`/`account-history`/`account-numbers`/`customer-accounts`/
+  `transfer-account-owners`/`transfer-sagas`/`transfer-status-view`の該当行を削除する。
+  `account-events`(監査ログ)と`processed-messages`(冪等性の重複排除ログ)は対象外——
+  追記専用の設計そのものであり、本来はTTL/アーカイブで扱うべきもので、個々のテストのたびに
+  特定accountId分だけ削除するのはむしろ設計意図に反する。
+- ベストエフォート(1件の削除失敗は`console.warn`のみで他のテストを巻き込まない)なので、
+  まれに取りこぼしが残ることがある。定期的な一括ワイプ`infra/scripts/clean-data.ts`
+  (`npm run clean-data -- --only=dynamodb,cognito`)が、テストごとのteardownでは
+  拾いきれない分——teardown導入前の残骸、異常終了、後述のui-e2e/の既知のギャップ——の
+  最終的な受け皿になる。`infra/scripts/seed-demo-data.ts`が作るデモデータ
+  (`demo-customer`/`demo-customer-2`)は自動的に保護され、巻き込まれない。
 
 **例外はDLQに到達するシナリオ(FC8・R5)。** これらは意図的に持続的なインフラ失敗を起こす
 ため、後片付けしないとDLQにメッセージが実行のたびに溜まり続ける(ADR-0002決定6が構想する

@@ -23,9 +23,21 @@ export interface StackOutputs {
   transferCommandQueueUrl: string;
   transferSagaTableName: string;
   transferAccountOwnersTableName: string;
+  // Transfer serviceの顧客向け入口(docs/adr/0012)。seed-demo-data.tsが実際に振替/振込を
+  // 実行するのに使う。
+  transferCommandApiUrl: string;
+  transferQueryApiUrl: string;
+  transferStatusViewTableName: string;
+  // 人間可読な口座番号(docs/adr/0015)。振込先の支店+口座番号を解決するのに使う。
+  accountNumberQueryApiUrl: string;
+  accountNumbersTableName: string;
+  // 本物の顧客-口座関係(docs/adr/0016決定4)。
+  customerAccountsTableName: string;
   // Amazon Cognitoによる実認証(docs/adr/0016)。clean-data.tsのCognitoテストユーザー掃除
-  // (AdminDeleteUser/ListUsersはUserPoolClientIdではなくUserPoolIdで引く)に使う。
+  // (AdminDeleteUser/ListUsersはUserPoolClientIdではなくUserPoolIdで引く)、
+  // seed-demo-data.tsのデモユーザー作成の両方に使う。
   userPoolId: string;
+  userPoolClientId: string;
 }
 
 const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
@@ -42,7 +54,14 @@ const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
   transferCommandQueueUrl: "TransferCommandQueueUrl",
   transferSagaTableName: "TransferSagaTableName",
   transferAccountOwnersTableName: "TransferAccountOwnersTableName",
+  transferCommandApiUrl: "TransferCommandApiUrl",
+  transferQueryApiUrl: "TransferQueryApiUrl",
+  transferStatusViewTableName: "TransferStatusViewTableName",
+  accountNumberQueryApiUrl: "AccountNumberQueryApiUrl",
+  accountNumbersTableName: "AccountNumbersTableName",
+  customerAccountsTableName: "CustomerAccountsTableName",
   userPoolId: "UserPoolId",
+  userPoolClientId: "UserPoolClientId",
 };
 
 export async function fetchStackOutputs(): Promise<StackOutputs> {

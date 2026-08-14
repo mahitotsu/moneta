@@ -1,5 +1,6 @@
 import { authHeaders, rawRequest, RawResponse } from "./httpClient";
 import { waitFor, WaitForOptions } from "./poll";
+import { trackCreatedTransfer } from "./testDataCleanup";
 
 // Transfer serviceの顧客向けAPI(docs/adr/0012)。account-serviceのhttpClient.tsと同じ役割
 // (Command API + Query API のHTTPラッパー)をTransfer向けに提供する——docs/adr/0010決定6時点の
@@ -58,8 +59,8 @@ export interface TransferCommandApi {
 // どの認証済みidTokenを使っても構わない。
 export function createTransferCommandApi(baseUrl: string, idToken?: string): TransferCommandApi {
   return {
-    start: (input) =>
-      rawRequest(`${baseUrl}/transfers/${input.transferId}`, {
+    start: async (input) => {
+      const response = await rawRequest(`${baseUrl}/transfers/${input.transferId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json", ...authHeaders(idToken) },
         body: JSON.stringify({
@@ -67,7 +68,12 @@ export function createTransferCommandApi(baseUrl: string, idToken?: string): Tra
           to_account_id: input.toAccountId,
           amount: input.amount,
         }),
-      }),
+      });
+      // support/testDataCleanup.tsのteardownに乗せる(recall(組戻し)も新しいtransferIdの
+      // Startとして表現される、docs/adr/0011決定5なので特別扱いは不要)。
+      if (response.status === 202) trackCreatedTransfer(input.transferId);
+      return response;
+    },
     confirm: (transferId) =>
       rawRequest(`${baseUrl}/transfers/${transferId}/confirm`, { method: "POST", headers: authHeaders(idToken) }),
     cancel: (transferId) =>

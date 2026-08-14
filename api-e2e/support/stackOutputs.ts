@@ -28,8 +28,13 @@ export interface StackOutputs {
   transferQueryApiUrl: string;
   // 人間可読な口座番号(docs/adr/0015)。
   accountNumberQueryApiUrl: string;
+  accountNumbersTableName: string;
   // Amazon Cognitoによる実認証(docs/adr/0016)。support/auth.tsのsignUpAndSignInに渡す。
   userPoolClientId: string;
+  // 本物の顧客-口座関係(docs/adr/0016決定4)。support/testDataCleanup.tsが
+  // テストで作った口座の後片付けに使う。
+  customerAccountsTableName: string;
+  transferStatusViewTableName: string;
 }
 
 const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
@@ -49,7 +54,10 @@ const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
   transferCommandApiUrl: "TransferCommandApiUrl",
   transferQueryApiUrl: "TransferQueryApiUrl",
   accountNumberQueryApiUrl: "AccountNumberQueryApiUrl",
+  accountNumbersTableName: "AccountNumbersTableName",
   userPoolClientId: "UserPoolClientId",
+  customerAccountsTableName: "CustomerAccountsTableName",
+  transferStatusViewTableName: "TransferStatusViewTableName",
 };
 
 export async function fetchStackOutputs(): Promise<StackOutputs> {

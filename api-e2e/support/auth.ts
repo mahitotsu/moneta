@@ -32,6 +32,18 @@ function decodeJwtPayload(token: string): Record<string, unknown> {
   return JSON.parse(json) as Record<string, unknown>;
 }
 
+/** support/httpClient.tsのcreateCommandApiが、openAccount成功時にownerId(=このidTokenのsub)を
+ * support/testDataCleanup.tsへ追跡登録するために使う。不正な形式のトークンならundefinedを
+ * 返す(例外を投げない——呼び出し側は「追跡できなければ諦める」というベストエフォートの扱い)。 */
+export function subFromIdToken(idToken: string): string | undefined {
+  try {
+    const sub = decodeJwtPayload(idToken).sub;
+    return typeof sub === "string" ? sub : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface TestIdentity {
   /** `Authorization: Bearer ${idToken}`としてそのまま使う。 */
   idToken: string;

@@ -2,6 +2,9 @@
 // a separate copy rather than a shared import: web-ui and infra are independent TS projects,
 // and this harness deliberately talks to the raw API Gateway URLs (docs/adr/0006/0004)
 // instead of the CloudFront-proxied relative paths web-ui uses (docs/adr/0007).
+import { subFromIdToken } from "./auth";
+import { trackCreatedAccount } from "./testDataCleanup";
+
 export type FreezeReasonRequest = "SuspectedFraud" | "CourtOrder" | "CustomerRequest";
 export type FreezeReasonView = "suspected_fraud" | "court_order" | "customer_request";
 
@@ -80,12 +83,22 @@ export interface CommandApi {
 // むしろAPIGWのリクエスト検証で拒否される。
 export function createCommandApi(baseUrl: string, idToken?: string): CommandApi {
   return {
-    openAccount: (accountId, initialBalance, idempotencyKey = crypto.randomUUID()) =>
-      rawRequest(`${baseUrl}/accounts/${accountId}`, {
+    openAccount: async (accountId, initialBalance, idempotencyKey = crypto.randomUUID()) => {
+      const response = await rawRequest(`${baseUrl}/accounts/${accountId}`, {
         method: "PUT",
         headers: jsonHeaders(idToken, idempotencyKey),
         body: JSON.stringify({ initial_balance: initialBalance }),
-      }),
+      });
+      // support/testDataCleanup.tsのteardownに乗せる(2026-08-14発覚: 口座データもCognito
+      // ユーザーと同じく際限なく積み上がっていた)。ownerIdはこのcommandApiを構築した
+      // idTokenのsubそのもの(docs/adr/0016決定3、Openはリクエストボディのowner_idを
+      // 見ない)——ここでも同じ値をidTokenから取り出すだけで、サーバーとの二重管理にはならない。
+      if (response.status === 202 && idToken) {
+        const ownerId = subFromIdToken(idToken);
+        if (ownerId) trackCreatedAccount(accountId, ownerId);
+      }
+      return response;
+    },
     deposit: (accountId, amount, idempotencyKey = crypto.randomUUID()) =>
       rawRequest(`${baseUrl}/accounts/${accountId}/deposits`, {
         method: "POST",

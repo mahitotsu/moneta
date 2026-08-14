@@ -11,6 +11,8 @@
 // もはやリクエストボディの自己申告値ではなく認証済みJWTのsubから決まる(決定3)。呼び出し側は
 // support/auth.tsのsignUpAndSignInで得たidTokenを渡す——それがそのままこの口座のownerIdになる。
 import type { StackOutputs } from "./stackOutputs";
+import { subFromIdToken } from "./auth";
+import { trackCreatedAccount } from "./testDataCleanup";
 
 interface AccountView {
   status: "active" | "frozen" | "closed";
@@ -87,5 +89,11 @@ export async function openFreshAccount(
   }
   await waitForActive(outputs.queryApiUrl, accountId, idToken);
   await waitForListedInMyAccounts(outputs.queryApiUrl, accountId, idToken);
+
+  // support/testDataCleanup.tsのteardownに乗せる(2026-08-14発覚: 口座データもCognito
+  // ユーザーと同じく際限なく積み上がっていた)。
+  const ownerId = subFromIdToken(idToken);
+  if (ownerId) trackCreatedAccount(accountId, ownerId);
+
   return accountId;
 }

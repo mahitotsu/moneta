@@ -32,6 +32,19 @@ function decodeJwtPayload(token: string): Record<string, unknown> {
   return JSON.parse(json) as Record<string, unknown>;
 }
 
+/** support/seed.tsが、開設した口座のownerId(=idTokenのsub)をsupport/testDataCleanup.tsへ
+ * 追跡登録するために使う。不正な形式のトークンならundefinedを返す(例外を投げない——呼び出し側は
+ * 「追跡できなければ諦める」というベストエフォートの扱い、api-e2e/support/auth.tsの同名関数と
+ * 同じ考え方)。 */
+export function subFromIdToken(idToken: string): string | undefined {
+  try {
+    const sub = decodeJwtPayload(idToken).sub;
+    return typeof sub === "string" ? sub : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface TestIdentity {
   username: string;
   idToken: string;
