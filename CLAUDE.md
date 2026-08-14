@@ -138,6 +138,30 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
   (documented as future work). Known residual gap (documented in the ADR's trade-offs): read-side
   item-level authorization isn't implemented — an authenticated user who knows another customer's
   `accountId` can still `GET /accounts/{id}` directly.
+- `0017`: replaces the customer's own transfer history (`web-ui/src/transferHistory.ts`, deleted
+  — localStorage-only, per `0012` decision 6) with a server-side projection, after seeding
+  demo data via raw HTTP calls (bypassing the browser) revealed that history never appeared for
+  anyone since it was only ever written when a transfer was started through that exact browser's
+  `TransferForm`. A new `transfer-history-projector` (`crates/transfer-service`) subscribes to
+  the same `TransferSagaTable` DynamoDB Streams source `transfer-status-projector` already uses
+  (multiple independent Lambda triggers on one stream, not a new mechanism) and writes both the
+  sender's and receiver's `ownerId` into a new `CustomerTransfersTable`, resolving each side's
+  identity via `TransferAccountOwnersTable` (`0011`) — furikomi appears in both parties' history,
+  furikae collapses to one entry. The table's range key is `transferId` (not
+  `updatedAt#transferId` as first implemented — that version was proven wrong only after live
+  deployment, when a saga's several state transitions each produced a separate row instead of
+  converging; fixed by moving "newest first" ordering to a dedicated `byUpdatedAt` GSI, same
+  "base key stable, sort via GSI" shape as `0015`'s `AccountNumbersTable`). New Lambda-less
+  `GET /customers/me/transfers` on `TransferQueryApi`, same `$context.authorizer.claims.sub`
+  pattern as `0016` decision 4's `GET /customers/me/accounts`. Separately (same session, not
+  itself an ADR-worthy decision but worth knowing when working in this repo): `api-e2e`/`ui-e2e`
+  gained automatic per-run teardown for both their Cognito test users and the DynamoDB rows they
+  create (`support/testDataCleanup.ts` in each), after discovering `npm test` had never cleaned
+  up either and both had grown into the thousands; `infra/scripts/clean-data.ts` gained a
+  `cognito` target and `infra/scripts/seed-demo-data.ts` was added to populate a small,
+  never-auto-deleted `demo-customer`/`demo-customer-2` pair for manually checking the deployed
+  UI actually looks like something, independent of and unaffected by that teardown (it only ever
+  deletes what a given test run itself created).
 
 ## Commands
 

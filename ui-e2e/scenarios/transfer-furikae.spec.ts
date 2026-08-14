@@ -7,7 +7,14 @@ import { fetchStackOutputs } from "../support/stackOutputs";
 import { openFreshAccount } from "../support/seed";
 import { signUpAndSignIn } from "../support/auth";
 import { seedAuthSession } from "../support/session";
-import { expectKindLabel, expectPendingPlaceholder, expectStateBadge, goToTransfersTab, startFurikae } from "../support/ui";
+import {
+  expectKindLabel,
+  expectPendingPlaceholder,
+  expectStateBadge,
+  goBackFromDetail,
+  goToTransfersTab,
+  startFurikae,
+} from "../support/ui";
 
 test("J1/J7: 振替は確認不要で即座に開始され、UI上で完了まで反映される", async ({ page, context }) => {
   const outputs = await fetchStackOutputs();
@@ -30,6 +37,12 @@ test("J1/J7: 振替は確認不要で即座に開始され、UI上で完了ま�
   // APIを直接叩いてサーバー側の拒否のみを検証しており、このUI固有の主張(振替の完了画面には
   // 組戻すボタンがそもそも現れない)は一度も検証されていなかった。
   await expect(page.getByRole("button", { name: "組戻す" })).not.toBeVisible();
+
+  // FC19(docs/adr/0017): 送金一覧はもうlocalStorageではなくサーバー側投影
+  // (CustomerTransfersTable)から取得する。一覧に戻ったときに、たった今完了させた送金が
+  // 実際に(手動でローカルへ記録するような処理を挟まず)自動的に現れることを確認する。
+  await goBackFromDetail(page);
+  await expect(page.locator(".account-card-name", { hasText: "振替" })).toBeVisible({ timeout: 30_000 });
 });
 
 // FC13(docs/decision-tables.mdの議論で判明): TransferForm.tsxのcanSubmit(TransferForm.tsx:53)は

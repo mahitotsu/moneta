@@ -3,7 +3,6 @@ import { DetailAppBar } from "./AppBar";
 import { useTransfer } from "../hooks/useTransfer";
 import { useSettlingMutation } from "../hooks/useSettlingMutation";
 import { confirmTransfer, cancelTransfer, recallTransfer } from "../api/client";
-import { addTransferFor } from "../transferHistory";
 import { formatAccountNumber, formatCurrency, formatDateTime } from "../format";
 import { TRANSFER_KIND_LABEL, TRANSFER_STATE_LABEL, type TransferState } from "../api/types";
 
@@ -38,14 +37,13 @@ const STATE_DESCRIPTION: Record<TransferState, string> = {
 
 interface Props {
   transferId: string;
-  customerName: string;
   onBack: () => void;
   onRecalled: (newTransferId: string) => void;
 }
 
 /** 送金1件の状態を継続ポーリングしつつ、振込の確認/取消(pending_confirmation中のみ)・
  * 組戻し(credited済みの振込のみ、24時間以内)の操作を提供する(docs/adr/0012決定6)。 */
-export function TransferDetailScreen({ transferId, customerName, onBack, onRecalled }: Props) {
+export function TransferDetailScreen({ transferId, onBack, onRecalled }: Props) {
   const { data, isLoading } = useTransfer(transferId);
 
   // 確認/取消はこのサガ自身の状態がpending_confirmationから遷移するのを待てば良いので、
@@ -70,14 +68,9 @@ export function TransferDetailScreen({ transferId, customerName, onBack, onRecal
       if (!data) throw new Error("transfer not loaded yet");
       const newTransferId = crypto.randomUUID();
       await recallTransfer(newTransferId, transferId);
-      addTransferFor(customerName, {
-        transferId: newTransferId,
-        kind: "recall",
-        fromAccountId: data.toAccountId,
-        toAccountId: data.fromAccountId,
-        amount: data.amount,
-        startedAt: new Date().toISOString(),
-      });
+      // 組戻し自身も新しいtransferId(kind: recall)のサガとしてtransfer-history-projectorが
+      // 拾う(docs/adr/0017)ため、ここでローカルに何かを記録する必要はない——「送金」タブの
+      // 一覧はサーバー側の反映を自動的に(ポーリングで)拾う。
       return newTransferId;
     },
     onSuccess: onRecalled,

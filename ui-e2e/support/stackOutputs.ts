@@ -28,6 +28,9 @@ export interface StackOutputs {
   accountViewTableName: string;
   accountHistoryTableName: string;
   customerAccountsTableName: string;
+  // 顧客ごとの送金履歴(docs/adr/0017)。support/testDataCleanup.tsの後片付けと、送金一覧
+  // タブが読むAPI(getMyTransfers相当)の両方の裏付けに使う。
+  customerTransfersTableName: string;
 }
 
 const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
@@ -44,6 +47,7 @@ const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
   accountViewTableName: "AccountViewTableName",
   accountHistoryTableName: "AccountHistoryTableName",
   customerAccountsTableName: "CustomerAccountsTableName",
+  customerTransfersTableName: "CustomerTransfersTableName",
 };
 
 export async function fetchStackOutputs(): Promise<StackOutputs> {

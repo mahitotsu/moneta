@@ -39,6 +39,13 @@ export async function startFurikomi(
   await page.getByRole("button", { name: "振込を依頼する" }).click();
 }
 
+/** TransferDetailScreen.tsxからTransferListScreen.tsxへ戻る(docs/adr/0017、送金一覧が
+ * サーバー側投影に切り替わった後もこの導線自体は無改修)。ラベルはAccountView詳細画面と
+ * 共有している(DetailAppBar.tsxの汎用の「戻る」ボタン)。 */
+export async function goBackFromDetail(page: Page): Promise<void> {
+  await page.getByLabel("口座一覧へ戻る").click();
+}
+
 export async function clickConfirmTransfer(page: Page): Promise<void> {
   await page.getByRole("button", { name: "振込を確定する" }).click();
 }

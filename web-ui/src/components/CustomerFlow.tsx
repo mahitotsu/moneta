@@ -53,7 +53,6 @@ export function CustomerFlow() {
     content = (
       <TransferDetailScreen
         transferId={view.transferId}
-        customerName={session.username}
         onBack={() => setView({ screen: "transfers" })}
         onRecalled={(newTransferId) => setView({ screen: "transfer-detail", transferId: newTransferId })}
       />

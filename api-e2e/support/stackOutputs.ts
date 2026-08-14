@@ -35,6 +35,9 @@ export interface StackOutputs {
   // テストで作った口座の後片付けに使う。
   customerAccountsTableName: string;
   transferStatusViewTableName: string;
+  // 顧客ごとの送金履歴(docs/adr/0017)。support/testDataCleanup.tsのcleanupTestDataが
+  // テストで作った送金の後片付けに使う。
+  customerTransfersTableName: string;
 }
 
 const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
@@ -58,6 +61,7 @@ const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
   userPoolClientId: "UserPoolClientId",
   customerAccountsTableName: "CustomerAccountsTableName",
   transferStatusViewTableName: "TransferStatusViewTableName",
+  customerTransfersTableName: "CustomerTransfersTableName",
 };
 
 export async function fetchStackOutputs(): Promise<StackOutputs> {

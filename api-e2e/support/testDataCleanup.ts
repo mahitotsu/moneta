@@ -86,12 +86,34 @@ async function deleteAccountNumberRow(tableName: string, accountId: string): Pro
   }
 }
 
+// customer_transfers(PK ownerId, SK transferId、docs/adr/0017)は個々のtransferIdを追跡して
+// いなくても、accountsPendingCleanupから分かる関与オーナー全員についてQueryし、見つかった行を
+// 丸ごと削除すれば十分安全(追跡しているのは使い捨てのテスト識別子だけなので)。
+async function deleteAllCustomerTransfersForOwner(tableName: string, ownerId: string): Promise<void> {
+  try {
+    const result = await doc().send(
+      new QueryCommand({
+        TableName: tableName,
+        KeyConditionExpression: "ownerId = :o",
+        ExpressionAttributeValues: { ":o": ownerId },
+        ProjectionExpression: "ownerId, transferId",
+      }),
+    );
+    await Promise.all(
+      (result.Items ?? []).map((item) => safeDelete(tableName, { ownerId: item.ownerId, transferId: item.transferId })),
+    );
+  } catch (err) {
+    console.warn(`cleanupTestData: failed to query ${tableName} for ownerId ${ownerId}: ${String(err)}`);
+  }
+}
+
 /** jest.setup.tsのafterAllから呼ぶ、テストファイル単位の一括クリーンアップ。1件の削除失敗が
  * 他の削除やテスト結果そのものを巻き込まないよう、失敗はログに残すのみで例外を投げない
  * (support/auth.tsのcleanupSignedUpUsersと同じ考え方)。 */
 export async function cleanupTestData(outputs: StackOutputs): Promise<void> {
   const accounts = accountsPendingCleanup.splice(0, accountsPendingCleanup.length);
   const transfers = transfersPendingCleanup.splice(0, transfersPendingCleanup.length);
+  const owners = new Set(accounts.map((a) => a.ownerId));
 
   await Promise.all([
     ...accounts.flatMap(({ accountId, ownerId }) => [
@@ -106,5 +128,6 @@ export async function cleanupTestData(outputs: StackOutputs): Promise<void> {
       safeDelete(outputs.transferSagaTableName, { transferId }),
       safeDelete(outputs.transferStatusViewTableName, { transferId }),
     ]),
+    ...Array.from(owners, (ownerId) => deleteAllCustomerTransfersForOwner(outputs.customerTransfersTableName, ownerId)),
   ]);
 }

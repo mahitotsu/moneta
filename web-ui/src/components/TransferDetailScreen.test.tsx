@@ -30,12 +30,7 @@ function renderDetail(transferId: string) {
   const queryClient = createQueryClient({ retryDelay: 0 });
   render(
     <QueryClientProvider client={queryClient}>
-      <TransferDetailScreen
-        transferId={transferId}
-        customerName="taro"
-        onBack={() => {}}
-        onRecalled={() => {}}
-      />
+      <TransferDetailScreen transferId={transferId} onBack={() => {}} onRecalled={() => {}} />
     </QueryClientProvider>,
   );
 }

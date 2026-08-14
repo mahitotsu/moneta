@@ -201,6 +201,19 @@ Deposit/Withdrawの無認証継続)・`ui-e2e/scenarios/auth.spec.ts`(実サイ�
 画面のDOM配線、開設した口座が手入力なしに一覧へ自動的に現れること、誤った認証情報での
 エラー表示)
 
+**FC19: 顧客ごとの送金履歴(GET /customers/me/transfers)のサーバー側投影**
+Given 顧客としてサインインし、口座を持つ
+When 振替または振込を実行する
+Then サガが`pending_confirmation`→`pending_debit`→`pending_credit`→`credited`と複数回状態
+遷移しても、`GET /customers/me/transfers`には同じtransferIdの行が1件だけ現れ、常に最新の状態を
+指す(初回実装では範囲キーに`updatedAt`を含めていたため、状態遷移のたびに別行が増える実バグが
+あった——実デプロイでの確認により発覚し、範囲キーをtransferId固定に修正した)。振込
+(名義不一致)は送金元・送金先どちらの一覧にも同じtransferIdで現れる。振替(同一名義)は
+結果的に1件(自分自身)に収束する。Web UIの「送金」タブはこの投影をポーリングするだけで、
+送金を開始した本人がその場でローカルに記録する処理は一切行わない
+→ [[0017-server-side-transfer-history]]決定1〜3 — **P0** — `transfer-history.e2e.test.ts`・
+`ui-e2e/scenarios/transfer-furikae.spec.ts`(UI側: 完了後に一覧へ戻ると自動的に現れることを確認)
+
 ---
 
 ## ① AWS Well-Architected Framework

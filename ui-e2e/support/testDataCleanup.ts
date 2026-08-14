@@ -1,11 +1,15 @@
 // api-e2e/support/testDataCleanup.tsの同型コピー(独立パッケージの方針、stackOutputs.tsと同じ
-// 理由)——だが**スコープは口座データのみ**(振替/振込のtransfer-sagas/transfer-status-viewは
-// 対象外)。あちらはsupport/transferClient.tsのstart()呼び出しでtransferIdを直接受け取れるが、
-// ui-e2e/はTransferForm.tsxを実ブラウザ経由で操作するだけで、transferId自体を取得できる
-// choke pointがない(ADR-0007の通りルーターを使わないSPAで、URLにも反映されない)。
-// React内部を無理にpage.evaluate()で覗くよりは、このギャップを正直に記録した上で
-// infra/scripts/clean-data.tsの定期的な一括ワイプに任せる方を選んだ——ui-e2e/が1回の実行で
-// 作る送金は数件程度で、口座データほど深刻な蓄積速度ではないため。
+// 理由)。**送金の操作系テーブル(transfer-sagas/transfer-status-view)は対象外のまま**——
+// あちらはsupport/transferClient.tsのstart()呼び出しでtransferIdを直接受け取れるが、ui-e2e/は
+// TransferForm.tsxを実ブラウザ経由で操作するだけで、transferId自体を取得できるchoke pointが
+// ない(ADR-0007の通りルーターを使わないSPAで、URLにも反映されない)。React内部を無理に
+// page.evaluate()で覗くよりは、このギャップを正直に記録した上でinfra/scripts/clean-data.tsの
+// 定期的な一括ワイプに任せる方を選んだ。
+//
+// ただし「送金」タブ自体が読む顧客ごとの送金履歴(docs/adr/0017、CustomerTransfersTable)は
+// transferIdを知らなくても片付けられる——PKはownerIdであり、口座追跡(trackCreatedAccount)で
+// 既にownerIdを持っているため、そのownerId宛の行をQueryしてまるごと削除すればよい
+// (api-e2e/support/testDataCleanup.tsのdeleteAllCustomerTransfersForOwnerと同じ考え方)。
 //
 // account_events/processed_messagesを対象にしない理由もapi-e2e/support/testDataCleanup.tsと
 // 同じ(追記専用ログ、TTL/アーカイブで扱うべきもの)。
@@ -72,11 +76,31 @@ async function deleteAccountNumberRow(tableName: string, accountId: string): Pro
   }
 }
 
+async function deleteAllCustomerTransfersForOwner(tableName: string, ownerId: string): Promise<void> {
+  try {
+    const result = await doc().send(
+      new QueryCommand({
+        TableName: tableName,
+        KeyConditionExpression: "ownerId = :o",
+        ExpressionAttributeValues: { ":o": ownerId },
+        ProjectionExpression: "ownerId, transferId",
+      }),
+    );
+    await Promise.all(
+      (result.Items ?? []).map((item) => safeDelete(tableName, { ownerId: item.ownerId, transferId: item.transferId })),
+    );
+  } catch (err) {
+    console.warn(`cleanupTestData: failed to query ${tableName} for ownerId ${ownerId}: ${String(err)}`);
+  }
+}
+
 /** support/fixtures.tsのworker-scopedフィクスチャから呼ぶ、ワーカー単位の一括クリーンアップ。 */
 export async function cleanupTestData(outputs: StackOutputs): Promise<void> {
   const accounts = accountsPendingCleanup.splice(0, accountsPendingCleanup.length);
-  await Promise.all(
-    accounts.flatMap(({ accountId, ownerId }) => [
+  const owners = new Set(accounts.map((a) => a.ownerId));
+
+  await Promise.all([
+    ...accounts.flatMap(({ accountId, ownerId }) => [
       safeDelete(outputs.accountsTableName, { accountId }),
       safeDelete(outputs.accountViewTableName, { accountId }),
       safeDelete(outputs.transferAccountOwnersTableName, { accountId }),
@@ -84,5 +108,6 @@ export async function cleanupTestData(outputs: StackOutputs): Promise<void> {
       deleteAccountHistoryRows(outputs.accountHistoryTableName, accountId),
       deleteAccountNumberRow(outputs.accountNumbersTableName, accountId),
     ]),
-  );
+    ...Array.from(owners, (ownerId) => deleteAllCustomerTransfersForOwner(outputs.customerTransfersTableName, ownerId)),
+  ]);
 }

@@ -89,6 +89,7 @@ export function createTransferCommandApi(baseUrl: string, idToken?: string): Tra
 
 export interface TransferQueryApi {
   getTransferStatus(transferId: string): Promise<TransferStatusView | null>;
+  getMyTransfers(): Promise<TransferStatusView[]>;
 }
 
 export function createTransferQueryApi(baseUrl: string, idToken?: string): TransferQueryApi {
@@ -102,6 +103,16 @@ export function createTransferQueryApi(baseUrl: string, idToken?: string): Trans
         throw new Error(
           `getTransferStatus(${transferId}) unexpected status ${response.status}: ${JSON.stringify(response.body)}`,
         );
+      }
+      return response.body;
+    },
+    // 顧客ごとの送金履歴(docs/adr/0017)。新しい順(サーバー側でScanIndexForward: false済み)。
+    getMyTransfers: async () => {
+      const response = await rawRequest<TransferStatusView[]>(`${baseUrl}/customers/me/transfers`, {
+        headers: authHeaders(idToken),
+      });
+      if (response.status !== 200) {
+        throw new Error(`getMyTransfers() unexpected status ${response.status}: ${JSON.stringify(response.body)}`);
       }
       return response.body;
     },

@@ -71,7 +71,7 @@ describe("AccountPipelineStack", () => {
   // 全てのDynamoDBテーブルがこの落とし穴を回避できているかを固定する回帰テスト
   // (docs/adr/0011でTransferAccountOwnersTableを、docs/adr/0013でaccount-service自身の
   // 3テーブルを、docs/adr/0012でTransferStatusViewTableを、docs/adr/0015でAccountNumbersTable
-  // を追加)。
+  // を、docs/adr/0017でCustomerTransfersTableを追加)。
   test("all DynamoDB tables are set to DESTROY on stack/changeset rollback, not the RETAIN default", () => {
     const tables = template.findResources("AWS::DynamoDB::Table");
     const tableNames = Object.values(tables).map((table) => table.Properties.TableName);
@@ -83,6 +83,7 @@ describe("AccountPipelineStack", () => {
         "moneta-account-views",
         "moneta-accounts",
         "moneta-customer-accounts",
+        "moneta-customer-transfers",
         "moneta-processed-messages",
         "moneta-transfer-account-owners",
         "moneta-transfer-sagas",
@@ -127,8 +128,8 @@ describe("AccountPipelineStack", () => {
     });
   });
 
-  test("creates exactly fourteen Lambda functions: write path, outbox projector, query projector, account number projector, customer accounts projector, the three auth-service functions (pre sign-up, post confirmation, post authentication), the four transfer-service functions (command intake, saga step, owner projector, status projector), and the two Web UI hosting custom-resource handlers (S3 auto-delete-objects, BucketDeployment sync)", () => {
-    template.resourceCountIs("AWS::Lambda::Function", 14);
+  test("creates exactly fifteen Lambda functions: write path, outbox projector, query projector, account number projector, customer accounts projector, the three auth-service functions (pre sign-up, post confirmation, post authentication), the five transfer-service functions (command intake, saga step, owner projector, status projector, history projector), and the two Web UI hosting custom-resource handlers (S3 auto-delete-objects, BucketDeployment sync)", () => {
+    template.resourceCountIs("AWS::Lambda::Function", 15);
   });
 
   // docs/adr/0015: owner_projector.rs(docs/adr/0011)と同じ理由でaccount.event.Openedのみ
@@ -348,6 +349,65 @@ describe("AccountPipelineStack", () => {
     });
   });
 
+  // docs/adr/0017: TransferSagaTableへのGSI追加ではなく、transfer-status-projectorと同型の
+  // 別の専用投影(transfer-history-projector)を同じStreamsに追加で結線する。1つのDynamoDB
+  // ストリームに複数のLambdaトリガーが独立して購読できることの固定(2つ目のEventSourceMapping
+  // が実際に作られているか)。
+  test("transfer_sagas table has two independent stream consumers: transfer-status-projector and transfer-history-projector", () => {
+    // ベーステーブルの範囲キーはtransferId(実デプロイでの確認で判明した設計修正——
+    // 当初のupdatedAt#transferIdでは状態遷移のたびに別アイテムが積み上がるバグがあった)。
+    // 新しい順の並び替えはbyUpdatedAt GSIに分離する。
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      TableName: "moneta-customer-transfers",
+      BillingMode: "PAY_PER_REQUEST",
+      KeySchema: [
+        { AttributeName: "ownerId", KeyType: "HASH" },
+        { AttributeName: "transferId", KeyType: "RANGE" },
+      ],
+      GlobalSecondaryIndexes: Match.arrayWith([
+        Match.objectLike({
+          IndexName: "byUpdatedAt",
+          KeySchema: [
+            { AttributeName: "ownerId", KeyType: "HASH" },
+            { AttributeName: "updatedAt", KeyType: "RANGE" },
+          ],
+          Projection: { ProjectionType: "ALL" },
+        }),
+      ]),
+    });
+    // account-outbox-projectorもTRIM_HORIZONの別のEventSourceMapping(AccountEventsTable向け)を
+    // 持つため、StartingPositionだけでは絞り込めない——CDKの自動生成論理IDに元の関数名が
+    // そのまま現れることを頼りに、TransferSagaTable向けの2つだけを数える。
+    const mappings = template.findResources("AWS::Lambda::EventSourceMapping", {
+      Properties: Match.objectLike({ StartingPosition: "TRIM_HORIZON" }),
+    });
+    const transferSagaMappings = Object.keys(mappings).filter(
+      (id) => id.includes("TransferStatusProjectorFunction") || id.includes("TransferHistoryProjectorFunction"),
+    );
+    expect(transferSagaMappings).toHaveLength(2);
+  });
+
+  test("exposes GET /customers/me/transfers as a direct DynamoDB Query integration against the byUpdatedAt GSI, keyed off the Cognito sub claim, newest first", () => {
+    template.hasResourceProperties("AWS::ApiGateway::Method", {
+      HttpMethod: "GET",
+      AuthorizationType: "COGNITO_USER_POOLS",
+      Integration: Match.objectLike({
+        Type: "AWS",
+        IntegrationHttpMethod: "POST",
+        Uri: Match.objectLike({
+          "Fn::Join": Match.arrayWith([Match.arrayWith([Match.stringLikeRegexp("action/Query$")])]),
+        }),
+        RequestTemplates: Match.objectLike({
+          "application/json": Match.objectLike({
+            "Fn::Join": Match.arrayWith([
+              Match.arrayWith([Match.stringLikeRegexp("byUpdatedAt.*authorizer\\.claims\\.sub.*ScanIndexForward.*false")]),
+            ]),
+          }),
+        }),
+      }),
+    });
+  });
+
   test("exposes GET /transfers/{transferId} as a direct DynamoDB integration against TransferStatusView, not TransferSagaTable", () => {
     template.hasResourceProperties("AWS::ApiGateway::Method", {
       HttpMethod: "GET",
@@ -525,16 +585,17 @@ describe("AccountPipelineStack", () => {
   });
 
   // docs/adr/0016決定2: Deposit/Withdraw(外部チャネル、ADR-0009決定1)だけは認証を要求しない。
-  // それ以外の全メソッド(15個中13個 + 新設のGET /customers/me/accounts = 14個)は
-  // Cognito認証必須にする——この非対称こそが今回の変更の核心なので、個数を固定する。
-  test("14 of 16 API methods require Cognito auth; Deposit/Withdraw are the only two exceptions", () => {
+  // それ以外の全メソッド(15個中13個 + GET /customers/me/accounts + 新設のGET
+  // /customers/me/transfers[docs/adr/0017] = 15個)はCognito認証必須にする——この非対称こそが
+  // 今回の変更の核心なので、個数を固定する。
+  test("15 of 17 API methods require Cognito auth; Deposit/Withdraw are the only two exceptions", () => {
     const methods = template.findResources("AWS::ApiGateway::Method");
     const allMethods = Object.values(methods);
     const authorized = allMethods.filter((m) => m.Properties?.AuthorizationType === "COGNITO_USER_POOLS");
     const unauthorized = allMethods.filter((m) => m.Properties?.AuthorizationType !== "COGNITO_USER_POOLS");
 
-    expect(allMethods).toHaveLength(16);
-    expect(authorized).toHaveLength(14);
+    expect(allMethods).toHaveLength(17);
+    expect(authorized).toHaveLength(15);
     expect(unauthorized).toHaveLength(2);
     // 認証なしの2つが、まさにdeposits/withdrawalsのSQS統合であることを確認する
     // (Uriにキューの論理IDが現れる、既存のtransfer command API判定テストと同じ手法)。

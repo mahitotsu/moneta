@@ -28,6 +28,10 @@ path = "src/bin/owner_projector.rs"
 name = "transfer-status-projector"
 path = "src/bin/transfer_status_projector.rs"
 
+[[bin]]
+name = "transfer-history-projector"
+path = "src/bin/transfer_history_projector.rs"
+
 [dependencies]
 account-domain = { path = "../account-domain" }
 aws-config = "1"

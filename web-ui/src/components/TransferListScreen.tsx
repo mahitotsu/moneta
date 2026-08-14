@@ -1,11 +1,10 @@
 import { useState } from "react";
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { BrandAppBar } from "./AppBar";
 import { CustomerTabBar, type CustomerTab } from "./CustomerTabBar";
-import { TransferForm, type StartedTransfer } from "./TransferForm";
+import { TransferForm } from "./TransferForm";
 import { PlusCircle } from "./icons";
-import { getMyAccounts, getTransferStatus } from "../api/client";
-import { addTransferFor, getTransfersFor, type CustomerTransfer } from "../transferHistory";
+import { getMyAccounts, getMyTransfers } from "../api/client";
 import { signOut } from "../auth";
 import { formatAccountNumber, formatCurrency } from "../format";
 import { TRANSFER_KIND_LABEL, TRANSFER_STATE_LABEL, type TransferState } from "../api/types";
@@ -31,10 +30,10 @@ interface Props {
   onSignedOut: () => void;
 }
 
-/** 顧客が開始した送金の一覧(localStorageのみ、docs/adr/0012決定6)+ 振替/振込の新規依頼。
- * AccountListScreenと対になる、「送金」タブの中身。 */
+/** 顧客が関わった送金の一覧(サーバー側`CustomerTransfersTable`、docs/adr/0017)+
+ * 振替/振込の新規依頼。AccountListScreenと対になる、「送金」タブの中身。 */
 export function TransferListScreen({ customerName, onSelectTransfer, onSelectTab, onSignedOut }: Props) {
-  const [transfers, setTransfers] = useState<CustomerTransfer[]>(() => getTransfersFor(customerName));
+  const queryClient = useQueryClient();
   // "other-bank"は非機能なプレースホルダ(docs/adr/0015決定7)——選んでもTransferFormは出さず、
   // 案内文だけを表示する。バックエンド呼び出しは一切発生しない。
   const [openForm, setOpenForm] = useState<"furikae" | "furikomi" | "other-bank" | null>(null);
@@ -48,21 +47,22 @@ export function TransferListScreen({ customerName, onSelectTransfer, onSelectTab
   });
   const accounts = myAccountsQuery.data ?? [];
 
-  // 一覧の各行のバッジを最新化するため、表示中の送金を並行ポーリングする
-  // (AccountListScreenのbalanceQueriesと同じ理由・同じqueryKeyでTransferDetailScreenと
-  // キャッシュを共有する)。
-  const statusQueries = useQueries({
-    queries: transfers.map((t) => ({
-      queryKey: ["transfer", t.transferId],
-      queryFn: () => getTransferStatus(t.transferId),
-      refetchInterval: POLL_INTERVAL_MS,
-    })),
+  // 送金一覧そのものもサーバー側の投影(docs/adr/0017)——AccountListScreenのmyAccountsQueryと
+  // 同じ形。各カードの状態バッジもこのレスポンス自身が持つ`state`をそのまま使えるため、
+  // 以前のように行ごとに`getTransferStatus`を並行ポーリングする必要はない。
+  const myTransfersQuery = useQuery({
+    queryKey: ["my-transfers"],
+    queryFn: () => getMyTransfers(),
+    refetchInterval: POLL_INTERVAL_MS,
   });
+  const transfers = myTransfersQuery.data ?? [];
 
-  const recordStarted = (kind: "furikae" | "furikomi", started: StartedTransfer) => {
-    addTransferFor(customerName, { ...started, kind, startedAt: new Date().toISOString() });
-    setTransfers(getTransfersFor(customerName));
+  const handleStarted = (started: { transferId: string }) => {
     setOpenForm(null);
+    // transfer-history-projectorの反映を待たず、まず取れる分だけ即座に再確認する
+    // (反映まではPOLL_INTERVAL_MSごとの自動ポーリングが拾う、AccountListScreenの
+    // OpenAccountForm.onOpenedと同じ考え方)。
+    void queryClient.invalidateQueries({ queryKey: ["my-transfers"] });
     onSelectTransfer(started.transferId);
   };
 
@@ -78,35 +78,32 @@ export function TransferListScreen({ customerName, onSelectTransfer, onSelectTab
       <div className="bank-body">
         <CustomerTabBar active="transfers" onSelect={onSelectTab} />
 
-        {transfers.length === 0 ? (
+        {myTransfersQuery.isLoading ? (
+          <div className="panel">
+            <div className="skeleton skeleton-line" style={{ width: "60%" }} />
+          </div>
+        ) : transfers.length === 0 ? (
           <div className="panel">
             <p>まだ送金の依頼はありません。下から振替・振込を行ってください。</p>
           </div>
         ) : (
           <ul className="account-list">
-            {transfers.map((t, i) => {
-              const state = statusQueries[i]?.data?.state;
-              return (
-                <li key={t.transferId}>
-                  <button type="button" className="account-card" onClick={() => onSelectTransfer(t.transferId)}>
-                    <span className="account-card-main">
-                      <span className="account-card-name">{TRANSFER_KIND_LABEL[t.kind]}</span>
-                      <span className="account-card-number">
-                        ●●●●{formatAccountNumber(t.toAccountId).slice(-4)} 宛
-                      </span>
+            {transfers.map((t) => (
+              <li key={t.transferId}>
+                <button type="button" className="account-card" onClick={() => onSelectTransfer(t.transferId)}>
+                  <span className="account-card-main">
+                    <span className="account-card-name">{TRANSFER_KIND_LABEL[t.kind]}</span>
+                    <span className="account-card-number">
+                      ●●●●{formatAccountNumber(t.toAccountId).slice(-4)} 宛
                     </span>
-                    <span className="account-card-side">
-                      <span className="account-card-balance">{formatCurrency(t.amount)}</span>
-                      {state ? (
-                        <span className={STATE_BADGE_CLASS[state]}>{TRANSFER_STATE_LABEL[state]}</span>
-                      ) : (
-                        <span className="badge badge-pending">反映待ち</span>
-                      )}
-                    </span>
-                  </button>
-                </li>
-              );
-            })}
+                  </span>
+                  <span className="account-card-side">
+                    <span className="account-card-balance">{formatCurrency(t.amount)}</span>
+                    <span className={STATE_BADGE_CLASS[t.state]}>{TRANSFER_STATE_LABEL[t.state]}</span>
+                  </span>
+                </button>
+              </li>
+            ))}
           </ul>
         )}
 
@@ -153,7 +150,7 @@ export function TransferListScreen({ customerName, onSelectTransfer, onSelectTab
               <TransferForm
                 kind={openForm}
                 accounts={accounts}
-                onStarted={(started) => recordStarted(openForm, started)}
+                onStarted={handleStarted}
               />
             )}
 

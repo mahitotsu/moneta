@@ -1271,6 +1271,62 @@ export class AccountPipelineStack extends cdk.Stack {
       }),
     );
 
+    // --- 顧客ごとの送金履歴(docs/adr/0017) --------------------------------------
+    // TransferSagaTableへのGSI追加ではなく、transfer-status-projectorと同型の専用の
+    // 小さな投影(決定1)。送金元・送金先両方のownerId向けに書く(決定2)ため、
+    // TransferAccountOwnersTable([[0011]])からの名義解決が要る。
+    //
+    // ベーステーブルの範囲キーはtransferId(実デプロイでの確認により判明した設計修正——
+    // 当初`updatedAt#transferId`にしていたところ、サガが状態遷移するたびに別アイテムとして
+    // 積み上がってしまう実バグを起こした)。「新しい順」の並び替えは別途GSI(`byUpdatedAt`)
+    // で実現する——account-numbers-tableのbyAccountId GSIと同じ「逆引き/別順序用の
+    // 専用インデックス」という使い方。
+    // 論理ID"V2"は意図的(実デプロイでの確認により判明): 固定TableNameを持つリソースの
+    // キースキーマ変更は、CloudFormationが「置き換えを要する変更」と分類した時点で
+    // 「まずリネームしてから再デプロイせよ」と拒否する——実際にAWS側のテーブルを手動削除
+    // しても、CloudFormationのスタック状態(直前の成功デプロイのテンプレート)がまだ同じ
+    // 論理IDを追跡している限りこの拒否は変わらない。論理ID自体を変えることで
+    // CloudFormationに「新規作成+別リソースの削除」として扱わせ、この制約を回避する。
+    const customerTransfersTable = new dynamodb.Table(this, "CustomerTransfersTableV2", {
+      tableName: "moneta-customer-transfers",
+      partitionKey: { name: "ownerId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "transferId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+    customerTransfersTable.addGlobalSecondaryIndex({
+      indexName: "byUpdatedAt",
+      partitionKey: { name: "ownerId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "updatedAt", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    const transferHistoryProjectorDlq = new sqs.Queue(this, "TransferHistoryProjectorDlq");
+
+    const transferHistoryProjectorFn = new lambda.Function(this, "TransferHistoryProjectorFunction", {
+      runtime: lambda.Runtime.PROVIDED_AL2023,
+      architecture: lambda.Architecture.X86_64,
+      handler: "bootstrap",
+      timeout: cdk.Duration.seconds(30),
+      code: rustLambdaCode("transfer-service", "transfer-history-projector"),
+      environment: {
+        CUSTOMER_TRANSFERS_TABLE_NAME: customerTransfersTable.tableName,
+        OWNER_TABLE_NAME: transferAccountOwnersTable.tableName,
+      },
+    });
+    customerTransfersTable.grantWriteData(transferHistoryProjectorFn);
+    transferAccountOwnersTable.grantReadData(transferHistoryProjectorFn);
+
+    transferHistoryProjectorFn.addEventSource(
+      new DynamoEventSource(transferSagaTable, {
+        startingPosition: lambda.StartingPosition.TRIM_HORIZON,
+        batchSize: 10,
+        retryAttempts: 3,
+        reportBatchItemFailures: true,
+        onFailure: new SqsDestination(transferHistoryProjectorDlq),
+      }),
+    );
+
     // --- 送金状態照会API: API Gateway REST API + DynamoDB直接統合 --------------
     // account-serviceのAccountQueryApi(GetItem直接統合、決定1・[[0004]])と同じ思想。
     const transferQueryApiDynamoRole = new iam.Role(this, "TransferQueryApiDynamoRole", {
@@ -1335,6 +1391,70 @@ export class AccountPipelineStack extends cdk.Stack {
     const transferResource = transfersResource.addResource("{transferId}");
     transferResource.addMethod("GET", getTransferIntegration, {
       methodResponses: [{ statusCode: "200" }, { statusCode: "404" }],
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+      authorizer: transferQueryAuthorizer,
+    });
+
+    // GET /customers/me/transfers: ownerIdはリクエストパラメータではなくCognito JWTのsub
+    // クレームから取る(docs/adr/0016決定4と同じパターン、docs/adr/0017決定3)。
+    // byUpdatedAt GSIに対してQueryし、ScanIndexForward: falseで更新日時の新しい順を返す
+    // (ベーステーブル自体のSKはtransferId固定——上記コメント参照)。
+    transferQueryApiDynamoRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["dynamodb:Query"],
+        resources: [`${customerTransfersTable.tableArn}/index/byUpdatedAt`],
+      }),
+    );
+
+    const listMyTransfersIntegration = new apigateway.AwsIntegration({
+      service: "dynamodb",
+      action: "Query",
+      options: {
+        credentialsRole: transferQueryApiDynamoRole,
+        passthroughBehavior: apigateway.PassthroughBehavior.NEVER,
+        requestTemplates: {
+          "application/json": JSON.stringify({
+            TableName: customerTransfersTable.tableName,
+            IndexName: "byUpdatedAt",
+            KeyConditionExpression: "ownerId = :ownerId",
+            ExpressionAttributeValues: {
+              ":ownerId": { S: "$context.authorizer.claims.sub" },
+            },
+            ScanIndexForward: false,
+          }),
+        },
+        integrationResponses: [
+          {
+            statusCode: "200",
+            responseTemplates: {
+              "application/json": [
+                "#set($items = $input.path('$.Items'))",
+                "[",
+                "#foreach($item in $items)",
+                "{",
+                '"transferId":"$item.transferId.S",',
+                '"fromAccountId":"$item.fromAccountId.S",',
+                '"toAccountId":"$item.toAccountId.S",',
+                '"amount":"$item.amount.S",',
+                '"kind":"$item.kind.S",',
+                '"state":"$item.state.S",',
+                '"updatedAt":"$item.updatedAt.S"',
+                "}#if($foreach.hasNext),#end",
+                "#end",
+                "]",
+              ].join("\n"),
+            },
+          },
+        ],
+      },
+    });
+
+    const myTransfersResource = transferQueryApi.root
+      .addResource("customers")
+      .addResource("me")
+      .addResource("transfers");
+    myTransfersResource.addMethod("GET", listMyTransfersIntegration, {
+      methodResponses: [{ statusCode: "200" }],
       authorizationType: apigateway.AuthorizationType.COGNITO,
       authorizer: transferQueryAuthorizer,
     });
@@ -1697,6 +1817,8 @@ export class AccountPipelineStack extends cdk.Stack {
     new cdk.CfnOutput(this, "UserPoolClientId", { value: userPoolClient.userPoolClientId });
     new cdk.CfnOutput(this, "CustomerAccountsTableName", { value: customerAccountsTable.tableName });
     new cdk.CfnOutput(this, "CustomerAccountsProjectorFunctionName", { value: customerAccountsProjectorFn.functionName });
+    new cdk.CfnOutput(this, "CustomerTransfersTableName", { value: customerTransfersTable.tableName });
+    new cdk.CfnOutput(this, "TransferHistoryProjectorFunctionName", { value: transferHistoryProjectorFn.functionName });
     new cdk.CfnOutput(this, "CommandApiUrl", { value: commandApi.url });
     new cdk.CfnOutput(this, "WebUiUrl", { value: `https://${webUiDistribution.domainName}` });
     new cdk.CfnOutput(this, "TransferSagaTableName", { value: transferSagaTable.tableName });

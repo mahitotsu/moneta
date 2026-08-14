@@ -63,10 +63,9 @@ export interface TransactionEntry {
 /**
  * 振替(同一名義間)/振込(名義不一致)/組戻し(docs/adr/0011)。サーバー側の名義突き合わせ
  * (`transfer-service`のowner index projection)が決めるものであり、クライアントは`Start`/
- * `Recall`のリクエストにこの値を含めない——`GET /transfers/{transferId}`
- * (`TransferStatusView`)のレスポンスとしてのみ受け取る(docs/adr/0012決定1)。
- * web-ui側でlocalStorageに保存する`kind`(`transferHistory.ts`)は送信時点のUI上の意図に
- * すぎず、表示は常にこの値(サーバー側の判定結果)を優先する。
+ * `Recall`のリクエストにこの値を含めない——`GET /transfers/{transferId}`・
+ * `GET /customers/me/transfers`(`TransferStatusView`、docs/adr/0017)のレスポンスとして
+ * のみ受け取る(docs/adr/0012決定1)。
  */
 export type TransferKind = "furikae" | "furikomi" | "recall";
 
@@ -82,7 +81,10 @@ export type TransferState =
   | "cancelled";
 
 /** `GET /transfers/{transferId}`のレスポンス全体
- * (`transfer-status-projector`のフィールド写像が単一の真実源、docs/adr/0012決定1)。 */
+ * (`transfer-status-projector`のフィールド写像が単一の真実源、docs/adr/0012決定1)。
+ * `GET /customers/me/transfers`(docs/adr/0017)の配列要素も同じ形——
+ * `transfer-history-projector`が同じソース(`TransferSagaTable`)から同じフィールドを
+ * 写像するため。 */
 export interface TransferStatusView {
   transferId: string;
   fromAccountId: string;

@@ -244,6 +244,23 @@ export function recallTransfer(transferId: string, originalTransferId: string): 
   return transferCommand("PUT", `/transfers/${transferId}/recall`, { original_transfer_id: originalTransferId });
 }
 
+/**
+ * サインイン中の顧客が関わった送金の一覧(docs/adr/0017)。新しい順(サーバー側で
+ * `ScanIndexForward: false`済み)。ownerIdはリクエストに含めない——`getMyAccounts`と同じく
+ * Cognito JWTのsubクレームから直接引く。振込は送金元・送金先どちらの一覧にも現れる
+ * (決定2)。送金直後はtransfer-history-projectorの反映待ちで、まだ現れないことがある
+ * (結果整合性、他の投影と同じ扱い)。
+ */
+export async function getMyTransfers(): Promise<TransferStatusView[]> {
+  const response = await fetchOrThrow(
+    `${TRANSFER_QUERY_API_BASE}/customers/me/transfers`,
+    { headers: await authHeaders() },
+    QUERY_FAILURE_MESSAGE,
+    "getMyTransfers",
+  );
+  return response.json() as Promise<TransferStatusView[]>;
+}
+
 /** 見つからない場合は`null`を返す(404、getAccountと同じ変換)。 */
 export async function getTransferStatus(transferId: string): Promise<TransferStatusView | null> {
   let response: Response;
