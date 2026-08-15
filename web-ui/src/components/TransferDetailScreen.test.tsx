@@ -11,14 +11,19 @@ import { TransferDetailScreen } from "./TransferDetailScreen";
 import type { TransferStatusView } from "../api/types";
 
 vi.mock("../api/client", () => ({
+  getAccountNumber: vi.fn(),
   getTransferStatus: vi.fn(),
   confirmTransfer: vi.fn(),
   cancelTransfer: vi.fn(),
   recallTransfer: vi.fn(),
 }));
 
-const { getTransferStatus } = await import("../api/client");
+const { getAccountNumber, getTransferStatus } = await import("../api/client");
+const getAccountNumberMock = vi.mocked(getAccountNumber);
 const getTransferStatusMock = vi.mocked(getTransferStatus);
+// 送金元・送金先の口座番号表示(docs/adr/0019)。個々のテストは口座番号の表示自体を
+// 主張しないため、AccountView.test.tsxと同じく未反映(null)のまま固定しておく。
+getAccountNumberMock.mockResolvedValue(null);
 
 // このファイルは1テストにつき1回renderするため、testing-libraryの自動cleanupが無い設定
 // (AccountView.test.tsxと同じ)でも前のテストのDOMが残らないよう明示的に片付ける——このファイル

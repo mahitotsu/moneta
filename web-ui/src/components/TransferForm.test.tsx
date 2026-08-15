@@ -10,13 +10,18 @@ import { TransferForm } from "./TransferForm";
 import type { AccountNumberLookup, MyAccount } from "../api/types";
 
 vi.mock("../api/client", () => ({
+  getAccountNumber: vi.fn(),
   lookupAccountByNumber: vi.fn(),
   startTransfer: vi.fn(),
 }));
 
-const { lookupAccountByNumber, startTransfer } = await import("../api/client");
+const { getAccountNumber, lookupAccountByNumber, startTransfer } = await import("../api/client");
+const getAccountNumberMock = vi.mocked(getAccountNumber);
 const lookupAccountByNumberMock = vi.mocked(lookupAccountByNumber);
 const startTransferMock = vi.mocked(startTransfer);
+// 送金元の選択肢に出す口座番号(docs/adr/0019)。個々のテストは口座番号の表示自体を
+// 主張しないため、AccountView.test.tsxと同じく未反映(null)のまま固定しておく。
+getAccountNumberMock.mockResolvedValue(null);
 
 const accounts: MyAccount[] = [{ accountId: "11111111-1111-1111-1111-111111111111", openedAt: "2026-08-01T00:00:00Z" }];
 

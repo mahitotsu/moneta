@@ -1,16 +1,27 @@
 import { useMutation } from "@tanstack/react-query";
 import { DetailAppBar } from "./AppBar";
 import { useTransfer } from "../hooks/useTransfer";
+import { useAccountNumber } from "../hooks/useAccountNumber";
 import { useSettlingMutation } from "../hooks/useSettlingMutation";
 import { confirmTransfer, cancelTransfer, recallTransfer } from "../api/client";
-import { formatAccountNumber, formatCurrency, formatDateTime } from "../format";
+import { formatCurrency, formatDateTime, formatFriendlyAccountNumber } from "../format";
 import { TRANSFER_KIND_LABEL, TRANSFER_STATE_LABEL, type TransferState } from "../api/types";
+import type { AccountNumberLookup } from "../api/types";
 
 // crates/transfer-service/src/saga.rsのRECALL_WINDOWと同じ24時間。ここでの時刻比較は
 // あくまで表示上のヒントであり、最終判定は常にサーバー側の`recall_eligibility`が権威
 // (docs/adr/0012決定6)——期限切れの組戻し要求はサーバー側で却下される
 // (docs/e2e-scenarios.md FC12, 旧J10)。
 const RECALL_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+// AccountListScreen/AccountView.tsxが自分の口座に使っているのと同じ「支店名 番号」の書式
+// (docs/adr/0015)。以前はここだけ`formatAccountNumber`(accountIdのUUID末尾を口座番号風に
+// 見せかける表示専用の飾り、実データとは無関係)を使っており、アプリの他画面が表示する
+// 実際の口座番号と体裁が一致していなかった(docs/adr/0019)。
+function accountNumberLabel(accountNumber: AccountNumberLookup | null | undefined): string {
+  if (!accountNumber) return "口座番号を確認しています…";
+  return `${accountNumber.branchName} ${formatFriendlyAccountNumber(accountNumber.accountNumber)}`;
+}
 
 const STATE_BADGE_CLASS: Record<TransferState, string> = {
   pending_confirmation: "badge badge-pending",
@@ -45,6 +56,11 @@ interface Props {
  * 組戻し(credited済みの振込のみ、24時間以内)の操作を提供する(docs/adr/0012決定6)。 */
 export function TransferDetailScreen({ transferId, onBack, onRecalled }: Props) {
   const { data, isLoading } = useTransfer(transferId);
+
+  // 送金元・送金先それぞれの実際の口座番号(docs/adr/0015)。dataがまだ無い間は
+  // useAccountNumberが自動的にクエリを止める(空文字列accountId、useAccountNumber.tsのenabled)。
+  const { data: fromAccountNumber } = useAccountNumber(data?.fromAccountId ?? "");
+  const { data: toAccountNumber } = useAccountNumber(data?.toAccountId ?? "");
 
   // 確認/取消はこのサガ自身の状態がpending_confirmationから遷移するのを待てば良いので、
   // 口座の凍結/解約と同じ「反映待ち」パターン(useSettlingMutation)がそのまま使える。
@@ -104,9 +120,9 @@ export function TransferDetailScreen({ transferId, onBack, onRecalled }: Props) 
               </div>
               <dl className="hero-meta">
                 <dt>送金元</dt>
-                <dd>●●●●{formatAccountNumber(data.fromAccountId).slice(-4)}</dd>
+                <dd>{accountNumberLabel(fromAccountNumber)}</dd>
                 <dt>送金先</dt>
-                <dd>●●●●{formatAccountNumber(data.toAccountId).slice(-4)}</dd>
+                <dd>{accountNumberLabel(toAccountNumber)}</dd>
                 <dt>更新日時</dt>
                 <dd>{formatDateTime(data.updatedAt)}</dd>
               </dl>

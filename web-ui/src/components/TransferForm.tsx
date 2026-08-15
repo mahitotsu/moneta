@@ -1,14 +1,16 @@
 import { useState } from "react";
-import { useMutation } from "@tanstack/react-query";
-import { lookupAccountByNumber, startTransfer } from "../api/client";
+import { useMutation, useQueries } from "@tanstack/react-query";
+import { getAccountNumber, lookupAccountByNumber, startTransfer } from "../api/client";
 import {
   ACCOUNT_NUMBER_PATTERN,
-  formatAccountNumber,
   formatFriendlyAccountNumber,
   normalizeAccountNumberInput,
 } from "../format";
 import { BRANCH_OPTIONS } from "../branches";
 import type { AccountNumberLookup, MyAccount } from "../api/types";
+
+// AccountListScreenのnumberQueriesと同じ間隔(docs/adr/0015)。
+const POLL_INTERVAL_MS = 3000;
 
 export interface StartedTransfer {
   transferId: string;
@@ -45,6 +47,22 @@ export function TransferForm({ kind, accounts, onStarted }: Props) {
   // furikae(自分の口座間): 自分の口座一覧から選ぶだけなので今まで通り。
   const [toAccountId, setToAccountId] = useState("");
   const toOptions = accounts.filter((a) => a.accountId !== fromAccountId);
+
+  // 送金元・送金先(furikae)の選択肢に、AccountListScreen/AccountView.tsxと同じ「支店名 番号」の
+  // 実際の口座番号を出す(docs/adr/0015)。以前はaccountIdのUUID末尾を口座番号風に見せかける
+  // だけの表示専用の飾りを使っており、アプリの他画面と体裁が一致していなかった(docs/adr/0019)。
+  const numberQueries = useQueries({
+    queries: accounts.map((a) => ({
+      queryKey: ["account-number", a.accountId],
+      queryFn: () => getAccountNumber(a.accountId),
+      refetchInterval: POLL_INTERVAL_MS,
+    })),
+  });
+  const numberByAccountId = new Map(accounts.map((a, i) => [a.accountId, numberQueries[i]?.data]));
+  const accountOptionLabel = (accountId: string): string => {
+    const n = numberByAccountId.get(accountId);
+    return n ? `普通預金 ${n.branchName} ${formatFriendlyAccountNumber(n.accountNumber)}` : "普通預金(口座番号を確認中…)";
+  };
 
   // furikomi(他の名義の口座へ): 生UUID直接入力の代わりに、支店+口座番号(docs/adr/0015)から
   // 検索して名義を確認するフローにする。
@@ -106,7 +124,7 @@ export function TransferForm({ kind, accounts, onStarted }: Props) {
       >
         {accounts.map((a) => (
           <option key={a.accountId} value={a.accountId}>
-            普通預金 ●●●●{formatAccountNumber(a.accountId).slice(-4)}
+            {accountOptionLabel(a.accountId)}
           </option>
         ))}
       </select>
@@ -125,7 +143,7 @@ export function TransferForm({ kind, accounts, onStarted }: Props) {
             <option value="">選択してください</option>
             {toOptions.map((a) => (
               <option key={a.accountId} value={a.accountId}>
-                普通預金 ●●●●{formatAccountNumber(a.accountId).slice(-4)}
+                {accountOptionLabel(a.accountId)}
               </option>
             ))}
           </select>

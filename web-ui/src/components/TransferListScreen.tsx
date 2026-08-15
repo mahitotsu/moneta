@@ -1,12 +1,12 @@
 import { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { BrandAppBar } from "./AppBar";
 import { CustomerTabBar, type CustomerTab } from "./CustomerTabBar";
 import { TransferForm } from "./TransferForm";
 import { PlusCircle } from "./icons";
-import { getMyAccounts, getMyTransfers } from "../api/client";
+import { getAccountNumber, getMyAccounts, getMyTransfers } from "../api/client";
 import { signOut } from "../auth";
-import { formatAccountNumber, formatCurrency } from "../format";
+import { formatCurrency, formatFriendlyAccountNumber } from "../format";
 import { TRANSFER_KIND_LABEL, TRANSFER_STATE_LABEL, type TransferState } from "../api/types";
 
 // useAccountと同じ間隔(docs/adr/0012決定6、口座一覧のbalanceQueriesと同じ考え方)。
@@ -57,6 +57,19 @@ export function TransferListScreen({ customerName, onSelectTransfer, onSelectTab
   });
   const transfers = myTransfersQuery.data ?? [];
 
+  // 各行の宛先を、AccountListScreen/AccountView.tsxと同じ「支店名 番号」の実際の口座番号
+  // (docs/adr/0015)で表示する。以前はaccountIdのUUID末尾を口座番号風に見せかけていただけの
+  // 表示専用の飾りを使っており、アプリの他画面と体裁が一致していなかった(docs/adr/0019)。
+  // AccountNumberQueryApiは所有者を問わず任意のaccountIdを解決できるため、宛先(toAccountId)が
+  // 自分以外の口座(振込)でも同じ形で引ける。
+  const toNumberQueries = useQueries({
+    queries: transfers.map((t) => ({
+      queryKey: ["account-number", t.toAccountId],
+      queryFn: () => getAccountNumber(t.toAccountId),
+      refetchInterval: POLL_INTERVAL_MS,
+    })),
+  });
+
   const handleStarted = (started: { transferId: string }) => {
     setOpenForm(null);
     // transfer-history-projectorの反映を待たず、まず取れる分だけ即座に再確認する
@@ -88,22 +101,26 @@ export function TransferListScreen({ customerName, onSelectTransfer, onSelectTab
           </div>
         ) : (
           <ul className="account-list">
-            {transfers.map((t) => (
-              <li key={t.transferId}>
-                <button type="button" className="account-card" onClick={() => onSelectTransfer(t.transferId)}>
-                  <span className="account-card-main">
-                    <span className="account-card-name">{TRANSFER_KIND_LABEL[t.kind]}</span>
-                    <span className="account-card-number">
-                      ●●●●{formatAccountNumber(t.toAccountId).slice(-4)} 宛
+            {transfers.map((t, i) => {
+              const toNumber = toNumberQueries[i]?.data;
+              const toLabel = toNumber
+                ? `${toNumber.branchName} ${formatFriendlyAccountNumber(toNumber.accountNumber)} 宛`
+                : "確認しています…";
+              return (
+                <li key={t.transferId}>
+                  <button type="button" className="account-card" onClick={() => onSelectTransfer(t.transferId)}>
+                    <span className="account-card-main">
+                      <span className="account-card-name">{TRANSFER_KIND_LABEL[t.kind]}</span>
+                      <span className="account-card-number">{toLabel}</span>
                     </span>
-                  </span>
-                  <span className="account-card-side">
-                    <span className="account-card-balance">{formatCurrency(t.amount)}</span>
-                    <span className={STATE_BADGE_CLASS[t.state]}>{TRANSFER_STATE_LABEL[t.state]}</span>
-                  </span>
-                </button>
-              </li>
-            ))}
+                    <span className="account-card-side">
+                      <span className="account-card-balance">{formatCurrency(t.amount)}</span>
+                      <span className={STATE_BADGE_CLASS[t.state]}>{TRANSFER_STATE_LABEL[t.state]}</span>
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
           </ul>
         )}
 

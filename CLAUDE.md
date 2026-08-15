@@ -171,6 +171,18 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
   bracket notation required for the colon in the claim name), and
   `account_number_projector.rs`'s `AccountNumbersTable`/`AccountNumberQueryApi` — `owner_id`
   stays in the table for ops use but is no longer returned by the query API.
+- `0019`: same user report as `0018`, second cause — `TransferListScreen.tsx`,
+  `TransferDetailScreen.tsx`, and `TransferForm.tsx`'s own-account dropdowns were showing
+  `format.ts`'s `formatAccountNumber(accountId)`, a UUID-hex "looks like an account number"
+  decoration that predates `0015`'s real branch+7-digit numbers — `AccountListScreen.tsx`/
+  `AccountView.tsx` had already switched to the real number but these three call sites hadn't,
+  so a destination could render as e.g. "●●●●C3F8" (hex, from the UUID) next to screens showing
+  real all-digit numbers. Fixed by switching all three to the same `useAccountNumber`/
+  `getAccountNumber` + `formatFriendlyAccountNumber` path `AccountListScreen`/`AccountView`
+  already use (`AccountNumberQueryApi` resolves any `accountId` regardless of caller ownership,
+  so this works for `toAccountId` too); `formatAccountNumber` itself is deleted (zero remaining
+  callers). No masking introduced — matches the existing "show the real number in full" norm
+  those two screens already established.
 
 ## Commands
 

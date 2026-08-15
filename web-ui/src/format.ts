@@ -13,13 +13,6 @@ export function formatCurrency(raw: string): string {
   return `${negative ? "-" : ""}¥${amount}`;
 }
 
-/** UUIDの口座IDを実在の口座番号風に短縮表示する(表示専用の飾り、実データは常にUUID全体)。 */
-export function formatAccountNumber(accountId: string): string {
-  const hex = accountId.replace(/-/g, "");
-  const last8 = hex.slice(-8);
-  return `${last8.slice(0, 4)}-${last8.slice(4)}`.toUpperCase();
-}
-
 /** 発番される口座番号(7桁の数字、docs/adr/0015決定3)。振込先の口座番号入力欄の簡易
  * バリデーションに使う。 */
 export const ACCOUNT_NUMBER_PATTERN = /^\d{7}$/;
