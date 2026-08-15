@@ -188,7 +188,7 @@ export function TransferForm({ kind, accounts, onStarted }: Props) {
 
           {resolvedAccount != null && !branchMismatch && (
             <p className="status-line">
-              宛先名義: {resolvedAccount.ownerId} / {resolvedAccount.branchName}(
+              宛先名義: {resolvedAccount.ownerName} / {resolvedAccount.branchName}(
               {resolvedAccount.branchCode}) {formatFriendlyAccountNumber(resolvedAccount.accountNumber)}
             </p>
           )}

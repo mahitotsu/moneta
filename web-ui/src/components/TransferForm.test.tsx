@@ -36,7 +36,7 @@ function renderFurikomiForm() {
 function lookup(overrides: Partial<AccountNumberLookup> = {}): AccountNumberLookup {
   return {
     accountId: "22222222-2222-2222-2222-222222222222",
-    ownerId: "hanako",
+    ownerName: "hanako",
     accountNumber: "1234567",
     branchCode: "001",
     branchName: "本店",

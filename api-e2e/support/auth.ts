@@ -50,6 +50,9 @@ export interface TestIdentity {
   /** Cognitoのsub。account-serviceのowner_id/CustomerAccountsTableのownerIdになる値
    * (docs/adr/0016決定3・4)——テスト側でアサーションに使う場合はこれと比較する。 */
   sub: string;
+  /** サインアップ時のCognitoユーザー名。account-serviceのowner_name/AccountNumbersTableの
+   * ownerNameになる値(docs/adr/0018)——`cognito:username`クレームと同じ。 */
+  username: string;
 }
 
 // 毎回、新規サインアップ+サインインした使い捨てのCognitoユーザーを1つ作る。口座IDに
@@ -83,7 +86,7 @@ export async function signUpAndSignIn(clientId: string): Promise<TestIdentity> {
   if (typeof sub !== "string") {
     throw new Error(`signUpAndSignIn(${username}): IdToken payload has no string "sub" claim`);
   }
-  return { idToken, sub };
+  return { idToken, sub, username };
 }
 
 /** jest.setup.tsのafterAllから呼ぶ、テストファイル単位の一括クリーンアップ。セルフサービスの

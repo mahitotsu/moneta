@@ -351,11 +351,14 @@ fn classify_transact_error(
 /// `$context.authorizer.claims.sub`から注入する、Cognito認証済みユーザーのsub)があれば
 /// それで上書きする(docs/adr/0016)——認証済みだが他人のowner_idを名乗って口座を開設する、
 /// というなりすましを防ぐ。`requested_by`が無い(Open以外、またはVTL非経由の呼び出し)場合は
-/// 元のコマンドをそのまま返す。
+/// 元のコマンドをそのまま返す。`owner_name`(docs/adr/0018)は認可判定に使わない表示専用の
+/// データなので、ここでは素通しするだけで上書きしない——VTL側が既に同じ認証済みクレーム
+/// (`cognito:username`)から`openCommandJson`を組み立てており、`Open`ボディにそもそも
+/// `owner_name`を受け付ける余地がない(OpenCommandModelが`additionalProperties: false`)。
 fn resolve_owner_id(command: Command, requested_by: Option<&str>) -> Command {
     match (command, requested_by) {
-        (Command::Open { initial_balance, .. }, Some(requested_by)) => {
-            Command::Open { owner_id: requested_by.to_string(), initial_balance }
+        (Command::Open { owner_name, initial_balance, .. }, Some(requested_by)) => {
+            Command::Open { owner_id: requested_by.to_string(), owner_name, initial_balance }
         }
         (command, _) => command,
     }
@@ -470,18 +473,55 @@ mod ownership_tests {
 
     #[test]
     fn open_command_owner_id_is_overridden_by_requested_by_when_present() {
-        let command = Command::Open { owner_id: "claimed-by-body".to_string(), initial_balance: dec!(100) };
+        let command = Command::Open {
+            owner_id: "claimed-by-body".to_string(),
+            owner_name: "Claimed Name".to_string(),
+            initial_balance: dec!(100),
+        };
         let resolved = resolve_owner_id(command, Some("real-cognito-sub"));
-        assert_eq!(resolved, Command::Open { owner_id: "real-cognito-sub".to_string(), initial_balance: dec!(100) });
+        assert_eq!(
+            resolved,
+            Command::Open {
+                owner_id: "real-cognito-sub".to_string(),
+                owner_name: "Claimed Name".to_string(),
+                initial_balance: dec!(100),
+            }
+        );
     }
 
     #[test]
     fn open_command_owner_id_is_kept_when_requested_by_is_absent() {
         // 外部からの直接SQS送信等、VTLを経由しない呼び出し(現状は存在しないが、将来の
         // 呼び出し元を壊さないための後方互換)。
-        let command = Command::Open { owner_id: "body-owner".to_string(), initial_balance: dec!(100) };
+        let command = Command::Open {
+            owner_id: "body-owner".to_string(),
+            owner_name: "Body Owner".to_string(),
+            initial_balance: dec!(100),
+        };
         let resolved = resolve_owner_id(command, None);
-        assert_eq!(resolved, Command::Open { owner_id: "body-owner".to_string(), initial_balance: dec!(100) });
+        assert_eq!(
+            resolved,
+            Command::Open {
+                owner_id: "body-owner".to_string(),
+                owner_name: "Body Owner".to_string(),
+                initial_balance: dec!(100),
+            }
+        );
+    }
+
+    #[test]
+    fn open_command_owner_name_is_never_overridden_by_requested_by() {
+        // owner_name(docs/adr/0018)は認可判定に使わない表示専用データなので、owner_idと違い
+        // resolve_owner_idの上書き対象ではない——requested_byが存在しても元のowner_nameが
+        // そのまま残ることを固定する。
+        let command = Command::Open {
+            owner_id: "claimed-by-body".to_string(),
+            owner_name: "Original Name".to_string(),
+            initial_balance: dec!(100),
+        };
+        let resolved = resolve_owner_id(command, Some("real-cognito-sub"));
+        let Command::Open { owner_name, .. } = resolved else { panic!("expected Open") };
+        assert_eq!(owner_name, "Original Name");
     }
 
     #[test]

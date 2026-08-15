@@ -5,7 +5,9 @@ import { authHeaders, rawRequest } from "./httpClient";
 
 export interface AccountNumberLookup {
   accountId: string;
-  ownerId: string;
+  /** 表示用の名義(Cognitoのユーザー名、docs/adr/0018)。以前はここに内部識別子のownerId
+   * (Cognitoのsub)がそのまま入っていた。 */
+  ownerName: string;
   accountNumber: string;
   branchCode: string;
   branchName: string;

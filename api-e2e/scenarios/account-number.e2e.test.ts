@@ -13,8 +13,9 @@ describe("FC16: 人間可読な口座番号(支店+7桁)からの宛先解決", 
     "口座開設後、支店+口座番号が反映され、その番号から同じ口座へ解決できる",
     async () => {
       const outputs = await fetchStackOutputs();
-      // ownerIdはもはやリクエストボディの自己申告値ではなく、Cognito認証済み識別子のsub
-      // (docs/adr/0016決定3)。以降のアサーションはこのsubと比較する。
+      // owner_idはもはやリクエストボディの自己申告値ではなく、Cognito認証済み識別子のsub
+      // (docs/adr/0016決定3)。APIレスポンスに載るのはowner_id自体ではなく表示用の
+      // owner_name(=Cognitoのユーザー名、docs/adr/0018)——以降のアサーションはこちらと比較する。
       const identity = await signUpAndSignIn(outputs.userPoolClientId);
       const commandApi = createCommandApi(outputs.commandApiUrl, identity.idToken);
       const queryApi = createQueryApi(outputs.queryApiUrl, identity.idToken);
@@ -30,7 +31,7 @@ describe("FC16: 人間可読な口座番号(支店+7桁)からの宛先解決", 
       });
 
       expect(byAccount.accountId).toBe(accountId);
-      expect(byAccount.ownerId).toBe(identity.sub);
+      expect(byAccount.ownerName).toBe(identity.username);
       expect(byAccount.accountNumber).toMatch(/^\d{7}$/);
       expect(byAccount.branchCode).toMatch(/^\d{3}$/);
 

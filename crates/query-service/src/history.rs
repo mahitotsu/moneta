@@ -46,6 +46,7 @@ mod tests {
         let event = Event::Opened {
             account_id: AccountId::new(),
             owner_id: "customer-1".to_string(),
+            owner_name: "Customer One".to_string(),
             balance: dec!(1000),
             opened_at: occurred_at,
         };

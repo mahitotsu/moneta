@@ -117,7 +117,7 @@ describe("口座番号(docs/adr/0015)の表示", () => {
     getAccountMock.mockResolvedValue(activeView);
     const lookup: AccountNumberLookup = {
       accountId: "44444444-4444-4444-4444-444444444444",
-      ownerId: "taro",
+      ownerName: "taro",
       accountNumber: "1234567",
       branchCode: "001",
       branchName: "本店",

@@ -621,7 +621,7 @@ export class AccountPipelineStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
     // accountId→口座番号の逆引き用(自分の口座番号を表示する画面向け)。テーブルが小さい
-    // PoC規模なのでALL射影にし、branchCode/branchName/ownerIdも逆引き1回で取れるようにする。
+    // PoC規模なのでALL射影にし、branchCode/branchName/ownerNameも逆引き1回で取れるようにする。
     accountNumbersTable.addGlobalSecondaryIndex({
       indexName: "byAccountId",
       partitionKey: { name: "accountId", type: dynamodb.AttributeType.STRING },
@@ -697,7 +697,7 @@ export class AccountPipelineStack extends cdk.Stack {
                 "#else",
                 "{",
                 '"accountId":"$input.path("$.Item.accountId.S")",',
-                '"ownerId":"$input.path("$.Item.ownerId.S")",',
+                '"ownerName":"$input.path("$.Item.ownerName.S")",',
                 '"accountNumber":"$input.path("$.Item.accountNumber.S")",',
                 '"branchCode":"$input.path("$.Item.branchCode.S")",',
                 '"branchName":"$input.path("$.Item.branchName.S")"',
@@ -750,7 +750,7 @@ export class AccountPipelineStack extends cdk.Stack {
                 "#foreach($item in $input.path('$.Items'))",
                 "{",
                 '"accountId":"$item.accountId.S",',
-                '"ownerId":"$item.ownerId.S",',
+                '"ownerName":"$item.ownerName.S",',
                 '"accountNumber":"$item.accountNumber.S",',
                 '"branchCode":"$item.branchCode.S",',
                 '"branchName":"$item.branchName.S"',
@@ -1019,7 +1019,16 @@ export class AccountPipelineStack extends cdk.Stack {
 
     // owner_idはリクエストボディからではなく、常にCognito認証済みユーザーのsubから取る
     // (docs/adr/0016決定3)——OpenCommandModelがowner_idを要求しなくなったのと対称。
-    const openCommandJson = `{\${q}Open\${q}:{\${q}owner_id\${q}:\${q}$context.authorizer.claims.sub\${q},\${q}initial_balance\${q}:\${q}$util.escapeJavaScript($input.path('$.initial_balance'))\${q}}}`;
+    // owner_name(docs/adr/0018)も同じ理由でボディからは受け取らず、同じ認証済みクレーム
+    // (`cognito:username`)から取る——振込確認画面(TransferForm.tsx)の「宛先名義」表示に
+    // Cognitoのsub(UUID)がそのまま出てしまっていた不具合の修正。クレーム名にコロンを含む
+    // ため`.sub`と同じドット記法は使えず、AWS公式ドキュメント(apigateway-enable-cognito-
+    // user-pool.html)が示す`['claim-name']`のブラケット記法が必要——このVTL断片自体は
+    // `$util.urlEncode("...")`の二重引用符リテラル内に埋め込まれるが、内側の単一引用符は
+    // 衝突しない(同じ行の`$input.params('accountId')`で既に使われている形と同じ)。
+    // usernameは(subと違い)ユーザーが選んだ値でCognitoの許容文字集合が`"`や`\`を排除しない
+    // ため、initial_balanceと同じく`$util.escapeJavaScript`でJSON埋め込み時にエスケープする。
+    const openCommandJson = `{\${q}Open\${q}:{\${q}owner_id\${q}:\${q}$context.authorizer.claims.sub\${q},\${q}owner_name\${q}:\${q}$util.escapeJavaScript($context.authorizer.claims['cognito:username'])\${q},\${q}initial_balance\${q}:\${q}$util.escapeJavaScript($input.path('$.initial_balance'))\${q}}}`;
     const depositCommandJson = `{\${q}Deposit\${q}:{\${q}amount\${q}:\${q}$util.escapeJavaScript($input.path('$.amount'))\${q}}}`;
     const withdrawCommandJson = `{\${q}Withdraw\${q}:{\${q}amount\${q}:\${q}$util.escapeJavaScript($input.path('$.amount'))\${q}}}`;
     const freezeCommandJson = `{\${q}Freeze\${q}:{\${q}reason\${q}:\${q}$util.escapeJavaScript($input.path('$.reason'))\${q}}}`;

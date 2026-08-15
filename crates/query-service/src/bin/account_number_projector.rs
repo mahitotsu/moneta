@@ -52,28 +52,32 @@ async fn project_one(dynamodb: &aws_sdk_dynamodb::Client, table_name: &str, enve
 
     let event: Event = serde_json::from_value(envelope.data)?;
 
-    let Event::Opened { owner_id, .. } = event else {
+    let Event::Opened { owner_id, owner_name, .. } = event else {
         // 購読条件がaccount.event.Openedだけのはずだが、万一広がっても無害に無視する。
         tracing::warn!("ignoring non-Opened event delivered to the account number projector");
         return Ok(());
     };
 
-    let (branch_code, branch_name) = assign_branch(envelope.account_id);
-    reserve_account_number(dynamodb, table_name, envelope.account_id, &owner_id, branch_code, branch_name, envelope.occurred_at)
+    let branch = assign_branch(envelope.account_id);
+    reserve_account_number(dynamodb, table_name, envelope.account_id, &owner_id, &owner_name, branch, envelope.occurred_at)
         .await
 }
 
 /// 候補生成→`ConditionExpression: attribute_not_exists(accountNumber)`付き`PutItem`での予約→
 /// 条件不成立(衝突)なら候補を作り直して再試行、というループ(docs/adr/0015決定3)。
+/// `branch`は`assign_branch`が返す`(branch_code, branch_name)`をそのまま受け取る——別々の
+/// 引数にすると`clippy::too_many_arguments`(上限7)を超えるための単なる呼び出し側都合の
+/// まとめであり、意味のある新概念ではない。
 async fn reserve_account_number(
     dynamodb: &aws_sdk_dynamodb::Client,
     table_name: &str,
     account_id: Uuid,
     owner_id: &str,
-    branch_code: &str,
-    branch_name: &str,
+    owner_name: &str,
+    branch: (&str, &str),
     occurred_at: account_domain::OffsetDateTime,
 ) -> Result<(), Error> {
+    let (branch_code, branch_name) = branch;
     let mut rng = rand::thread_rng();
     let created_at = occurred_at.format(&Rfc3339).expect("OffsetDateTime always formats as RFC3339");
 
@@ -86,6 +90,10 @@ async fn reserve_account_number(
             .item("accountNumber", AttributeValue::S(candidate.clone()))
             .item("accountId", AttributeValue::S(account_id.to_string()))
             .item("ownerId", AttributeValue::S(owner_id.to_string()))
+            // 表示専用の名義(docs/adr/0018)。ownerId(Cognitoのsub)は内部識別子として引き続き
+            // 保持するが、APIレスポンスには載せない(query APIのVTL側、ownerNameのみ返す)
+            // ——顧客向けUIに内部識別子を出さない方針。
+            .item("ownerName", AttributeValue::S(owner_name.to_string()))
             .item("branchCode", AttributeValue::S(branch_code.to_string()))
             .item("branchName", AttributeValue::S(branch_name.to_string()))
             .item("createdAt", AttributeValue::S(created_at.clone()))

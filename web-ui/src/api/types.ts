@@ -102,7 +102,9 @@ export interface TransferStatusView {
  */
 export interface AccountNumberLookup {
   accountId: string;
-  ownerId: string;
+  /** 表示用の名義(Cognitoのユーザー名、docs/adr/0018)。以前はここにCognitoのsub(UUID)が
+   *  そのまま入っており、振込確認画面の「宛先名義」に生UUIDが表示される不具合があった。 */
+  ownerName: string;
   accountNumber: string;
   branchCode: string;
   branchName: string;

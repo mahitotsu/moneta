@@ -162,6 +162,15 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
   never-auto-deleted `demo-customer`/`demo-customer-2` pair for manually checking the deployed
   UI actually looks like something, independent of and unaffected by that teardown (it only ever
   deletes what a given test run itself created).
+- `0018`: fixes the furikomi confirmation step (`TransferForm.tsx`'s "宛先名義") showing the
+  destination's raw Cognito `sub` (UUID) instead of a human-readable name — this system has no
+  "legal name" field at all (`0016` decision 1: signup is username+password only), so the fix
+  reuses `cognito:username` (the same value `AppBar.tsx` already shows as "{name} 様") as a
+  display-only `owner_name`, threaded alongside `owner_id` through `Command::Open`/
+  `Event::Opened` (`account-domain`), the `Open` VTL (`$context.authorizer.claims['cognito:username']`,
+  bracket notation required for the colon in the claim name), and
+  `account_number_projector.rs`'s `AccountNumbersTable`/`AccountNumberQueryApi` — `owner_id`
+  stays in the table for ops use but is no longer returned by the query API.
 
 ## Commands
 
