@@ -100,7 +100,11 @@ behaviorは`CachePolicy.CACHING_DISABLED`(結果整合性のあるレスポン�
   (CloudFront経由のみに制限していない)。実機検証([[0006-write-path-api-gateway-sqs-direct-integration]])
   で直接叩く手段を残しておく実用上の理由があり、PoCの規模でここを閉じる優先度は低いと
   判断し、当面許容する。
-- `web-ui/dist`の事前ビルドは`cdk deploy`に自動連携されていない(手動で`npm run
-  build`してからデプロイする運用、`web-ui/README.md`参照)。Rust Lambda群のような
-  Dockerバンドリングの複雑さを持ち込む理由がNode/npmのビルドには無いと判断し、
-  当面は手動ステップとして残す。
+- ~~`web-ui/dist`の事前ビルドは`cdk deploy`に自動連携されていない~~ →
+  解消済み。手動ステップに依存していたことが実際に事故を招いた(`dist`が古いまま
+  デプロイされる、`infra`の`npm test`が`web-ui/dist`未生成のまま`CannotFindAsset`で
+  落ちてCIが赤くなる、の両方を実際に踏んだ)ため、`infra/package.json`の
+  `pretest`/`presynth`/`prediff`/`predeploy`/`predestroy`にそれぞれ`npm --prefix
+  ../web-ui install && npm run build`(`build-web-ui`スクリプト)を紐付けた。npm標準の
+  pre-hook機構(`posttest`/`postdeploy`のDockerキャッシュ掃除と同じ仕組み)を使うだけで
+  済んだため、Rust Lambda群のようなDockerバンドリングの複雑さは今回も持ち込んでいない。

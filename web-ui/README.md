@@ -36,8 +36,12 @@ npm run build
 ```
 
 `dist/`が生成される。`infra`側の`cdk deploy`は、この`dist/`をS3にアップロードする
-`BucketDeployment`を含む(`infra/lib/account-pipeline-stack.ts`)ため、**`cdk deploy`前に
-必ずこのビルドを実行しておくこと**。
+`BucketDeployment`を含む(`infra/lib/account-pipeline-stack.ts`)。以前はここを手動で
+ビルドしてからデプロイする運用だったが、それが原因で実際に事故を踏んだ(古い`dist`のまま
+デプロイされる/`infra`の`npm test`が`dist`未生成のまま失敗しCIが赤くなる)ため、
+`infra/package.json`の`pretest`/`presynth`/`prediff`/`predeploy`/`predestroy`がこの
+ビルドを毎回自動で行うようになった(`docs/adr/0007`)。手動で`npm run build`する必要が
+あるのは、このディレクトリで直接`vite build`の結果を確認したい場合だけ。
 
 ## 型チェック・Lint
 

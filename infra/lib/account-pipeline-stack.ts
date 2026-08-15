@@ -1784,9 +1784,11 @@ export class AccountPipelineStack extends cdk.Stack {
       defaultRootObject: "index.html",
     });
 
-    // web-ui/distを事前ビルドしておく必要がある(web-ui/README.md参照)。Rust Lambda群の
-    // ようなDockerバンドリングは不要と判断した——Node/npmのビルドにはLambda実行時との
-    // glibcバージョン互換性問題が無いため。
+    // web-ui/distが必要(docs/adr/0007決定「既知のギャップ」参照)。Rust Lambda群のような
+    // Dockerバンドリングは不要と判断した——Node/npmのビルドにはLambda実行時とのglibc
+    // バージョン互換性問題が無いため。ビルド自体はinfra/package.jsonのpre-hook
+    // (pretest/presynth/prediff/predeploy/predestroy → build-web-ui)が毎回自動で行うので、
+    // ここでの前提は「(このCDKアプリを起動したnpmコマンド経由なら)常に最新」でよい。
     new s3deploy.BucketDeployment(this, "WebUiDeployment", {
       sources: [s3deploy.Source.asset(path.join(repoRoot, "web-ui", "dist"))],
       destinationBucket: webUiBucket,
