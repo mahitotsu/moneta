@@ -1,7 +1,7 @@
-import { useState } from "react";
 import { useAccount } from "../hooks/useAccount";
 import { useAccountNumber } from "../hooks/useAccountNumber";
-import { formatCurrency, formatDateTime, formatFriendlyAccountNumber } from "../format";
+import { useBalanceHidden } from "../hooks/useBalanceVisibility";
+import { MASKED_BALANCE, formatCurrency, formatDateTime, formatFriendlyAccountNumber } from "../format";
 import { FREEZE_REASON_VIEW_LABEL } from "../api/types";
 import { Eye, EyeOff } from "./icons";
 
@@ -18,7 +18,8 @@ const STATUS_BADGE_CLASS: Record<string, string> = {
 };
 
 export function AccountView({ accountId, onRemoved }: { accountId: string; onRemoved: () => void }) {
-  const [hidden, setHidden] = useState(false);
+  // 口座一覧(AccountListScreen)とマスク状態を共有する(useBalanceHiddenのコメント参照)。
+  const [hidden, toggleHidden] = useBalanceHidden();
   const { data, isLoading, isFetching, isSuccess } = useAccount(accountId);
   const { data: accountNumber } = useAccountNumber(accountId);
 
@@ -86,11 +87,11 @@ export function AccountView({ accountId, onRemoved }: { accountId: string; onRem
         </span>
       </div>
       <div className="balance-row">
-        <span className="balance-figure">{hidden ? "¥ ••••••••" : formatCurrency(data.balance)}</span>
+        <span className="balance-figure">{hidden ? MASKED_BALANCE : formatCurrency(data.balance)}</span>
         <button
           type="button"
           className="icon-button"
-          onClick={() => setHidden((h) => !h)}
+          onClick={toggleHidden}
           aria-label={hidden ? "残高を表示" : "残高を隠す"}
         >
           {hidden ? <EyeOff /> : <Eye />}

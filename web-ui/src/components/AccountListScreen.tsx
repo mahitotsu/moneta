@@ -3,10 +3,11 @@ import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { OpenAccountForm } from "./OpenAccountForm";
 import { BrandAppBar } from "./AppBar";
 import { CustomerTabBar, type CustomerTab } from "./CustomerTabBar";
-import { PlusCircle } from "./icons";
+import { Eye, EyeOff, PlusCircle } from "./icons";
 import { getAccount, getAccountNumber, getMyAccounts } from "../api/client";
-import { formatCurrency, formatFriendlyAccountNumber } from "../format";
+import { MASKED_BALANCE, formatCurrency, formatFriendlyAccountNumber } from "../format";
 import { signOut } from "../auth";
+import { useBalanceHidden } from "../hooks/useBalanceVisibility";
 
 const STATUS_LABEL: Record<string, string> = { active: "有効", frozen: "凍結中", closed: "解約済み" };
 const STATUS_BADGE_CLASS: Record<string, string> = {
@@ -29,6 +30,9 @@ interface Props {
 export function AccountListScreen({ customerName, onSelectAccount, onSelectTab, onSignedOut }: Props) {
   const [addOpen, setAddOpen] = useState(false);
   const queryClient = useQueryClient();
+  // 口座詳細(AccountView)と共有する残高マスクの状態。以前は詳細画面にしか目アイコンが
+  // 無く、この一覧では合計残高・各口座カードの残高が常時平文表示だった(改善前の問題)。
+  const [balanceHidden, toggleBalanceHidden] = useBalanceHidden();
 
   // 「どの口座を自分が持っているか」はもうlocalStorageではなく、サーバー側の
   // CustomerAccountsTable(docs/adr/0016決定4)——ownerIdはCognito JWTのsubから
@@ -80,7 +84,19 @@ export function AccountListScreen({ customerName, onSelectAccount, onSelectTab, 
         {accounts.length > 0 && (
           <div className="panel total-balance-panel">
             <p className="subtitle">合計残高(解約済みの口座を除く)</p>
-            <p className="balance-figure">{formatCurrency(totalBalance.toFixed(2))}</p>
+            <div className="balance-row total-balance-row">
+              <p className="balance-figure">
+                {balanceHidden ? MASKED_BALANCE : formatCurrency(totalBalance.toFixed(2))}
+              </p>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={toggleBalanceHidden}
+                aria-label={balanceHidden ? "残高を表示" : "残高を隠す"}
+              >
+                {balanceHidden ? <EyeOff /> : <Eye />}
+              </button>
+            </div>
           </div>
         )}
 
@@ -111,7 +127,9 @@ export function AccountListScreen({ customerName, onSelectAccount, onSelectTab, 
                     <span className="account-card-side">
                       {account ? (
                         <>
-                          <span className="account-card-balance">{formatCurrency(account.balance)}</span>
+                          <span className="account-card-balance">
+                            {balanceHidden ? MASKED_BALANCE : formatCurrency(account.balance)}
+                          </span>
                           <span className={STATUS_BADGE_CLASS[account.status]}>{STATUS_LABEL[account.status]}</span>
                         </>
                       ) : (

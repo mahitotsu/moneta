@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { getCurrentSession } from "../auth";
+import { setBalanceHidden } from "../hooks/useBalanceVisibility";
 import { SignInForm } from "./SignInForm";
 import { AccountListScreen } from "./AccountListScreen";
 import { CustomerAccountDetail } from "./CustomerAccountDetail";
@@ -26,6 +27,9 @@ export function CustomerFlow() {
   const onSignedOut = () => {
     setSession(null);
     setView({ screen: "accounts" });
+    // 共有端末を想定し、次にサインインする利用者へ前の利用者の残高マスクの選択を
+    // 持ち越さない(useBalanceHiddenのコメント参照)。
+    setBalanceHidden(true);
   };
 
   let content: ReactNode;

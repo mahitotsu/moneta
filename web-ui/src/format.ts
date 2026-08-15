@@ -1,6 +1,9 @@
 // バックエンドはrust_decimalの文字列表現をそのまま返す(docs/adr/0006決定5)。
 // JS Numberへ変換すると大きな金額でIEEE754精度が壊れうるため、桁区切りは文字列操作のみで行う。
 
+/** 残高マスク時(useBalanceHidden)に表示する固定文字列。一覧・詳細で共通にする。 */
+export const MASKED_BALANCE = "¥ ••••••••";
+
 export function formatCurrency(raw: string): string {
   const negative = raw.startsWith("-");
   const unsigned = negative ? raw.slice(1) : raw;

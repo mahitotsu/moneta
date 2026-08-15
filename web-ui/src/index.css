@@ -392,6 +392,14 @@ button.secondary {
   margin: 0 0 4px;
 }
 
+.total-balance-row {
+  justify-content: center;
+}
+
+.total-balance-row .balance-figure {
+  margin: 0;
+}
+
 .account-list {
   list-style: none;
   margin: 0;
