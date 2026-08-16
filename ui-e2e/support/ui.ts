@@ -40,10 +40,11 @@ export async function startFurikomi(
 }
 
 /** TransferDetailScreen.tsxからTransferListScreen.tsxへ戻る(docs/adr/0017、送金一覧が
- * サーバー側投影に切り替わった後もこの導線自体は無改修)。ラベルはAccountView詳細画面と
- * 共有している(DetailAppBar.tsxの汎用の「戻る」ボタン)。 */
+ * サーバー側投影に切り替わった後もこの導線自体は無改修)。ラベルは画面ごとに固定
+ * (DetailAppBar.tsxの`backLabel`、docs/adr/0022)——以前は「口座一覧へ戻る」に共有
+ * 固定されていたが、この画面の実際の戻り先(送金一覧)に合わせて分離された。 */
 export async function goBackFromDetail(page: Page): Promise<void> {
-  await page.getByLabel("口座一覧へ戻る").click();
+  await page.getByLabel("送金一覧へ戻る").click();
 }
 
 export async function clickConfirmTransfer(page: Page): Promise<void> {
