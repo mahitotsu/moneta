@@ -1,5 +1,6 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { DetailAppBar } from "./AppBar";
+import { CustomerTabBar, type CustomerTab } from "./CustomerTabBar";
 import { useTransfer } from "../hooks/useTransfer";
 import { useAccountNumber } from "../hooks/useAccountNumber";
 import { useSettlingMutation } from "../hooks/useSettlingMutation";
@@ -56,6 +57,9 @@ const STATE_DESCRIPTION: Record<TransferState, string> = {
 interface Props {
   transferId: string;
   onBack: () => void;
+  /** タブバーは詳細画面にも常設する(docs/adr/0022)——「戻る」は常にこのタブの一覧へ戻る
+   * だけの一定の意味にし、タブをまたぐ移動は常にタブバーの役目にする。 */
+  onSelectTab: (tab: CustomerTab) => void;
   onRecalled: (newTransferId: string) => void;
   /** 送金元/送金先のうち自分の口座である側から、その口座の入出金履歴へ飛ぶ(docs/adr/0021)。 */
   onViewAccount: (accountId: string) => void;
@@ -63,7 +67,7 @@ interface Props {
 
 /** 送金1件の状態を継続ポーリングしつつ、振込の確認/取消(pending_confirmation中のみ)・
  * 組戻し(credited済みの振込のみ、24時間以内)の操作を提供する(docs/adr/0012決定6)。 */
-export function TransferDetailScreen({ transferId, onBack, onRecalled, onViewAccount }: Props) {
+export function TransferDetailScreen({ transferId, onBack, onSelectTab, onRecalled, onViewAccount }: Props) {
   const { data, isLoading } = useTransfer(transferId);
 
   // 送金元・送金先それぞれの実際の口座番号(docs/adr/0015)。dataがまだ無い間は
@@ -117,8 +121,9 @@ export function TransferDetailScreen({ transferId, onBack, onRecalled, onViewAcc
 
   return (
     <>
-      <DetailAppBar title="送金の詳細" onBack={onBack} />
+      <DetailAppBar title="送金の詳細" onBack={onBack} backLabel="送金一覧へ戻る" />
       <div className="bank-body">
+        <CustomerTabBar active="transfers" onSelect={onSelectTab} />
         {isLoading || !data ? (
           // 口座のAccountView(反映待ち)と同じ理由: 「まだ書き込みが反映されていない」正常な
           // 状態と「取得が一時的に失敗した」を区別せず、同じ穏やかな文言で表示する

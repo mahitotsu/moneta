@@ -20,10 +20,14 @@ export function BrandAppBar({ customerName, onSignOut }: { customerName: string;
   );
 }
 
-export function DetailAppBar({ title, onBack }: { title: string; onBack: () => void }) {
+/** `backLabel`は呼び出し元ごとに必須(docs/adr/0022)——タブごとに独立したナビゲーション状態
+ * を持つようになり、「戻る」は常にそのタブの一覧へ戻る一定の意味になったため、画面ごとに
+ * 正しい戻り先を明示する。以前は"口座一覧へ戻る"に固定されており、`TransferDetailScreen`
+ * (実際には送金一覧へ戻る)でも同じ文言になっていた。 */
+export function DetailAppBar({ title, onBack, backLabel }: { title: string; onBack: () => void; backLabel: string }) {
   return (
     <header className="appbar">
-      <button type="button" className="appbar-action" onClick={onBack} aria-label="口座一覧へ戻る">
+      <button type="button" className="appbar-action" onClick={onBack} aria-label={backLabel}>
         <ChevronLeft />
       </button>
       <span className="appbar-title">{title}</span>

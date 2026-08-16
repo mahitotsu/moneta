@@ -198,15 +198,29 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
   (送金 menu) — previously there was no way to jump between them despite them showing two
   facets of the same underlying event for transfer-caused money movements. Transfer detail →
   own-side account history needed no backend change (reuses `0020`'s "which side is mine"
-  check) and only added `returnTo?: View` to `CustomerFlow.tsx`'s view union (one-level jump
-  memory, not a nav stack). Account history → causing transfer needed threading
-  `EventEnvelope.correlation_id` (already the transferId, set by transfer-service per `0010`
-  decision 4, already reaching `account_events`) through `query-service`'s
-  `history_entry_from_event`/`query_projector.rs` into a new `transferId` field on
-  `TransactionEntry` — no infra/VTL change needed since `GET .../transactions` already just
-  concatenates the JSON `entry` blob verbatim. Links render via a new shared
-  `.inline-link-button` CSS class, shown only on entries the customer can see (own account,
-  transfer-caused entries).
+  check) and originally added `returnTo?: View` to `CustomerFlow.tsx`'s view union (one-level
+  jump memory) — **superseded by `0022`**, which replaced `returnTo` with per-tab navigation
+  state. Account history → causing transfer needed threading `EventEnvelope.correlation_id`
+  (already the transferId, set by transfer-service per `0010` decision 4, already reaching
+  `account_events`) through `query-service`'s `history_entry_from_event`/`query_projector.rs`
+  into a new `transferId` field on `TransactionEntry` — no infra/VTL change needed since
+  `GET .../transactions` already just concatenates the JSON `entry` blob verbatim (this part is
+  unaffected by `0022`). Links render via a new shared `.inline-link-button` CSS class, shown
+  only on entries the customer can see (own account, transfer-caused entries).
+- `0022`: real-world use of `0021`'s cross-links surfaced that "戻る" (back) meant two different
+  things depending on path — normally "return to this tab's list," but via a `0021` cross-link,
+  "return to the screen you jumped from" (`returnTo`) — which read as inconsistent/confusing
+  the first time a user actually followed cross-tab link → back. Fix (chosen by reasoning from
+  the ideal navigation model, not by patching the symptom): give `accounts`/`transfers` tabs
+  independent navigation state in `CustomerFlow.tsx`
+  (`accountsTabView`/`transfersTabView`, each `{screen:"list"} | {screen:"detail", id}`) instead
+  of one shared `View` union, and render `CustomerTabBar` on the detail screens too (previously
+  list-screens-only). "戻る" now always means "pop this tab to its list" — deterministic,
+  no `returnTo` needed — while switching sections is *only* ever the tab bar's job; a `0021`
+  cross-link just sets the target tab's view and flips `activeTab`, leaving the origin tab's
+  state untouched, so switching back lands exactly where you left it with zero bookkeeping.
+  `DetailAppBar` gained a required `backLabel` prop (was hardcoded to "口座一覧へ戻る" even on
+  the transfer-detail screen — a latent bug `0022`'s determinism happens to fix too).
 
 ## Commands
 

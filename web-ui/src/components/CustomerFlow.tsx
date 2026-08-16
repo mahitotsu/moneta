@@ -8,29 +8,38 @@ import { TransferListScreen } from "./TransferListScreen";
 import { TransferDetailScreen } from "./TransferDetailScreen";
 import type { CustomerTab } from "./CustomerTabBar";
 
-// `returnTo`は口座詳細⇔送金詳細の相互リンク(docs/adr/0021)専用——通常の一覧タブ経由の
-// 遷移では付けない(その場合は`onBack`が既定のタブへ戻る)。ジャンプ元の画面を1段だけ
-// 覚えておくための最小限の仕組みで、汎用のナビゲーションスタックは持たない
-// (docs/adr/0007がルーターを避けている方針と同じ単純さの優先)。
-type View =
-  | { screen: "accounts" }
-  | { screen: "account-detail"; accountId: string; returnTo?: View }
-  | { screen: "transfers" }
-  | { screen: "transfer-detail"; transferId: string; returnTo?: View };
+// 口座タブ・送金タブはそれぞれ独立した画面状態(一覧/詳細)を持つ(docs/adr/0022)。タブを
+// 切り替えても互いの状態はそのまま保持される——「戻る」は常に今のタブを一覧へ1段戻すだけの
+// 一定の意味を持ち、タブをまたぐ移動(相互リンクを含む、docs/adr/0021)は常にタブバー
+// (CustomerTabBar、詳細画面にも常設)の役目にする。以前は単一のView共用体+`returnTo`
+// (直前の画面を1段だけ覚える仕組み)で表現していたが、「戻る」の意味が経路によって変わり、
+// 相互リンクを辿った直後に混乱を招いた——タブごとに状態を分離することで、`returnTo`という
+// 特別な仕組み無しに「元のタブに戻れば元の場所のまま」が自然に成り立つ。
+type AccountsTabView = { screen: "list" } | { screen: "detail"; accountId: string };
+type TransfersTabView = { screen: "list" } | { screen: "detail"; transferId: string };
 
-const tabView = (tab: CustomerTab): View => (tab === "accounts" ? { screen: "accounts" } : { screen: "transfers" });
+const ACCOUNTS_LIST: AccountsTabView = { screen: "list" };
+const TRANSFERS_LIST: TransfersTabView = { screen: "list" };
 
-/** サインイン → (口座一覧|送金一覧)タブ → 各詳細、という顧客向けの画面遷移
- * (docs/adr/0009、docs/adr/0012決定6、docs/adr/0016)。実際の銀行アプリらしい見た目にするため、
- * 全画面を`.bank-frame`(カード状のアプリ外枠)で包む(docs/adr/0009へ追記の
- * 「顧客向けWeb UIの実物寄せ」)。 */
+/** サインイン → (口座|送金)タブ、各タブは一覧⇔詳細を独立に持つ、という顧客向けの画面遷移
+ * (docs/adr/0009、docs/adr/0012決定6、docs/adr/0016、docs/adr/0021・0022)。実際の銀行アプリ
+ * らしい見た目にするため、全画面を`.bank-frame`(カード状のアプリ外枠)で包む
+ * (docs/adr/0009へ追記の「顧客向けWeb UIの実物寄せ」)。 */
 export function CustomerFlow() {
   const [session, setSession] = useState(() => getCurrentSession());
-  const [view, setView] = useState<View>({ screen: "accounts" });
+  const [activeTab, setActiveTab] = useState<CustomerTab>("accounts");
+  const [accountsTabView, setAccountsTabView] = useState<AccountsTabView>(ACCOUNTS_LIST);
+  const [transfersTabView, setTransfersTabView] = useState<TransfersTabView>(TRANSFERS_LIST);
+
+  const resetNavigation = () => {
+    setActiveTab("accounts");
+    setAccountsTabView(ACCOUNTS_LIST);
+    setTransfersTabView(TRANSFERS_LIST);
+  };
 
   const onSignedOut = () => {
     setSession(null);
-    setView({ screen: "accounts" });
+    resetNavigation();
     // 共有端末を想定し、次にサインインする利用者へ前の利用者の残高マスクの選択を
     // 持ち越さない(useBalanceHiddenのコメント参照)。
     setBalanceHidden(true);
@@ -42,49 +51,51 @@ export function CustomerFlow() {
       <SignInForm
         onSignedIn={(newSession) => {
           setSession(newSession);
-          setView({ screen: "accounts" });
+          resetNavigation();
         }}
       />
     );
-  } else if (view.screen === "account-detail") {
-    const currentView = view;
-    content = (
-      <CustomerAccountDetail
-        accountId={currentView.accountId}
-        onBack={() => setView(currentView.returnTo ?? { screen: "accounts" })}
-        onViewTransfer={(transferId) => setView({ screen: "transfer-detail", transferId, returnTo: currentView })}
-      />
-    );
-  } else if (view.screen === "transfers") {
-    content = (
-      <TransferListScreen
-        customerName={session.username}
-        onSelectTransfer={(transferId) => setView({ screen: "transfer-detail", transferId })}
-        onSelectTab={(tab) => setView(tabView(tab))}
-        onSignedOut={onSignedOut}
-      />
-    );
-  } else if (view.screen === "transfer-detail") {
-    const currentView = view;
-    content = (
-      <TransferDetailScreen
-        transferId={currentView.transferId}
-        onBack={() => setView(currentView.returnTo ?? { screen: "transfers" })}
-        onRecalled={(newTransferId) =>
-          setView({ screen: "transfer-detail", transferId: newTransferId, returnTo: currentView.returnTo })
-        }
-        onViewAccount={(accountId) => setView({ screen: "account-detail", accountId, returnTo: currentView })}
-      />
-    );
+  } else if (activeTab === "accounts") {
+    content =
+      accountsTabView.screen === "detail" ? (
+        <CustomerAccountDetail
+          accountId={accountsTabView.accountId}
+          onBack={() => setAccountsTabView(ACCOUNTS_LIST)}
+          onSelectTab={setActiveTab}
+          onViewTransfer={(transferId) => {
+            setTransfersTabView({ screen: "detail", transferId });
+            setActiveTab("transfers");
+          }}
+        />
+      ) : (
+        <AccountListScreen
+          customerName={session.username}
+          onSelectAccount={(accountId) => setAccountsTabView({ screen: "detail", accountId })}
+          onSelectTab={setActiveTab}
+          onSignedOut={onSignedOut}
+        />
+      );
   } else {
-    content = (
-      <AccountListScreen
-        customerName={session.username}
-        onSelectAccount={(accountId) => setView({ screen: "account-detail", accountId })}
-        onSelectTab={(tab) => setView(tabView(tab))}
-        onSignedOut={onSignedOut}
-      />
-    );
+    content =
+      transfersTabView.screen === "detail" ? (
+        <TransferDetailScreen
+          transferId={transfersTabView.transferId}
+          onBack={() => setTransfersTabView(TRANSFERS_LIST)}
+          onSelectTab={setActiveTab}
+          onRecalled={(newTransferId) => setTransfersTabView({ screen: "detail", transferId: newTransferId })}
+          onViewAccount={(accountId) => {
+            setAccountsTabView({ screen: "detail", accountId });
+            setActiveTab("accounts");
+          }}
+        />
+      ) : (
+        <TransferListScreen
+          customerName={session.username}
+          onSelectTransfer={(transferId) => setTransfersTabView({ screen: "detail", transferId })}
+          onSelectTab={setActiveTab}
+          onSignedOut={onSignedOut}
+        />
+      );
   }
 
   return <div className="bank-frame">{content}</div>;

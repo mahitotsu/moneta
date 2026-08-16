@@ -4,6 +4,7 @@ import { TransactionHistory } from "./TransactionHistory";
 import { FreezeForm } from "./FreezeForm";
 import { SimpleActionButton } from "./SimpleActionButton";
 import { DetailAppBar } from "./AppBar";
+import { CustomerTabBar, type CustomerTab } from "./CustomerTabBar";
 import { ChevronDown, Unlock, XCircle } from "./icons";
 import { unfreeze, closeAccount } from "../api/client";
 import { useAccount } from "../hooks/useAccount";
@@ -23,10 +24,14 @@ import { useAccount } from "../hooks/useAccount";
 export function CustomerAccountDetail({
   accountId,
   onBack,
+  onSelectTab,
   onViewTransfer,
 }: {
   accountId: string;
   onBack: () => void;
+  /** タブバーは詳細画面にも常設する(docs/adr/0022)——「戻る」は常にこのタブの一覧へ戻る
+   * だけの一定の意味にし、タブをまたぐ移動は常にタブバーの役目にする。 */
+  onSelectTab: (tab: CustomerTab) => void;
   /** 取引履歴の1行が送金由来の場合、その送金の詳細へ飛ぶ(docs/adr/0021)。 */
   onViewTransfer: (transferId: string) => void;
 }) {
@@ -36,8 +41,9 @@ export function CustomerAccountDetail({
 
   return (
     <>
-      <DetailAppBar title="口座詳細" onBack={onBack} />
+      <DetailAppBar title="口座詳細" onBack={onBack} backLabel="口座一覧へ戻る" />
       <div className="bank-body">
+        <CustomerTabBar active="accounts" onSelect={onSelectTab} />
         <AccountView accountId={accountId} onRemoved={onBack} />
         {!isMissing && <TransactionHistory accountId={accountId} onViewTransfer={onViewTransfer} />}
 

@@ -43,6 +43,7 @@ function renderDetail(transferId: string, onViewAccount: (accountId: string) => 
       <TransferDetailScreen
         transferId={transferId}
         onBack={() => {}}
+        onSelectTab={() => {}}
         onRecalled={() => {}}
         onViewAccount={onViewAccount}
       />
