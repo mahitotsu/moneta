@@ -236,6 +236,18 @@ async function main(): Promise<void> {
   await confirmTransfer(outputs, customer.idToken, furikomi);
   await waitForTransferState(outputs, customer.idToken, furikomi, ["credited"]);
 
+  // 逆方向の振込(customer2 -> customer)も1件作る(docs/adr/0020)。demo-customerだけで
+  // サインインして、送金一覧・詳細の「送った(様へ)」「受け取った(様より)」両方の表示を
+  // 見比べられるようにするため——上のfurikomiだけでは、demo-customerから見て常に送信側にしか
+  // ならず、受信側の表示(相手方の名義・入金アイコン)を確認する手段がdemo-customer-2への
+  // サインインを要求してしまっていた。
+  console.log(`[furikomi] ${account3} -> ${account1} (${customer.username}, incoming for demo-customer): 5000.00`);
+  const fromNumber = await resolveAccountNumber(outputs, customer2.idToken, account1);
+  const furikomiIncoming = await startTransfer(outputs, customer2.idToken, account3, account1, "5000.00");
+  await waitForTransferState(outputs, customer2.idToken, furikomiIncoming, ["pending_confirmation"]);
+  await confirmTransfer(outputs, customer2.idToken, furikomiIncoming);
+  await waitForTransferState(outputs, customer2.idToken, furikomiIncoming, ["credited"]);
+
   const balance1 = await getBalance(outputs, customer.idToken, account1);
   const balance2 = await getBalance(outputs, customer.idToken, account2);
   const balance3 = await getBalance(outputs, customer2.idToken, account3);
@@ -246,6 +258,10 @@ async function main(): Promise<void> {
   }
   console.log(`\n${customer.username}: ${account1} (${balance1}), ${account2} (${balance2})`);
   console.log(`${customer2.username}: ${account3} (${balance3}), branch ${toNumber.branchCode} no. ${toNumber.accountNumber}`);
+  console.log(
+    `${customer.username}'s account1 also has an incoming furikomi from ${customer2.username} ` +
+      `(branch ${fromNumber.branchCode} no. ${fromNumber.accountNumber}), for comparing sent/received display.`,
+  );
 }
 
 if (require.main === module) {
