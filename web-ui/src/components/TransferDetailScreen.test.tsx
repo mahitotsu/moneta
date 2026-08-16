@@ -4,7 +4,7 @@
 // ここではAccountView.test.tsxと同じ理由(UI表示ロジックはWeb UI側のコードにしかない)で
 // コンポーネント単体テストに絞る。
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { createQueryClient } from "../queryClient";
 import { TransferDetailScreen } from "./TransferDetailScreen";
@@ -36,11 +36,16 @@ getMyAccountsMock.mockResolvedValue([]);
 // 誤って複数要素にマッチしてしまう。
 afterEach(cleanup);
 
-function renderDetail(transferId: string) {
+function renderDetail(transferId: string, onViewAccount: (accountId: string) => void = () => {}) {
   const queryClient = createQueryClient({ retryDelay: 0 });
   render(
     <QueryClientProvider client={queryClient}>
-      <TransferDetailScreen transferId={transferId} onBack={() => {}} onRecalled={() => {}} />
+      <TransferDetailScreen
+        transferId={transferId}
+        onBack={() => {}}
+        onRecalled={() => {}}
+        onViewAccount={onViewAccount}
+      />
     </QueryClientProvider>,
   );
 }
@@ -191,5 +196,41 @@ describe("送金元・送金先のうち相手方にだけ名義を添える(doc
       expect(screen.getAllByText("本店 123-4567")).toHaveLength(2);
     });
     expect(screen.queryByText(/様/)).toBeNull();
+  });
+});
+
+// docs/adr/0021: 送金元・送金先のうち自分の口座である側にだけ、入出金履歴への相互リンクを出す。
+describe("自分の口座である側にだけ入出金履歴へのリンクを出す(docs/adr/0021)", () => {
+  it("自分が送金元の振込は、送金元の側だけにリンクが出て、押すとonViewAccountを呼ぶ", async () => {
+    const mine: MyAccount = { accountId: "11111111-1111-1111-1111-111111111111", openedAt: "2026-08-01T00:00:00Z" };
+    getMyAccountsMock.mockResolvedValue([mine]);
+    getTransferStatusMock.mockResolvedValue(
+      view({ fromAccountId: mine.accountId, toAccountId: "22222222-2222-2222-2222-222222222222", kind: "furikomi" }),
+    );
+    const onViewAccount = vi.fn();
+
+    renderDetail("t-1", onViewAccount);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("入出金履歴を見る")).toHaveLength(1);
+    });
+    fireEvent.click(screen.getByText("入出金履歴を見る"));
+    expect(onViewAccount).toHaveBeenCalledWith(mine.accountId);
+  });
+
+  it("振替(furikae)は送金元・送金先とも自分名義なので両方にリンクが出る", async () => {
+    const fromId = "11111111-1111-1111-1111-111111111111";
+    const toId = "22222222-2222-2222-2222-222222222222";
+    getMyAccountsMock.mockResolvedValue([
+      { accountId: fromId, openedAt: "2026-08-01T00:00:00Z" },
+      { accountId: toId, openedAt: "2026-08-01T00:00:00Z" },
+    ]);
+    getTransferStatusMock.mockResolvedValue(view({ fromAccountId: fromId, toAccountId: toId, kind: "furikae" }));
+
+    renderDetail("t-1");
+
+    await waitFor(() => {
+      expect(screen.getAllByText("入出金履歴を見る")).toHaveLength(2);
+    });
   });
 });

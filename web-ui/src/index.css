@@ -188,6 +188,24 @@ button.secondary {
   color: var(--accent);
 }
 
+/* 口座詳細⇔送金詳細の相互リンク(docs/adr/0021)。dl/ddの地の文に埋め込む文字サイズの
+   テキストリンクで、通常のボタンとは視覚的に区別する。 */
+.inline-link-button {
+  font: inherit;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* .tx-main内では.tx-time/.tx-reasonと同じ12pxに揃え、単独行として表示する。 */
+.tx-transfer-link {
+  display: block;
+  font-size: 12px;
+}
+
 .operations-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

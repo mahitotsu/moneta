@@ -10,7 +10,19 @@ use crate::projection::{format_timestamp, freeze_reason_label};
 /// `occurred_at`/`event_id`は`Event`自身ではなく`EventEnvelope`(発行側の契約、
 /// docs/adr/0008)から渡される。`Event::Deposited`/`Withdrawn`はそれ自身のタイムスタンプを
 /// 持たないため、全種別で統一してエンベロープ側の値を使う。
-pub fn history_entry_from_event(event: &Event, occurred_at: OffsetDateTime, event_id: Uuid) -> Value {
+///
+/// `correlation_id`も同じく`EventEnvelope`由来(docs/adr/0010決定4)。transfer-serviceが
+/// Deposit/Withdrawを発行した際のtransferIdがそのまま入っており、それ以外(顧客の直接操作・
+/// 外部チャネル)では`None`。`transferId`としてそのままエントリに載せる(docs/adr/0021)
+/// ——この入出金が振込/振替/組戻しのどれによって起きたものかを、送金の詳細へのリンクとして
+/// 顧客向けUIから辿れるようにするためだけの、輸送専用の値。`account-domain`自身はこの値を
+/// 一切知らず、Event::Deposited/Withdrawn自体には含まれない(envelope.rsの設計をそのまま踏襲)。
+pub fn history_entry_from_event(
+    event: &Event,
+    occurred_at: OffsetDateTime,
+    event_id: Uuid,
+    correlation_id: Option<&str>,
+) -> Value {
     let (kind, amount, balance_after, reason) = match event {
         Event::Opened { balance, .. } => ("opened", Value::Null, *balance, None),
         Event::Deposited { amount, new_balance, .. } => ("deposited", json!(amount), *new_balance, None),
@@ -27,6 +39,7 @@ pub fn history_entry_from_event(event: &Event, occurred_at: OffsetDateTime, even
         "occurredAt": format_timestamp(occurred_at),
         "eventId": event_id,
         "reason": reason,
+        "transferId": correlation_id,
     })
 }
 
@@ -50,21 +63,32 @@ mod tests {
             balance: dec!(1000),
             opened_at: occurred_at,
         };
-        let entry = history_entry_from_event(&event, occurred_at, event_id);
+        let entry = history_entry_from_event(&event, occurred_at, event_id, None);
         assert_eq!(entry["type"], "opened");
         assert_eq!(entry["amount"], Value::Null);
         assert_eq!(entry["balanceAfter"], json!(dec!(1000)));
         assert_eq!(entry["eventId"], json!(event_id));
+        assert_eq!(entry["transferId"], Value::Null);
     }
 
     #[test]
     fn deposited_event_yields_deposited_entry_with_amount() {
         let (occurred_at, event_id) = envelope_fields();
         let event = Event::Deposited { account_id: AccountId::new(), amount: dec!(500), new_balance: dec!(1500) };
-        let entry = history_entry_from_event(&event, occurred_at, event_id);
+        let entry = history_entry_from_event(&event, occurred_at, event_id, None);
         assert_eq!(entry["type"], "deposited");
         assert_eq!(entry["amount"], json!(dec!(500)));
         assert_eq!(entry["balanceAfter"], json!(dec!(1500)));
+    }
+
+    /// docs/adr/0021: transfer-service経由のDeposit/Withdraw(correlation_id = transferId)は
+    /// エントリに`transferId`として素通しされ、送金の詳細へのリンクに使われる。
+    #[test]
+    fn deposited_event_with_correlation_id_carries_transfer_id() {
+        let (occurred_at, event_id) = envelope_fields();
+        let event = Event::Deposited { account_id: AccountId::new(), amount: dec!(500), new_balance: dec!(1500) };
+        let entry = history_entry_from_event(&event, occurred_at, event_id, Some("transfer-123"));
+        assert_eq!(entry["transferId"], "transfer-123");
     }
 
     #[test]
@@ -76,7 +100,7 @@ mod tests {
             reason: FreezeReason::CourtOrder,
             frozen_at: occurred_at,
         };
-        let entry = history_entry_from_event(&event, occurred_at, event_id);
+        let entry = history_entry_from_event(&event, occurred_at, event_id, None);
         assert_eq!(entry["type"], "frozen");
         assert_eq!(entry["amount"], Value::Null);
         assert_eq!(entry["reason"], "court_order");
@@ -91,7 +115,7 @@ mod tests {
     fn closed_event_yields_closed_entry_with_final_balance() {
         let (occurred_at, event_id) = envelope_fields();
         let event = Event::Closed { account_id: AccountId::new(), final_balance: dec!(0), closed_at: occurred_at };
-        let entry = history_entry_from_event(&event, occurred_at, event_id);
+        let entry = history_entry_from_event(&event, occurred_at, event_id, None);
         assert_eq!(entry["type"], "closed");
         assert_eq!(entry["balanceAfter"], json!(dec!(0)));
     }

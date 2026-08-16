@@ -194,6 +194,19 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
   existing `ArrowDownLeft`/`ArrowUpRight` icons and positive/negative tone (green=received,
   red=sent) rather than inventing new visual language. Pure frontend change, no backend/infra
   touched — the data was already there, just not compared against "which accounts are mine".
+- `0021`: cross-links the per-account transaction history (口座 menu) and per-transfer history
+  (送金 menu) — previously there was no way to jump between them despite them showing two
+  facets of the same underlying event for transfer-caused money movements. Transfer detail →
+  own-side account history needed no backend change (reuses `0020`'s "which side is mine"
+  check) and only added `returnTo?: View` to `CustomerFlow.tsx`'s view union (one-level jump
+  memory, not a nav stack). Account history → causing transfer needed threading
+  `EventEnvelope.correlation_id` (already the transferId, set by transfer-service per `0010`
+  decision 4, already reaching `account_events`) through `query-service`'s
+  `history_entry_from_event`/`query_projector.rs` into a new `transferId` field on
+  `TransactionEntry` — no infra/VTL change needed since `GET .../transactions` already just
+  concatenates the JSON `entry` blob verbatim. Links render via a new shared
+  `.inline-link-button` CSS class, shown only on entries the customer can see (own account,
+  transfer-caused entries).
 
 ## Commands
 

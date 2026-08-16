@@ -49,7 +49,13 @@ function groupByDate(entries: TransactionEntry[]): { date: string; entries: Tran
   return groups;
 }
 
-export function TransactionHistory({ accountId }: { accountId: string }) {
+interface Props {
+  accountId: string;
+  /** 行が送金由来(transferId非null)の場合、その送金の詳細へ飛ぶ(docs/adr/0021)。 */
+  onViewTransfer: (transferId: string) => void;
+}
+
+export function TransactionHistory({ accountId, onViewTransfer }: Props) {
   const { data, isLoading } = useQuery({
     queryKey: ["transactions", accountId],
     queryFn: () => getTransactionHistory(accountId),
@@ -94,6 +100,15 @@ export function TransactionHistory({ accountId }: { accountId: string }) {
                     <span className="tx-type">{TYPE_LABEL[entry.type] ?? entry.type}</span>
                     {entry.reason && <span className="tx-reason">{FREEZE_REASON_VIEW_LABEL[entry.reason]}</span>}
                     <span className="tx-time">{formatTimeLabel(entry.occurredAt)}</span>
+                    {entry.transferId && (
+                      <button
+                        type="button"
+                        className="inline-link-button tx-transfer-link"
+                        onClick={() => onViewTransfer(entry.transferId!)}
+                      >
+                        送金の詳細を見る
+                      </button>
+                    )}
                   </span>
                   <span className="tx-amounts">
                     {entry.amount && (

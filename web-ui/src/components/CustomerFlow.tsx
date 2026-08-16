@@ -8,11 +8,15 @@ import { TransferListScreen } from "./TransferListScreen";
 import { TransferDetailScreen } from "./TransferDetailScreen";
 import type { CustomerTab } from "./CustomerTabBar";
 
+// `returnTo`は口座詳細⇔送金詳細の相互リンク(docs/adr/0021)専用——通常の一覧タブ経由の
+// 遷移では付けない(その場合は`onBack`が既定のタブへ戻る)。ジャンプ元の画面を1段だけ
+// 覚えておくための最小限の仕組みで、汎用のナビゲーションスタックは持たない
+// (docs/adr/0007がルーターを避けている方針と同じ単純さの優先)。
 type View =
   | { screen: "accounts" }
-  | { screen: "account-detail"; accountId: string }
+  | { screen: "account-detail"; accountId: string; returnTo?: View }
   | { screen: "transfers" }
-  | { screen: "transfer-detail"; transferId: string };
+  | { screen: "transfer-detail"; transferId: string; returnTo?: View };
 
 const tabView = (tab: CustomerTab): View => (tab === "accounts" ? { screen: "accounts" } : { screen: "transfers" });
 
@@ -43,7 +47,14 @@ export function CustomerFlow() {
       />
     );
   } else if (view.screen === "account-detail") {
-    content = <CustomerAccountDetail accountId={view.accountId} onBack={() => setView({ screen: "accounts" })} />;
+    const currentView = view;
+    content = (
+      <CustomerAccountDetail
+        accountId={currentView.accountId}
+        onBack={() => setView(currentView.returnTo ?? { screen: "accounts" })}
+        onViewTransfer={(transferId) => setView({ screen: "transfer-detail", transferId, returnTo: currentView })}
+      />
+    );
   } else if (view.screen === "transfers") {
     content = (
       <TransferListScreen
@@ -54,11 +65,15 @@ export function CustomerFlow() {
       />
     );
   } else if (view.screen === "transfer-detail") {
+    const currentView = view;
     content = (
       <TransferDetailScreen
-        transferId={view.transferId}
-        onBack={() => setView({ screen: "transfers" })}
-        onRecalled={(newTransferId) => setView({ screen: "transfer-detail", transferId: newTransferId })}
+        transferId={currentView.transferId}
+        onBack={() => setView(currentView.returnTo ?? { screen: "transfers" })}
+        onRecalled={(newTransferId) =>
+          setView({ screen: "transfer-detail", transferId: newTransferId, returnTo: currentView.returnTo })
+        }
+        onViewAccount={(accountId) => setView({ screen: "account-detail", accountId, returnTo: currentView })}
       />
     );
   } else {

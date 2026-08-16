@@ -26,6 +26,10 @@ function accountNumberLabel(accountNumber: AccountNumberLookup | null | undefine
   return showName ? `${base} / ${accountNumber.ownerName}様` : base;
 }
 
+// 送金元・送金先のうち自分の口座である側に、その口座の入出金履歴へのリンクを添える
+// (docs/adr/0021)。furikaeは両方とも自分名義なので両方に付き、furikomi/組戻しは自分の側
+// だけに付く——相手方の口座は他人のものであり閲覧導線を出すこと自体が不適切なため出さない。
+
 const STATE_BADGE_CLASS: Record<TransferState, string> = {
   pending_confirmation: "badge badge-pending",
   pending_debit: "badge badge-pending",
@@ -53,11 +57,13 @@ interface Props {
   transferId: string;
   onBack: () => void;
   onRecalled: (newTransferId: string) => void;
+  /** 送金元/送金先のうち自分の口座である側から、その口座の入出金履歴へ飛ぶ(docs/adr/0021)。 */
+  onViewAccount: (accountId: string) => void;
 }
 
 /** 送金1件の状態を継続ポーリングしつつ、振込の確認/取消(pending_confirmation中のみ)・
  * 組戻し(credited済みの振込のみ、24時間以内)の操作を提供する(docs/adr/0012決定6)。 */
-export function TransferDetailScreen({ transferId, onBack, onRecalled }: Props) {
+export function TransferDetailScreen({ transferId, onBack, onRecalled, onViewAccount }: Props) {
   const { data, isLoading } = useTransfer(transferId);
 
   // 送金元・送金先それぞれの実際の口座番号(docs/adr/0015)。dataがまだ無い間は
@@ -75,6 +81,7 @@ export function TransferDetailScreen({ transferId, onBack, onRecalled }: Props) 
   const isCrossOwner = data?.kind !== "furikae" && myAccountsReady;
   const fromIsCounterparty = isCrossOwner && data != null && !myAccountIds.has(data.fromAccountId);
   const toIsCounterparty = isCrossOwner && data != null && !myAccountIds.has(data.toAccountId);
+  const isMine = (accountId: string) => myAccountsReady && myAccountIds.has(accountId);
 
   // 確認/取消はこのサガ自身の状態がpending_confirmationから遷移するのを待てば良いので、
   // 口座の凍結/解約と同じ「反映待ち」パターン(useSettlingMutation)がそのまま使える。
@@ -134,9 +141,37 @@ export function TransferDetailScreen({ transferId, onBack, onRecalled }: Props) 
               </div>
               <dl className="hero-meta">
                 <dt>送金元</dt>
-                <dd>{accountNumberLabel(fromAccountNumber, fromIsCounterparty)}</dd>
+                <dd>
+                  {accountNumberLabel(fromAccountNumber, fromIsCounterparty)}
+                  {isMine(data.fromAccountId) && (
+                    <>
+                      {" "}
+                      <button
+                        type="button"
+                        className="inline-link-button"
+                        onClick={() => onViewAccount(data.fromAccountId)}
+                      >
+                        入出金履歴を見る
+                      </button>
+                    </>
+                  )}
+                </dd>
                 <dt>送金先</dt>
-                <dd>{accountNumberLabel(toAccountNumber, toIsCounterparty)}</dd>
+                <dd>
+                  {accountNumberLabel(toAccountNumber, toIsCounterparty)}
+                  {isMine(data.toAccountId) && (
+                    <>
+                      {" "}
+                      <button
+                        type="button"
+                        className="inline-link-button"
+                        onClick={() => onViewAccount(data.toAccountId)}
+                      >
+                        入出金履歴を見る
+                      </button>
+                    </>
+                  )}
+                </dd>
                 <dt>更新日時</dt>
                 <dd>{formatDateTime(data.updatedAt)}</dd>
               </dl>

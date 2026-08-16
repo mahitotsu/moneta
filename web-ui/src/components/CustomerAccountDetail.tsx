@@ -20,7 +20,16 @@ import { useAccount } from "../hooks/useAccount";
  * Unfreeze/Close のみ有効(Freezeは`AlreadyFrozen`で拒否)、Closedはどのコマンドも
  * `AccountClosed`で拒否される終端状態なので管理セクション自体を出さない。
  */
-export function CustomerAccountDetail({ accountId, onBack }: { accountId: string; onBack: () => void }) {
+export function CustomerAccountDetail({
+  accountId,
+  onBack,
+  onViewTransfer,
+}: {
+  accountId: string;
+  onBack: () => void;
+  /** 取引履歴の1行が送金由来の場合、その送金の詳細へ飛ぶ(docs/adr/0021)。 */
+  onViewTransfer: (transferId: string) => void;
+}) {
   const [managingOpen, setManagingOpen] = useState(false);
   const { data: account, isSuccess } = useAccount(accountId);
   const isMissing = isSuccess && account === null;
@@ -30,7 +39,7 @@ export function CustomerAccountDetail({ accountId, onBack }: { accountId: string
       <DetailAppBar title="口座詳細" onBack={onBack} />
       <div className="bank-body">
         <AccountView accountId={accountId} onRemoved={onBack} />
-        {!isMissing && <TransactionHistory accountId={accountId} />}
+        {!isMissing && <TransactionHistory accountId={accountId} onViewTransfer={onViewTransfer} />}
 
         {account && account.status !== "closed" && (
           <section className="panel settings-panel">

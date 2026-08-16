@@ -58,7 +58,16 @@ async fn project_one(
     let event: Event = serde_json::from_value(envelope.data)?;
 
     put_current_view(dynamodb, table_name, account_id, occurred_at, event_id, &event).await?;
-    put_history_entry(dynamodb, history_table_name, account_id, occurred_at, event_id, &event).await?;
+    put_history_entry(
+        dynamodb,
+        history_table_name,
+        account_id,
+        occurred_at,
+        event_id,
+        &event,
+        envelope.correlation_id.as_deref(),
+    )
+    .await?;
 
     Ok(())
 }
@@ -119,8 +128,9 @@ async fn put_history_entry(
     occurred_at: OffsetDateTime,
     event_id: Uuid,
     event: &Event,
+    correlation_id: Option<&str>,
 ) -> Result<(), Error> {
-    let entry = history::history_entry_from_event(event, occurred_at, event_id);
+    let entry = history::history_entry_from_event(event, occurred_at, event_id, correlation_id);
     let occurred_at_nanos = occurred_at.unix_timestamp_nanos();
     let sort_key = format!("{occurred_at_nanos:0NANOS_WIDTH$}#{event_id}");
 

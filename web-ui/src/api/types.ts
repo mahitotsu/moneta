@@ -58,6 +58,10 @@ export interface TransactionEntry {
   occurredAt: string;
   eventId: string;
   reason: FreezeReasonView | null;
+  /** この入出金がtransfer-service経由(振替/振込/組戻し)で起きたものであれば、その送金の
+   *  transferId(docs/adr/0021)。ATM入出金等の外部チャネル(docs/adr/0009決定1)や、
+   *  入出金を伴わないopened/frozen/unfrozen/closedでは常にnull。 */
+  transferId: string | null;
 }
 
 /**
