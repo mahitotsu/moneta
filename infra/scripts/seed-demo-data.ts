@@ -127,13 +127,26 @@ async function openAccount(outputs: StackOutputs, idToken: string, initialBalanc
   return accountId;
 }
 
-async function deposit(outputs: StackOutputs, accountId: string, amount: string): Promise<void> {
+// channel: 発生源の外部チャネル(docs/adr/0023)。deposits/withdrawalsのAPIが必須にしたため、
+// 呼び出し側で明示的に選ぶ。
+type Channel = "Atm" | "IncomingTransfer" | "BillPayment";
+
+async function deposit(outputs: StackOutputs, accountId: string, amount: string, channel: Channel): Promise<void> {
   const response = await fetch(`${outputs.commandApiUrl}/accounts/${accountId}/deposits`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
-    body: JSON.stringify({ amount }),
+    body: JSON.stringify({ amount, channel }),
   });
   if (response.status !== 202) throw new Error(`deposit(${accountId}, ${amount}) unexpected status ${response.status}`);
+}
+
+async function withdraw(outputs: StackOutputs, accountId: string, amount: string, channel: Channel): Promise<void> {
+  const response = await fetch(`${outputs.commandApiUrl}/accounts/${accountId}/withdrawals`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+    body: JSON.stringify({ amount, channel }),
+  });
+  if (response.status !== 202) throw new Error(`withdraw(${accountId}, ${amount}) unexpected status ${response.status}`);
 }
 
 async function getBalance(outputs: StackOutputs, idToken: string, accountId: string): Promise<string> {
@@ -221,8 +234,19 @@ async function main(): Promise<void> {
   console.log(`[accounts] opening ${customer2.username}'s account...`);
   const account3 = await openAccount(outputs, customer2.idToken, "0.00");
 
-  console.log(`[deposit] ${account1}: +300000.00 (external channel, docs/adr/0009決定1)`);
-  await deposit(outputs, account1, "300000.00");
+  // 外部チャネル(docs/adr/0009決定1)経由の入出金を3種類とも実演する(docs/adr/0023)。
+  // 取引履歴で「ATM」「他行からの振込」「口座振替(収納機関への支払い)」の3ラベルが
+  // 実際に見えるようにするため。
+  console.log(`[deposit] ${account1}: +300000.00 (channel: Atm)`);
+  await deposit(outputs, account1, "300000.00", "Atm");
+  await getBalance(outputs, customer.idToken, account1);
+
+  console.log(`[deposit] ${account2}: +15000.00 (channel: IncomingTransfer)`);
+  await deposit(outputs, account2, "15000.00", "IncomingTransfer");
+  await getBalance(outputs, customer.idToken, account2);
+
+  console.log(`[withdraw] ${account1}: -2800.00 (channel: BillPayment)`);
+  await withdraw(outputs, account1, "2800.00", "BillPayment");
   await getBalance(outputs, customer.idToken, account1);
 
   console.log(`[furikae] ${account1} -> ${account2}: 50000.00`);
