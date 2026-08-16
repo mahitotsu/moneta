@@ -22,12 +22,14 @@ export function ChannelEmulatorScreen() {
           title="ATM入金"
           description="顧客が自分でATMから現金を入金する操作を模擬します。"
           submitLabel="入金する"
+          channel="Atm"
           action={deposit}
         />
         <ChannelOperationForm
           title="ATM出金"
           description="顧客が自分でATMから現金を引き出す操作を模擬します。"
           submitLabel="出金する"
+          channel="Atm"
           action={withdraw}
         />
       </div>
@@ -37,6 +39,7 @@ export function ChannelEmulatorScreen() {
         description="別の金融機関から、この口座宛に振込があった状況を模擬します。"
         submitLabel="振込を反映する"
         counterpartyLabel="送金元銀行名(表示用、任意)"
+        channel="IncomingTransfer"
         action={deposit}
       />
 
@@ -45,6 +48,7 @@ export function ChannelEmulatorScreen() {
         description="電気・水道等の収納機関が、この口座から自動引き落としを行った状況を模擬します。"
         submitLabel="引き落とす"
         counterpartyLabel="支払先名(表示用、任意)"
+        channel="BillPayment"
         action={withdraw}
       />
     </>

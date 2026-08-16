@@ -17,11 +17,17 @@ use crate::projection::{format_timestamp, freeze_reason_label};
 /// ——この入出金が振込/振替/組戻しのどれによって起きたものかを、送金の詳細へのリンクとして
 /// 顧客向けUIから辿れるようにするためだけの、輸送専用の値。`account-domain`自身はこの値を
 /// 一切知らず、Event::Deposited/Withdrawn自体には含まれない(envelope.rsの設計をそのまま踏襲)。
+///
+/// `channel`も同じ由来(docs/adr/0023)。外部チャネル・エミュレータ(ATM/他行からの振込/
+/// 収納機関への支払い)経由のDeposit/Withdrawにだけ付与され、`correlation_id`(transfer-service
+/// 経由)とは互いに排他——両方同時に値を持つことはない。`channel`としてそのままエントリに
+/// 載せ、顧客向けUIが「入金」「出金」に発生源のラベルを添えるために使う。
 pub fn history_entry_from_event(
     event: &Event,
     occurred_at: OffsetDateTime,
     event_id: Uuid,
     correlation_id: Option<&str>,
+    channel: Option<&str>,
 ) -> Value {
     let (kind, amount, balance_after, reason) = match event {
         Event::Opened { balance, .. } => ("opened", Value::Null, *balance, None),
@@ -40,6 +46,7 @@ pub fn history_entry_from_event(
         "eventId": event_id,
         "reason": reason,
         "transferId": correlation_id,
+        "channel": channel,
     })
 }
 
@@ -63,7 +70,7 @@ mod tests {
             balance: dec!(1000),
             opened_at: occurred_at,
         };
-        let entry = history_entry_from_event(&event, occurred_at, event_id, None);
+        let entry = history_entry_from_event(&event, occurred_at, event_id, None, None);
         assert_eq!(entry["type"], "opened");
         assert_eq!(entry["amount"], Value::Null);
         assert_eq!(entry["balanceAfter"], json!(dec!(1000)));
@@ -75,7 +82,7 @@ mod tests {
     fn deposited_event_yields_deposited_entry_with_amount() {
         let (occurred_at, event_id) = envelope_fields();
         let event = Event::Deposited { account_id: AccountId::new(), amount: dec!(500), new_balance: dec!(1500) };
-        let entry = history_entry_from_event(&event, occurred_at, event_id, None);
+        let entry = history_entry_from_event(&event, occurred_at, event_id, None, None);
         assert_eq!(entry["type"], "deposited");
         assert_eq!(entry["amount"], json!(dec!(500)));
         assert_eq!(entry["balanceAfter"], json!(dec!(1500)));
@@ -87,8 +94,19 @@ mod tests {
     fn deposited_event_with_correlation_id_carries_transfer_id() {
         let (occurred_at, event_id) = envelope_fields();
         let event = Event::Deposited { account_id: AccountId::new(), amount: dec!(500), new_balance: dec!(1500) };
-        let entry = history_entry_from_event(&event, occurred_at, event_id, Some("transfer-123"));
+        let entry = history_entry_from_event(&event, occurred_at, event_id, Some("transfer-123"), None);
         assert_eq!(entry["transferId"], "transfer-123");
+    }
+
+    /// docs/adr/0023: 外部チャネル・エミュレータ経由のDeposit/Withdraw(channelあり、
+    /// correlation_idなし)は`channel`としてエントリに素通しされる。
+    #[test]
+    fn deposited_event_with_channel_carries_channel_and_no_transfer_id() {
+        let (occurred_at, event_id) = envelope_fields();
+        let event = Event::Deposited { account_id: AccountId::new(), amount: dec!(500), new_balance: dec!(1500) };
+        let entry = history_entry_from_event(&event, occurred_at, event_id, None, Some("Atm"));
+        assert_eq!(entry["channel"], "Atm");
+        assert_eq!(entry["transferId"], Value::Null);
     }
 
     #[test]
@@ -100,7 +118,7 @@ mod tests {
             reason: FreezeReason::CourtOrder,
             frozen_at: occurred_at,
         };
-        let entry = history_entry_from_event(&event, occurred_at, event_id, None);
+        let entry = history_entry_from_event(&event, occurred_at, event_id, None, None);
         assert_eq!(entry["type"], "frozen");
         assert_eq!(entry["amount"], Value::Null);
         assert_eq!(entry["reason"], "court_order");
@@ -115,7 +133,7 @@ mod tests {
     fn closed_event_yields_closed_entry_with_final_balance() {
         let (occurred_at, event_id) = envelope_fields();
         let event = Event::Closed { account_id: AccountId::new(), final_balance: dec!(0), closed_at: occurred_at };
-        let entry = history_entry_from_event(&event, occurred_at, event_id, None);
+        let entry = history_entry_from_event(&event, occurred_at, event_id, None, None);
         assert_eq!(entry["type"], "closed");
         assert_eq!(entry["balanceAfter"], json!(dec!(0)));
     }

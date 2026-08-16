@@ -27,6 +27,7 @@ function entry(overrides: Partial<TransactionEntry> = {}): TransactionEntry {
     eventId: "11111111-1111-1111-1111-111111111111",
     reason: null,
     transferId: null,
+    channel: null,
     ...overrides,
   };
 }
@@ -62,6 +63,30 @@ describe("送金由来の行にだけ、送金の詳細へのリンクを出す(
     await waitFor(() => {
       expect(screen.getByText("入金")).toBeTruthy();
     });
+    expect(screen.queryByText("送金の詳細を見る")).toBeNull();
+  });
+});
+
+describe("channelを持つ行には発生源のラベルを出す(docs/adr/0023)", () => {
+  it("ATM入金にはATMラベルが出る", async () => {
+    getTransactionHistoryMock.mockResolvedValue([entry({ transferId: null, channel: "Atm" })]);
+
+    renderHistory();
+
+    await waitFor(() => {
+      expect(screen.getByText("ATM")).toBeTruthy();
+    });
+  });
+
+  it("channelもtransferIdも無い行にはどちらのラベルも出ない", async () => {
+    getTransactionHistoryMock.mockResolvedValue([entry({ transferId: null, channel: null })]);
+
+    renderHistory();
+
+    await waitFor(() => {
+      expect(screen.getByText("入金")).toBeTruthy();
+    });
+    expect(screen.queryByText("ATM")).toBeNull();
     expect(screen.queryByText("送金の詳細を見る")).toBeNull();
   });
 });

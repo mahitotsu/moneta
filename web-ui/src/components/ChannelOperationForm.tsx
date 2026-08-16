@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import type { CommandAcceptedResponse } from "../api/types";
+import type { Channel, CommandAcceptedResponse } from "../api/types";
 
 interface Props {
   title: string;
@@ -8,21 +8,25 @@ interface Props {
   submitLabel: string;
   /** 表示のみの飾り項目(送金元銀行名・支払先名等)。バックエンドへは送らない(docs/adr/0009)。 */
   counterpartyLabel?: string;
-  action: (accountId: string, amount: string) => Promise<CommandAcceptedResponse>;
+  /** どの外部チャネルからの操作かを示す値。バックエンドへ送り、取引履歴に発生源として
+   *  表示される(docs/adr/0023)——counterpartyLabelとは違い、こちらは実データとして送る。 */
+  channel: Channel;
+  action: (accountId: string, amount: string, channel: Channel) => Promise<CommandAcceptedResponse>;
 }
 
 /**
  * 「外部チャネル」(ATM/他行からの振込/収納機関への支払い)を模擬する共有フォーム。
  * 対象口座IDを直接入力する点が顧客向け画面と異なる——顧客のサインインセッションとは
  * 無関係な、「外の世界」からの操作を表す。中身は既存のDeposit/Withdrawコマンドを
- * そのまま呼ぶだけで、バックエンドは無改修(docs/adr/0009)。
+ * そのまま呼ぶだけで、バックエンドは無改修(docs/adr/0009。channelの追加はドメインでは
+ * なくエンベロープ側のメタデータなので、この決定を覆すものではない、docs/adr/0023)。
  */
-export function ChannelOperationForm({ title, description, submitLabel, counterpartyLabel, action }: Props) {
+export function ChannelOperationForm({ title, description, submitLabel, counterpartyLabel, channel, action }: Props) {
   const [accountId, setAccountId] = useState("");
   const [amount, setAmount] = useState("0.00");
   const [counterparty, setCounterparty] = useState("");
   const mutation = useMutation({
-    mutationFn: () => action(accountId, amount),
+    mutationFn: () => action(accountId, amount, channel),
   });
 
   return (

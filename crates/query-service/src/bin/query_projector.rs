@@ -55,19 +55,10 @@ async fn project_one(
     let account_id = AccountId::from(envelope.account_id);
     let event_id = envelope.event_id;
     let occurred_at = envelope.occurred_at;
-    let event: Event = serde_json::from_value(envelope.data)?;
+    let event: Event = serde_json::from_value(envelope.data.clone())?;
 
     put_current_view(dynamodb, table_name, account_id, occurred_at, event_id, &event).await?;
-    put_history_entry(
-        dynamodb,
-        history_table_name,
-        account_id,
-        occurred_at,
-        event_id,
-        &event,
-        envelope.correlation_id.as_deref(),
-    )
-    .await?;
+    put_history_entry(dynamodb, history_table_name, account_id, &envelope, &event).await?;
 
     Ok(())
 }
@@ -120,18 +111,24 @@ async fn put_current_view(
 
 /// 取引履歴への追記。ソートキーに`event_id`を含めるため、at-least-once配信で同じイベントが
 /// 再送されても同じキーへの冪等な上書きになるだけであり、current viewと違って
-/// ConditionExpressionは不要(docs/adr/0009)。
+/// ConditionExpressionは不要(docs/adr/0009)。`correlation_id`/`channel`は`envelope`から
+/// 直接読む(clippyのtoo_many_argumentsを避けるため個別の引数に分解しない、docs/adr/0023)。
 async fn put_history_entry(
     dynamodb: &aws_sdk_dynamodb::Client,
     history_table_name: &str,
     account_id: AccountId,
-    occurred_at: OffsetDateTime,
-    event_id: Uuid,
+    envelope: &EventEnvelope,
     event: &Event,
-    correlation_id: Option<&str>,
 ) -> Result<(), Error> {
-    let entry = history::history_entry_from_event(event, occurred_at, event_id, correlation_id);
-    let occurred_at_nanos = occurred_at.unix_timestamp_nanos();
+    let event_id = envelope.event_id;
+    let entry = history::history_entry_from_event(
+        event,
+        envelope.occurred_at,
+        event_id,
+        envelope.correlation_id.as_deref(),
+        envelope.channel.as_deref(),
+    );
+    let occurred_at_nanos = envelope.occurred_at.unix_timestamp_nanos();
     let sort_key = format!("{occurred_at_nanos:0NANOS_WIDTH$}#{event_id}");
 
     let mut item: HashMap<String, AttributeValue> = HashMap::new();

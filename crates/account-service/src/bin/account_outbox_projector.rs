@@ -114,6 +114,8 @@ struct EventImage {
     created_at: String,
     #[serde(rename = "correlationId", default)]
     correlation_id: Option<String>,
+    #[serde(default)]
+    channel: Option<String>,
 }
 
 fn unpublished_event_from_record(record: &EventRecord) -> Option<UnpublishedEvent> {
@@ -127,5 +129,6 @@ fn unpublished_event_from_record(record: &EventRecord) -> Option<UnpublishedEven
         payload: serde_json::from_str(&image.payload).ok()?,
         created_at: OffsetDateTime::parse(&image.created_at, &Rfc3339).ok()?,
         correlation_id: image.correlation_id,
+        channel: image.channel,
     })
 }

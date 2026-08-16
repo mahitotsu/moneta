@@ -21,6 +21,7 @@ pub fn to_outbox_entry(event: &UnpublishedEvent) -> OutboxEntry {
             kind: event.kind.clone(),
             data: event.payload.clone(),
             correlation_id: event.correlation_id.clone(),
+            channel: event.channel.clone(),
         },
     }
 }
@@ -50,6 +51,7 @@ mod tests {
             payload,
             created_at: OffsetDateTime::UNIX_EPOCH,
             correlation_id: None,
+            channel: None,
         }
     }
 
@@ -101,5 +103,23 @@ mod tests {
         let entry = to_outbox_entry(&event);
         let json = serde_json::to_string(&entry.detail).unwrap();
         assert!(!json.contains("correlation_id"), "expected no correlation_id key, got: {json}");
+    }
+
+    #[test]
+    fn channel_is_passed_through_to_the_envelope_when_present() {
+        // docs/adr/0023: 外部チャネル・エミュレータ(ATM等)経由のDeposit/Withdrawだけが
+        // channelを持つ。
+        let mut event = unpublished_event("event", json!({"Deposited": {"amount": "500"}}));
+        event.channel = Some("Atm".to_string());
+        let entry = to_outbox_entry(&event);
+        assert_eq!(entry.detail.channel.as_deref(), Some("Atm"));
+    }
+
+    #[test]
+    fn channel_is_absent_from_the_serialized_envelope_when_none() {
+        let event = unpublished_event("event", json!({"Deposited": {"amount": "500"}}));
+        let entry = to_outbox_entry(&event);
+        let json = serde_json::to_string(&entry.detail).unwrap();
+        assert!(!json.contains("channel"), "expected no channel key, got: {json}");
     }
 }

@@ -300,6 +300,9 @@ export class AccountPipelineStack extends cdk.Stack {
                 // 決定4)。発行しないコマンド(顧客の通常操作)ではフィールド自体が欠落する
                 // (EventEnvelopeのskip_serializing_if)ため必須にしない。
                 correlation_id: { type: "string" },
+                // Deposit/Withdrawを起こした外部チャネル(docs/adr/0023)。correlation_idと
+                // 同じ理由で必須にしない。
+                channel: { type: "string" },
               },
             },
           },
@@ -925,13 +928,34 @@ export class AccountPipelineStack extends cdk.Stack {
         additionalProperties: false,
       },
     });
-    const amountModel = commandApi.addModel("AmountCommandModel", {
+    // channel: Deposit/Withdrawを起こした外部チャネル(docs/adr/0023)。deposits/withdrawals
+    // は同じREST操作(入金/出金)を複数の外部チャネルが共有する(例: depositsはATM入金と
+    // 他行からの振込の両方から呼ばれる)ため、URLパスやリソースの違いでは区別できず、
+    // ボディで明示させる。入金・出金それぞれで実際にあり得るチャネルだけをenumで許可する
+    // (FreezeCommandModelのreasonと同じ、値の妥当性はここで構造的に保証する方針)。
+    const depositModel = commandApi.addModel("DepositCommandModel", {
       contentType: "application/json",
       schema: {
         schema: apigateway.JsonSchemaVersion.DRAFT4,
         type: apigateway.JsonSchemaType.OBJECT,
-        required: ["amount"],
-        properties: { amount: decimalStringSchema },
+        required: ["amount", "channel"],
+        properties: {
+          amount: decimalStringSchema,
+          channel: { type: apigateway.JsonSchemaType.STRING, enum: ["Atm", "IncomingTransfer"] },
+        },
+        additionalProperties: false,
+      },
+    });
+    const withdrawalModel = commandApi.addModel("WithdrawalCommandModel", {
+      contentType: "application/json",
+      schema: {
+        schema: apigateway.JsonSchemaVersion.DRAFT4,
+        type: apigateway.JsonSchemaType.OBJECT,
+        required: ["amount", "channel"],
+        properties: {
+          amount: decimalStringSchema,
+          channel: { type: apigateway.JsonSchemaType.STRING, enum: ["Atm", "BillPayment"] },
+        },
         additionalProperties: false,
       },
     });
@@ -960,13 +984,15 @@ export class AccountPipelineStack extends cdk.Stack {
     // request"になることをtest-invoke-methodで確認済み)。回避策として、`#set($q = '"')`で
     // 二重引用符1文字を単一引用符リテラル(エスケープ不要)に退避し、`${q}`という変数参照として
     // 埋め込むことでパーサーの引用符衝突そのものを避けている(docs/adr/0006)。
-    // requestedByField: Open/Freeze/Unfreeze/Closeの呼び出し側からだけ
-    // AUTHORIZED_REQUESTED_BY_FIELD(下記)を渡す、$context.authorizer.claims.sub
-    // (Cognito認証済みユーザーのsub)をMessageBodyの`requested_by`として注入するVTL断片
-    // (docs/adr/0016決定3)。account-service/src/persistence.rsのAccountCommandEnvelope側の
-    // フィールド名と一致させる。Deposit/Withdraw(外部チャネル、認証なし、ADR-0009決定1)は
-    // 空文字列を渡し、この項目自体を付与しない。
-    const sqsIntegration = (commandJsonFragment: string, requestedByField: string) =>
+    // extraEnvelopeFieldsFragment: AccountCommandEnvelopeのcommand以外のトップレベル
+    // フィールド(requested_by/channel)を追加するVTL断片。呼び出し元ごとに異なる値を渡す:
+    // Open/Freeze/Unfreeze/CloseはAUTHORIZED_REQUESTED_BY_FIELD(下記、$context.authorizer.
+    // claims.subをMessageBodyの`requested_by`として注入、docs/adr/0016決定3)、
+    // Deposit/WithdrawはCHANNEL_FROM_BODY_FIELD(下記、リクエストボディの`channel`を
+    // そのままMessageBodyの`channel`として注入、docs/adr/0023)——両者は排他的にしか
+    // 使われないため、単一のフィールドで足りる。account-service/src/persistence.rsの
+    // AccountCommandEnvelope側のフィールド名と一致させる。
+    const sqsIntegration = (commandJsonFragment: string, extraEnvelopeFieldsFragment: string) =>
       new apigateway.AwsIntegration({
         service: "sqs",
         // SQSクラシック(Query プロトコル)エンドポイントの形。QueueUrlをform paramとして
@@ -991,7 +1017,7 @@ export class AccountPipelineStack extends cdk.Stack {
               "Action=SendMessage",
               "&MessageGroupId=$util.urlEncode($input.params('accountId'))",
               "&MessageDeduplicationId=$util.urlEncode($input.params().header.get('Idempotency-Key'))",
-              `&MessageBody=$util.urlEncode("{\${q}account_id\${q}:\${q}$input.params('accountId')\${q},\${q}command\${q}:${commandJsonFragment}${requestedByField}}")`,
+              `&MessageBody=$util.urlEncode("{\${q}account_id\${q}:\${q}$input.params('accountId')\${q},\${q}command\${q}:${commandJsonFragment}${extraEnvelopeFieldsFragment}}")`,
             ].join(""),
           },
           // SQSのSendMessageレスポンスはXML(Queryプロトコル)であり、そこからMessageIdを
@@ -1038,9 +1064,11 @@ export class AccountPipelineStack extends cdk.Stack {
     const closeCommandJson = `\${q}Close\${q}`;
 
     // Open/Freeze/Unfreeze/Closeのsqsintegration呼び出しに渡す(docs/adr/0016決定3)。
-    // Deposit/Withdrawには渡さず、空文字列(この項目自体を付与しない)を使う。
     const AUTHORIZED_REQUESTED_BY_FIELD = `,\${q}requested_by\${q}:\${q}$context.authorizer.claims.sub\${q}`;
-    const NO_REQUESTED_BY_FIELD = "";
+    // Deposit/Withdrawのsqsintegration呼び出しに渡す(docs/adr/0023)。リクエストボディの
+    // `channel`(DepositCommandModel/WithdrawalCommandModelがenumで妥当性を保証済み)を、
+    // owner_name(openCommandJson)と同じ理由でescapeJavaScriptしつつMessageBodyへ注入する。
+    const CHANNEL_FROM_BODY_FIELD = `,\${q}channel\${q}:\${q}$util.escapeJavaScript($input.path('$.channel'))\${q}`;
 
     const requireIdempotencyKey = {
       "method.request.header.Idempotency-Key": true,
@@ -1063,17 +1091,17 @@ export class AccountPipelineStack extends cdk.Stack {
 
     // Deposit/Withdraw(外部チャネル、認証なし、ADR-0009決定1)は引き続き認証を要求しない
     // (docs/adr/0016決定2)。
-    commandAccountResource.addResource("deposits").addMethod("POST", sqsIntegration(depositCommandJson, NO_REQUESTED_BY_FIELD), {
+    commandAccountResource.addResource("deposits").addMethod("POST", sqsIntegration(depositCommandJson, CHANNEL_FROM_BODY_FIELD), {
       requestValidator: commandRequestValidator,
       requestParameters: requireIdempotencyKey,
-      requestModels: { "application/json": amountModel },
+      requestModels: { "application/json": depositModel },
       methodResponses: [{ statusCode: "202" }, { statusCode: "502" }],
     });
 
-    commandAccountResource.addResource("withdrawals").addMethod("POST", sqsIntegration(withdrawCommandJson, NO_REQUESTED_BY_FIELD), {
+    commandAccountResource.addResource("withdrawals").addMethod("POST", sqsIntegration(withdrawCommandJson, CHANNEL_FROM_BODY_FIELD), {
       requestValidator: commandRequestValidator,
       requestParameters: requireIdempotencyKey,
-      requestModels: { "application/json": amountModel },
+      requestModels: { "application/json": withdrawalModel },
       methodResponses: [{ statusCode: "202" }, { statusCode: "502" }],
     });
 

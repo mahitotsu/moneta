@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getTransactionHistory } from "../api/client";
 import { formatCurrency, formatDateLabel, formatTimeLabel } from "../format";
-import { FREEZE_REASON_VIEW_LABEL, type TransactionEntry } from "../api/types";
+import { CHANNEL_LABEL, FREEZE_REASON_VIEW_LABEL, type TransactionEntry } from "../api/types";
 import { ArrowDownLeft, ArrowUpRight, Lock, PlusCircle, Unlock, XCircle } from "./icons";
 
 const POLL_INTERVAL_MS = 3000;
@@ -98,6 +98,7 @@ export function TransactionHistory({ accountId, onViewTransfer }: Props) {
                   <span className={`tx-icon tx-icon-${tone}`}>{TYPE_ICON[entry.type]}</span>
                   <span className="tx-main">
                     <span className="tx-type">{TYPE_LABEL[entry.type] ?? entry.type}</span>
+                    {entry.channel && <span className="tx-channel">{CHANNEL_LABEL[entry.channel]}</span>}
                     {entry.reason && <span className="tx-reason">{FREEZE_REASON_VIEW_LABEL[entry.reason]}</span>}
                     <span className="tx-time">{formatTimeLabel(entry.occurredAt)}</span>
                     {entry.transferId && (

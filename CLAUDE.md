@@ -221,6 +221,23 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
   state untouched, so switching back lands exactly where you left it with zero bookkeeping.
   `DetailAppBar` gained a required `backLabel` prop (was hardcoded to "口座一覧へ戻る" even on
   the transfer-detail screen — a latent bug `0022`'s determinism happens to fix too).
+- `0023`: transaction-history rows with no `transferId` (i.e. not caused by a transfer) rendered
+  as a bare "入金"/"出金" with no indication of source — traced to `ChannelEmulatorScreen.tsx`'s
+  4 forms (ATM deposit/withdrawal, incoming transfer, bill payment) all collapsing into the same
+  `deposit`/`withdraw` calls with the channel discarded client-side (`0009` decision 1's
+  "counterparty name is decorative, never sent" already applied to the channel choice itself,
+  not just the free-text name). Fixes by adding `channel: Option<String>` end-to-end as the same
+  kind of opaque transport metadata `0010` decision 4's `correlation_id` already is —
+  `EventEnvelope`/`AccountCommandEnvelope`/`account_events`/outbox projector/query-service's
+  `history_entry_from_event` each gain a `channel` field alongside `correlation_id`, never typed
+  as an `account-domain` enum (mirrors `correlation_id`'s own untyped-string treatment, not
+  `FreezeReason`'s). API Gateway's shared `AmountCommandModel` splits into `DepositCommandModel`/
+  `WithdrawalCommandModel`, each with a `channel` enum scoped to that direction's valid values,
+  validated the same way `FreezeCommandModel`'s `reason` already is. Web-ui's
+  `ChannelOperationForm` gains a required `channel` prop wired per-button in
+  `ChannelEmulatorScreen.tsx`; `TransactionHistory.tsx` shows a `CHANNEL_LABEL`-mapped line
+  (mutually exclusive with `0021`'s transfer-detail link, since `channel`/`transferId` are never
+  both set).
 
 ## Commands
 

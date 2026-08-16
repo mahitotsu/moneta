@@ -8,6 +8,21 @@
 /** `POST .../freeze`のリクエストボディで使う値。Rustのenumバリアント名と厳密一致。 */
 export type FreezeReasonRequest = "SuspectedFraud" | "CourtOrder" | "CustomerRequest";
 
+/**
+ * Deposit/Withdrawを起こした外部チャネル(docs/adr/0023)。`reason`と違い、
+ * account-domain側では素通しの文字列のまま扱われる(バックエンドでのリラベルなし)ため、
+ * リクエスト側・レスポンス側(取引履歴の`channel`)で同じ型を共有する。値はRustのenum
+ * バリアント名(PascalCase)風だが、実体は単なる文字列。
+ */
+export type Channel = "Atm" | "IncomingTransfer" | "BillPayment";
+
+/** `Channel`の日本語表示ラベル(取引履歴での「発生源」表示、ADR-0023)。 */
+export const CHANNEL_LABEL: Record<Channel, string> = {
+  Atm: "ATM",
+  IncomingTransfer: "他行からの振込",
+  BillPayment: "口座振替(収納機関への支払い)",
+};
+
 /** `GET /accounts/{id}`のレスポンスの`frozenReason`で返る値。 */
 export type FreezeReasonView = "suspected_fraud" | "court_order" | "customer_request";
 
@@ -59,9 +74,14 @@ export interface TransactionEntry {
   eventId: string;
   reason: FreezeReasonView | null;
   /** この入出金がtransfer-service経由(振替/振込/組戻し)で起きたものであれば、その送金の
-   *  transferId(docs/adr/0021)。ATM入出金等の外部チャネル(docs/adr/0009決定1)や、
+   *  transferId(docs/adr/0021)。外部チャネル(docs/adr/0009決定1)経由や、
    *  入出金を伴わないopened/frozen/unfrozen/closedでは常にnull。 */
   transferId: string | null;
+  /** この入出金を起こした外部チャネル(docs/adr/0023)。`transferId`と排他——両方同時に
+   *  値を持つことはない。外部チャネル・エミュレータ経由でないDeposit/Withdrawは実質存在
+   *  しない(docs/adr/0009決定1)ため、`transferId`も`channel`もnullなdeposited/withdrawn
+   *  エントリは基本的に起こらないはずだが、型としては両方nullも許容する。 */
+  channel: Channel | null;
 }
 
 /**

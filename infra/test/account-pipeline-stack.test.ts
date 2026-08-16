@@ -487,9 +487,10 @@ describe("AccountPipelineStack", () => {
           .filter((pattern): pattern is string => pattern !== undefined);
       })
       .flat();
-    // OpenCommandModel(initial_balance) + AmountCommandModel(amount) + StartTransferModel(amount、
+    // OpenCommandModel(initial_balance) + DepositCommandModel(amount) + WithdrawalCommandModel
+    // (amount、docs/adr/0023でAmountCommandModelから分離) + StartTransferModel(amount、
     // docs/adr/0012決定4がACCOUNT-serviceの決定5をそのまま踏襲)。
-    expect(patterns).toHaveLength(3);
+    expect(patterns).toHaveLength(4);
     for (const pattern of patterns) {
       expect(pattern).toBe("^-?\\d+(\\.\\d{1,2})?$");
     }

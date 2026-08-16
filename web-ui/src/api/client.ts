@@ -2,6 +2,7 @@ import { getIdToken } from "../auth";
 import type {
   AccountNumberLookup,
   AccountView,
+  Channel,
   CommandAcceptedResponse,
   FreezeReasonRequest,
   MyAccount,
@@ -124,12 +125,14 @@ export async function openAccount(initialBalance: string): Promise<CommandAccept
   return response.json() as Promise<CommandAcceptedResponse>;
 }
 
-export function deposit(accountId: string, amount: string): Promise<CommandAcceptedResponse> {
-  return postCommand(`/accounts/${accountId}/deposits`, { amount });
+/** `channel`はどの外部チャネルからの入金かを示す(docs/adr/0023)。取引履歴に発生源として
+ *  表示するためだけの値で、業務ルールの判定には使われない。 */
+export function deposit(accountId: string, amount: string, channel: Channel): Promise<CommandAcceptedResponse> {
+  return postCommand(`/accounts/${accountId}/deposits`, { amount, channel });
 }
 
-export function withdraw(accountId: string, amount: string): Promise<CommandAcceptedResponse> {
-  return postCommand(`/accounts/${accountId}/withdrawals`, { amount });
+export function withdraw(accountId: string, amount: string, channel: Channel): Promise<CommandAcceptedResponse> {
+  return postCommand(`/accounts/${accountId}/withdrawals`, { amount, channel });
 }
 
 export function freeze(accountId: string, reason: FreezeReasonRequest): Promise<CommandAcceptedResponse> {

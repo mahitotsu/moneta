@@ -24,4 +24,13 @@ pub struct EventEnvelope {
     /// 関心事。発行しないコマンド(顧客の通常操作)では常に`None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<String>,
+    /// Deposit/Withdrawを起こした外部チャネル(`"Atm"`/`"IncomingTransfer"`/`"BillPayment"`、
+    /// docs/adr/0023)。`correlation_id`と同じ「輸送のみの関心事」——account-domainの状態遷移
+    /// ロジックはこの値を一切参照せず、`Command`/`Event`の一部にもしない。外部チャネル・
+    /// エミュレータ(docs/adr/0009決定1)が呼ぶDeposit/Withdrawにだけ付与され、値の正しさは
+    /// API Gatewayのリクエストモデル(enum制約)が担保する——account-domainは型で強制せず、
+    /// 素通しの`Option<String>`のまま扱う。顧客の通常操作やtransfer-service経由の入出金
+    /// (`correlation_id`が設定される方)では常に`None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
 }

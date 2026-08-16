@@ -27,6 +27,13 @@ pub struct AccountCommandEnvelope {
     /// ADR-0009決定1)からのメッセージやtransfer-serviceが直接送るメッセージには存在しない。
     #[serde(default)]
     pub requested_by: Option<String>,
+    /// Deposit/Withdrawを起こした外部チャネル(`"Atm"`/`"IncomingTransfer"`/`"BillPayment"`、
+    /// docs/adr/0023)。API Gatewayの`deposits`/`withdrawals`リソースのVTLがリクエストボディの
+    /// `channel`をそのまま注入する。`correlation_id`と同じ「輸送のみ」の値であり、値の妥当性は
+    /// API Gatewayのリクエストモデル(enum制約)側で保証する——ここでは素通しするだけ。
+    /// transfer-service経由や顧客の通常操作(Open/Freeze/Unfreeze/Close)では常に`None`。
+    #[serde(default)]
+    pub channel: Option<String>,
 }
 
 /// account-serviceが書き込む3テーブルの名前(docs/adr/0013)。
@@ -307,6 +314,7 @@ fn event_put(
     payload: &Value,
     now: OffsetDateTime,
     correlation_id: Option<&str>,
+    channel: Option<&str>,
 ) -> TransactWriteItem {
     let mut builder = Put::builder()
         .table_name(table)
@@ -317,6 +325,9 @@ fn event_put(
         .item("createdAt", AttributeValue::S(format_rfc3339(now)));
     if let Some(correlation_id) = correlation_id {
         builder = builder.item("correlationId", AttributeValue::S(correlation_id.to_string()));
+    }
+    if let Some(channel) = channel {
+        builder = builder.item("channel", AttributeValue::S(channel.to_string()));
     }
     TransactWriteItem::builder().put(builder.build().expect("Put is fully populated")).build()
 }
@@ -446,7 +457,15 @@ pub async fn apply_command(
         }
     }
 
-    items.push(event_put(&tables.events, envelope.account_id, kind, &payload, now, envelope.correlation_id.as_deref()));
+    items.push(event_put(
+        &tables.events,
+        envelope.account_id,
+        kind,
+        &payload,
+        now,
+        envelope.correlation_id.as_deref(),
+        envelope.channel.as_deref(),
+    ));
 
     match client.transact_write_items().set_transact_items(Some(items)).send().await {
         Ok(_) => Ok(()),
@@ -464,6 +483,7 @@ pub struct UnpublishedEvent {
     pub payload: Value,
     pub created_at: OffsetDateTime,
     pub correlation_id: Option<String>,
+    pub channel: Option<String>,
 }
 
 #[cfg(test)]

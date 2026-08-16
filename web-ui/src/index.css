@@ -697,7 +697,8 @@ button.secondary {
   color: var(--text-h);
 }
 
-.tx-reason {
+.tx-reason,
+.tx-channel {
   font-size: 12px;
   opacity: 0.7;
 }
