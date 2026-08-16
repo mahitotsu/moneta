@@ -1,9 +1,9 @@
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { DetailAppBar } from "./AppBar";
 import { useTransfer } from "../hooks/useTransfer";
 import { useAccountNumber } from "../hooks/useAccountNumber";
 import { useSettlingMutation } from "../hooks/useSettlingMutation";
-import { confirmTransfer, cancelTransfer, recallTransfer } from "../api/client";
+import { confirmTransfer, cancelTransfer, getMyAccounts, recallTransfer } from "../api/client";
 import { formatCurrency, formatDateTime, formatFriendlyAccountNumber } from "../format";
 import { TRANSFER_KIND_LABEL, TRANSFER_STATE_LABEL, type TransferState } from "../api/types";
 import type { AccountNumberLookup } from "../api/types";
@@ -17,10 +17,13 @@ const RECALL_WINDOW_MS = 24 * 60 * 60 * 1000;
 // AccountListScreen/AccountView.tsxが自分の口座に使っているのと同じ「支店名 番号」の書式
 // (docs/adr/0015)。以前はここだけ`formatAccountNumber`(accountIdのUUID末尾を口座番号風に
 // 見せかける表示専用の飾り、実データとは無関係)を使っており、アプリの他画面が表示する
-// 実際の口座番号と体裁が一致していなかった(docs/adr/0019)。
-function accountNumberLabel(accountNumber: AccountNumberLookup | null | undefined): string {
+// 実際の口座番号と体裁が一致していなかった(docs/adr/0019)。`showName`がtrueの側(相手方、
+// 振込/組戻しのみ)には名義(ownerName、docs/adr/0018)も添える——自分自身の側は自明なので
+// 口座番号のみのまま(docs/adr/0020)。
+function accountNumberLabel(accountNumber: AccountNumberLookup | null | undefined, showName: boolean): string {
   if (!accountNumber) return "口座番号を確認しています…";
-  return `${accountNumber.branchName} ${formatFriendlyAccountNumber(accountNumber.accountNumber)}`;
+  const base = `${accountNumber.branchName} ${formatFriendlyAccountNumber(accountNumber.accountNumber)}`;
+  return showName ? `${base} / ${accountNumber.ownerName}様` : base;
 }
 
 const STATE_BADGE_CLASS: Record<TransferState, string> = {
@@ -61,6 +64,17 @@ export function TransferDetailScreen({ transferId, onBack, onRecalled }: Props) 
   // useAccountNumberが自動的にクエリを止める(空文字列accountId、useAccountNumber.tsのenabled)。
   const { data: fromAccountNumber } = useAccountNumber(data?.fromAccountId ?? "");
   const { data: toAccountNumber } = useAccountNumber(data?.toAccountId ?? "");
+
+  // 相手方(振込/組戻しのみ)の名義を出すために、自分の口座かどうかを判定する
+  // (TransferListScreen.tsxと同じ理由、docs/adr/0020)。furikaeは送金元・送金先とも常に
+  // 自分名義なので「相手方」という概念自体が無い。myAccountsが未反映の間は誤判定を避けるため
+  // 名義を一切出さない(myAccountsReady)。
+  const myAccountsQuery = useQuery({ queryKey: ["my-accounts"], queryFn: () => getMyAccounts() });
+  const myAccountsReady = myAccountsQuery.data !== undefined;
+  const myAccountIds = new Set((myAccountsQuery.data ?? []).map((a) => a.accountId));
+  const isCrossOwner = data?.kind !== "furikae" && myAccountsReady;
+  const fromIsCounterparty = isCrossOwner && data != null && !myAccountIds.has(data.fromAccountId);
+  const toIsCounterparty = isCrossOwner && data != null && !myAccountIds.has(data.toAccountId);
 
   // 確認/取消はこのサガ自身の状態がpending_confirmationから遷移するのを待てば良いので、
   // 口座の凍結/解約と同じ「反映待ち」パターン(useSettlingMutation)がそのまま使える。
@@ -120,9 +134,9 @@ export function TransferDetailScreen({ transferId, onBack, onRecalled }: Props) 
               </div>
               <dl className="hero-meta">
                 <dt>送金元</dt>
-                <dd>{accountNumberLabel(fromAccountNumber)}</dd>
+                <dd>{accountNumberLabel(fromAccountNumber, fromIsCounterparty)}</dd>
                 <dt>送金先</dt>
-                <dd>{accountNumberLabel(toAccountNumber)}</dd>
+                <dd>{accountNumberLabel(toAccountNumber, toIsCounterparty)}</dd>
                 <dt>更新日時</dt>
                 <dd>{formatDateTime(data.updatedAt)}</dd>
               </dl>

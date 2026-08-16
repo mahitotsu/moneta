@@ -6,7 +6,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { QueryClientProvider } from "@tanstack/react-query";
 import { createQueryClient } from "../queryClient";
 import { TransferListScreen } from "./TransferListScreen";
-import type { MyAccount, TransferStatusView } from "../api/types";
+import type { AccountNumberLookup, MyAccount, TransferStatusView } from "../api/types";
 
 vi.mock("../api/client", () => ({
   getAccountNumber: vi.fn(),
@@ -105,5 +105,73 @@ describe("送金一覧はサーバー側のCustomerTransfersTableから取得す
     await waitFor(() => {
       expect(screen.getByText("まだ送金の依頼はありません。下から振替・振込を行ってください。")).toBeTruthy();
     });
+  });
+});
+
+// docs/adr/0020: 振込(furikomi)は自分が送った側か受け取った側かで「相手方」の口座が
+// 逆になる。以前は常にtoAccountId(宛先)だけを見せていたため、受け取った側から見ると
+// 「自分の口座宛」という無意味な表示になっていた。
+describe("振込は送受信の方向に応じて相手方の名義を表示する(docs/adr/0020)", () => {
+  function lookup(overrides: Partial<AccountNumberLookup> = {}): AccountNumberLookup {
+    return {
+      accountId: "99999999-9999-9999-9999-999999999999",
+      ownerName: "hanako",
+      accountNumber: "1234567",
+      branchCode: "001",
+      branchName: "本店",
+      ...overrides,
+    };
+  }
+
+  it("自分が送った振込は、送金先(相手)の名義に「様へ」を付けて表示する", async () => {
+    getMyAccountsMock.mockResolvedValue([ACCOUNTS[0]]);
+    const otherAccountId = "99999999-9999-9999-9999-999999999999";
+    const transfer: TransferStatusView = {
+      transferId: "44444444-4444-4444-4444-444444444444",
+      fromAccountId: ACCOUNTS[0].accountId, // 送金元 = 自分
+      toAccountId: otherAccountId, // 送金先 = 相手
+      amount: "3000",
+      kind: "furikomi",
+      state: "credited",
+      updatedAt: "2026-08-14T00:00:00Z",
+    };
+    getMyTransfersMock.mockResolvedValue([transfer]);
+    getAccountNumberMock.mockImplementation(async (accountId: string) =>
+      accountId === otherAccountId ? lookup({ accountId: otherAccountId, ownerName: "hanako" }) : null,
+    );
+
+    renderScreen();
+
+    await waitFor(() => {
+      expect(screen.getByText(/hanako様へ/)).toBeTruthy();
+    });
+    expect(getAccountNumberMock).toHaveBeenCalledWith(otherAccountId);
+  });
+
+  it("受け取った振込は、送金元(相手)の名義に「様より」を付けて表示する", async () => {
+    getMyAccountsMock.mockResolvedValue([ACCOUNTS[0]]);
+    const senderAccountId = "88888888-8888-8888-8888-888888888888";
+    const transfer: TransferStatusView = {
+      transferId: "55555555-5555-5555-5555-555555555555",
+      fromAccountId: senderAccountId, // 送金元 = 相手
+      toAccountId: ACCOUNTS[0].accountId, // 送金先 = 自分(受け取った)
+      amount: "2000",
+      kind: "furikomi",
+      state: "credited",
+      updatedAt: "2026-08-14T00:00:00Z",
+    };
+    getMyTransfersMock.mockResolvedValue([transfer]);
+    getAccountNumberMock.mockImplementation(async (accountId: string) =>
+      accountId === senderAccountId ? lookup({ accountId: senderAccountId, ownerName: "jiro" }) : null,
+    );
+
+    renderScreen();
+
+    await waitFor(() => {
+      expect(screen.getByText(/jiro様より/)).toBeTruthy();
+    });
+    // 受け取った側なので、相手方=送金元(senderAccountId)の口座番号を引く——
+    // 従来の「常にtoAccountId(=自分)を引く」実装のバグが再発していないことの直接的な検証。
+    expect(getAccountNumberMock).toHaveBeenCalledWith(senderAccountId);
   });
 });

@@ -429,6 +429,16 @@ button.secondary {
   min-width: 0;
 }
 
+/* TransferListScreen(docs/adr/0020)が送受信の方向アイコン(.tx-icon、TransactionHistoryと
+   共有)を.account-card-mainの左に添えるための単一の子要素にまとめるラッパー。これにより
+   .account-cardの既存の2要素space-betweenレイアウト(.account-card-side との間)は変わらない。 */
+.account-card-icon-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
 .account-card-name {
   font-weight: 600;
   color: var(--text-h);

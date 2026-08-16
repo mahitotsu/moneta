@@ -3,11 +3,11 @@ import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { BrandAppBar } from "./AppBar";
 import { CustomerTabBar, type CustomerTab } from "./CustomerTabBar";
 import { TransferForm } from "./TransferForm";
-import { PlusCircle } from "./icons";
+import { ArrowDownLeft, ArrowUpRight, Bank, PlusCircle } from "./icons";
 import { getAccountNumber, getMyAccounts, getMyTransfers } from "../api/client";
 import { signOut } from "../auth";
 import { formatCurrency, formatFriendlyAccountNumber } from "../format";
-import { TRANSFER_KIND_LABEL, TRANSFER_STATE_LABEL, type TransferState } from "../api/types";
+import { TRANSFER_KIND_LABEL, TRANSFER_STATE_LABEL, type TransferState, type TransferStatusView } from "../api/types";
 
 // useAccountと同じ間隔(docs/adr/0012決定6、口座一覧のbalanceQueriesと同じ考え方)。
 const POLL_INTERVAL_MS = 3000;
@@ -57,17 +57,36 @@ export function TransferListScreen({ customerName, onSelectTransfer, onSelectTab
   });
   const transfers = myTransfersQuery.data ?? [];
 
-  // 各行の宛先を、AccountListScreen/AccountView.tsxと同じ「支店名 番号」の実際の口座番号
+  // 振込/組戻し(furikomi/recall、名義が自分と異なりうる)は、自分が送った側か受け取った側かで
+  // 「相手方」の口座が逆になる——ADR-0017により振込は受取側の「送金」タブにも現れるが、従来は
+  // 常にtoAccountId(宛先)だけを見せていたため、受け取った側から見ると「自分の口座宛」という
+  // 無意味な表示になり、肝心の送金元(誰から受け取ったか)がどこにも出ていなかった(docs/adr/0020)。
+  // 振替(furikae)は送金元・送金先とも常に自分名義なので「相手方」という概念自体が無い。
+  const myAccountIds = new Set(accounts.map((a) => a.accountId));
+  const myAccountsReady = myAccountsQuery.data !== undefined;
+
+  function isOutgoing(t: TransferStatusView): boolean {
+    return myAccountIds.has(t.fromAccountId);
+  }
+  function counterpartyAccountId(t: TransferStatusView): string {
+    if (t.kind === "furikae" || !myAccountsReady) return t.toAccountId;
+    return isOutgoing(t) ? t.toAccountId : t.fromAccountId;
+  }
+
+  // 各行の相手方口座を、AccountListScreen/AccountView.tsxと同じ「支店名 番号」の実際の口座番号
   // (docs/adr/0015)で表示する。以前はaccountIdのUUID末尾を口座番号風に見せかけていただけの
   // 表示専用の飾りを使っており、アプリの他画面と体裁が一致していなかった(docs/adr/0019)。
-  // AccountNumberQueryApiは所有者を問わず任意のaccountIdを解決できるため、宛先(toAccountId)が
-  // 自分以外の口座(振込)でも同じ形で引ける。
-  const toNumberQueries = useQueries({
-    queries: transfers.map((t) => ({
-      queryKey: ["account-number", t.toAccountId],
-      queryFn: () => getAccountNumber(t.toAccountId),
-      refetchInterval: POLL_INTERVAL_MS,
-    })),
+  // AccountNumberQueryApiは所有者を問わず任意のaccountIdを解決できるため、相手方が自分以外の
+  // 口座(振込)でも同じ形で引ける——名義(ownerName、docs/adr/0018)もここで一緒に取れる。
+  const counterpartyNumberQueries = useQueries({
+    queries: transfers.map((t) => {
+      const accountId = counterpartyAccountId(t);
+      return {
+        queryKey: ["account-number", accountId],
+        queryFn: () => getAccountNumber(accountId),
+        refetchInterval: POLL_INTERVAL_MS,
+      };
+    }),
   });
 
   const handleStarted = (started: { transferId: string }) => {
@@ -102,16 +121,32 @@ export function TransferListScreen({ customerName, onSelectTransfer, onSelectTab
         ) : (
           <ul className="account-list">
             {transfers.map((t, i) => {
-              const toNumber = toNumberQueries[i]?.data;
-              const toLabel = toNumber
-                ? `${toNumber.branchName} ${formatFriendlyAccountNumber(toNumber.accountNumber)} 宛`
+              const counterpartyNumber = counterpartyNumberQueries[i]?.data;
+              const outgoing = isOutgoing(t);
+              // furikaeは相手方が常に自分自身なので方向・名義を出さない(neutral/Bank)。
+              const tone = t.kind === "furikae" ? "neutral" : outgoing ? "negative" : "positive";
+              const Icon = t.kind === "furikae" ? Bank : outgoing ? ArrowUpRight : ArrowDownLeft;
+              const numberLabel = counterpartyNumber
+                ? `${counterpartyNumber.branchName} ${formatFriendlyAccountNumber(counterpartyNumber.accountNumber)}`
                 : "確認しています…";
+              const directionSuffix =
+                counterpartyNumber && t.kind !== "furikae"
+                  ? ` ${counterpartyNumber.ownerName}様${outgoing ? "へ" : "より"}`
+                  : "";
               return (
                 <li key={t.transferId}>
                   <button type="button" className="account-card" onClick={() => onSelectTransfer(t.transferId)}>
-                    <span className="account-card-main">
-                      <span className="account-card-name">{TRANSFER_KIND_LABEL[t.kind]}</span>
-                      <span className="account-card-number">{toLabel}</span>
+                    <span className="account-card-icon-row">
+                      <span className={`tx-icon tx-icon-${tone}`}>
+                        <Icon />
+                      </span>
+                      <span className="account-card-main">
+                        <span className="account-card-name">{TRANSFER_KIND_LABEL[t.kind]}</span>
+                        <span className="account-card-number">
+                          {numberLabel}
+                          {directionSuffix}
+                        </span>
+                      </span>
                     </span>
                     <span className="account-card-side">
                       <span className="account-card-balance">{formatCurrency(t.amount)}</span>

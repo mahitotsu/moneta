@@ -8,22 +8,27 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { createQueryClient } from "../queryClient";
 import { TransferDetailScreen } from "./TransferDetailScreen";
-import type { TransferStatusView } from "../api/types";
+import type { AccountNumberLookup, MyAccount, TransferStatusView } from "../api/types";
 
 vi.mock("../api/client", () => ({
   getAccountNumber: vi.fn(),
+  getMyAccounts: vi.fn(),
   getTransferStatus: vi.fn(),
   confirmTransfer: vi.fn(),
   cancelTransfer: vi.fn(),
   recallTransfer: vi.fn(),
 }));
 
-const { getAccountNumber, getTransferStatus } = await import("../api/client");
+const { getAccountNumber, getMyAccounts, getTransferStatus } = await import("../api/client");
 const getAccountNumberMock = vi.mocked(getAccountNumber);
+const getMyAccountsMock = vi.mocked(getMyAccounts);
 const getTransferStatusMock = vi.mocked(getTransferStatus);
 // 送金元・送金先の口座番号表示(docs/adr/0019)。個々のテストは口座番号の表示自体を
 // 主張しないため、AccountView.test.tsxと同じく未反映(null)のまま固定しておく。
 getAccountNumberMock.mockResolvedValue(null);
+// 相手方の名義表示(docs/adr/0020)の判定に使う自分の口座一覧。個々のテストは名義表示自体を
+// 主張しないため、既定では空のまま固定しておく。
+getMyAccountsMock.mockResolvedValue([]);
 
 // このファイルは1テストにつき1回renderするため、testing-libraryの自動cleanupが無い設定
 // (AccountView.test.tsxと同じ)でも前のテストのDOMが残らないよう明示的に片付ける——このファイル
@@ -114,5 +119,77 @@ describe("J9/J10: 組戻しボタンは credited かつ時間窓内の振込に�
       expect(screen.getByText("送金が完了しました。")).toBeTruthy();
     });
     expect(screen.queryByText("組戻す")).toBeNull();
+  });
+});
+
+// docs/adr/0020: 振込(furikomi)/組戻し(recall)は自分の口座でない側(相手方)にだけ
+// 名義を添える——自分側は自明なので出さない。furikaeは両方とも自分名義なので出さない。
+describe("送金元・送金先のうち相手方にだけ名義を添える(docs/adr/0020)", () => {
+  function accountNumber(overrides: Partial<AccountNumberLookup>): AccountNumberLookup {
+    return {
+      accountId: "unused",
+      ownerName: "unused",
+      accountNumber: "1234567",
+      branchCode: "001",
+      branchName: "本店",
+      ...overrides,
+    };
+  }
+
+  it("自分が送金元の振込は、送金先(相手)にだけ名義を表示する", async () => {
+    const mine: MyAccount = { accountId: "11111111-1111-1111-1111-111111111111", openedAt: "2026-08-01T00:00:00Z" };
+    getMyAccountsMock.mockResolvedValue([mine]);
+    getTransferStatusMock.mockResolvedValue(
+      view({ fromAccountId: mine.accountId, toAccountId: "22222222-2222-2222-2222-222222222222", kind: "furikomi" }),
+    );
+    getAccountNumberMock.mockImplementation(async (accountId: string) =>
+      accountId === mine.accountId
+        ? accountNumber({ accountId, ownerName: "taro" })
+        : accountNumber({ accountId, ownerName: "hanako" }),
+    );
+
+    renderDetail("t-1");
+
+    await waitFor(() => {
+      expect(screen.getByText(/hanako様/)).toBeTruthy();
+    });
+    expect(screen.queryByText(/taro様/)).toBeNull();
+  });
+
+  it("自分が送金先(受取側)の振込は、送金元(相手)にだけ名義を表示する", async () => {
+    const mine: MyAccount = { accountId: "22222222-2222-2222-2222-222222222222", openedAt: "2026-08-01T00:00:00Z" };
+    getMyAccountsMock.mockResolvedValue([mine]);
+    getTransferStatusMock.mockResolvedValue(
+      view({ fromAccountId: "11111111-1111-1111-1111-111111111111", toAccountId: mine.accountId, kind: "furikomi" }),
+    );
+    getAccountNumberMock.mockImplementation(async (accountId: string) =>
+      accountId === mine.accountId
+        ? accountNumber({ accountId, ownerName: "taro" })
+        : accountNumber({ accountId, ownerName: "hanako" }),
+    );
+
+    renderDetail("t-1");
+
+    await waitFor(() => {
+      expect(screen.getByText(/hanako様/)).toBeTruthy();
+    });
+    expect(screen.queryByText(/taro様/)).toBeNull();
+  });
+
+  it("振替(furikae)はどちらの側にも名義を表示しない", async () => {
+    const mine: MyAccount = { accountId: "11111111-1111-1111-1111-111111111111", openedAt: "2026-08-01T00:00:00Z" };
+    getMyAccountsMock.mockResolvedValue([mine]);
+    getTransferStatusMock.mockResolvedValue(
+      view({ fromAccountId: mine.accountId, toAccountId: "22222222-2222-2222-2222-222222222222", kind: "furikae" }),
+    );
+    getAccountNumberMock.mockResolvedValue(accountNumber({ accountId: "any", ownerName: "taro" }));
+
+    renderDetail("t-1");
+
+    await waitFor(() => {
+      // 送金元・送金先とも同じ口座番号を返すモックなので2件ヒットする(名義さえ付かなければどちらでもよい)。
+      expect(screen.getAllByText("本店 123-4567")).toHaveLength(2);
+    });
+    expect(screen.queryByText(/様/)).toBeNull();
   });
 });

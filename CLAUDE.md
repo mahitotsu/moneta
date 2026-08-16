@@ -183,6 +183,17 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
   so this works for `toAccountId` too); `formatAccountNumber` itself is deleted (zero remaining
   callers). No masking introduced — matches the existing "show the real number in full" norm
   those two screens already established.
+- `0020`: `TransferListScreen.tsx`/`TransferDetailScreen.tsx` were always framed from the
+  sender's point of view (always showing `toAccountId`'s info) — `0017` already puts a furikomi
+  in the *receiver's* "送金" tab too, but a received transfer rendered as "sent to my own
+  account", with the actual sender nowhere visible. Fixed by comparing `fromAccountId`/
+  `toAccountId` against `getMyAccounts()` to find the "counterparty" (furikae excluded — both
+  sides are always the same owner); the counterparty's `ownerName` (already returned by
+  `AccountNumberQueryApi` since `0018`) is shown only on the non-mine side, suffixed "様へ"
+  (sent) / "様より" (received) in the list. List rows also reuse `TransactionHistory.tsx`'s
+  existing `ArrowDownLeft`/`ArrowUpRight` icons and positive/negative tone (green=received,
+  red=sent) rather than inventing new visual language. Pure frontend change, no backend/infra
+  touched — the data was already there, just not compared against "which accounts are mine".
 
 ## Commands
 
