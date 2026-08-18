@@ -1729,7 +1729,19 @@ export class AccountPipelineStack extends cdk.Stack {
                 // docs/adr/0025: 振込の現金負担分の手数料("0"なら振替・組戻し、または
                 // まだ手数料原資確保前)。送金詳細画面に表示するためだけの追加で、
                 // transfer-serviceの他のロジックはこの値を一切参照しない。
+                //
+                // cashFee導入(0024/0025)より前に作られたサガの項目は、この属性自体を
+                // 持たない——DynamoDBはスキーマレスで、既存アイテムへ新しい必須属性を
+                // 後から強制する仕組みが無い(0011のowner_id導入時と同じ既知の現象)。
+                // 属性が無い場合、$input.pathは空文字列を返す(例外にはならない)——それを
+                // そのまま`"cashFee":""`にすると、web-ui側のformatCurrencyが「¥」のみの
+                // 壊れた表示になる(実機で発見)。"0"にフォールバックし、振替・組戻しと
+                // 同じ「手数料なし」として扱う。
+                '#if($input.path("$.Item.cashFee") == "")',
+                '"cashFee":"0"',
+                "#else",
                 '"cashFee":"$input.path("$.Item.cashFee.S")"',
+                "#end",
                 "}",
                 "#end",
               ].join("\n"),
