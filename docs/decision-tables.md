@@ -70,7 +70,7 @@
 | **ReservingFee** | ❌ Err(NotPendingConfirmation) | ❌ Err(NotPendingConfirmation) | ✅ → PendingDebit(送金額+現金負担分の手数料で`Withdraw`) | 🔸 no-op(防御的、`advance`経由では到達しない設計) | 🔸 no-op(同左。`fee-service`は原資確保を拒否しない設計のため実際には届かない、決定3) |
 | **PendingDebit** | ❌ Err(NotPendingConfirmation) | ❌ Err(NotPendingConfirmation) | - | ✅ → PendingCredit | ✅ → Failed [furikomiなら`IssueRefundFee`も発行、✅] |
 | **PendingCredit** | ❌ Err(NotPendingConfirmation) | ❌ Err(NotPendingConfirmation) | - | ✅ → Credited [furikomiなら`IssueAwardPoints`も発行、✅] | ✅ → Compensating |
-| **Compensating** | ❌ Err(NotPendingConfirmation) | ❌ Err(NotPendingConfirmation) | - | ✅(R6/旧J3に内包) → Compensated [furikomiなら`IssueRefundFee`も発行、❌**未検証**] | 🔸 no-op(意図的にスコープ外、R7) |
+| **Compensating** | ❌ Err(NotPendingConfirmation) | ❌ Err(NotPendingConfirmation) | - | ✅(R6/旧J3に内包) → Compensated [furikomiなら`IssueRefundFee`も発行、✅(2026-08-18)] | 🔸 no-op(意図的にスコープ外、R7) |
 | **Credited**(終端) | ❌ | ❌ | - | 🔸 no-op(防御的) | 🔸 no-op(防御的) |
 | **Compensated**(終端) | ❌ | ❌ | - | 🔸 | 🔸 |
 | **Failed**(終端) | ❌ | ❌ | - | 🔸 | 🔸 |
@@ -83,12 +83,11 @@
    二重確認・確認後のキャンセル試行といった、UIの二度押しやネットワーク再送で現実的に起こりうる
    操作。優先度は中程度(P2)だが、`R8`(複数発行元の同時競合)と近い性質の問題であり、
    実装コストは低い。
-6. **(2026-08-18追加)`Compensating`→`Compensated`遷移時の`IssueRefundFee`発行が、単体テスト
-   (`compensating_deposit_accepted_for_furikomi_refunds_the_fee_reservation`)のみでE2E未検証。**
-   `transfer-fee-and-points.e2e.test.ts`は「`PendingDebit`が却下されて`Failed`になる経路」の
-   ポイント返却だけを検証しており、「送金先の入金が却下されて`Compensating`→`Compensated`に
-   なる経路」でも同様にポイントが返却されることは、実デプロイに対して一度も確認していない。
-   受取人側の口座を凍結/解約してから振込むことで再現できる見込み。
+6. ~~`Compensating`→`Compensated`遷移時の`IssueRefundFee`発行がE2E未検証~~ →
+   **対応済み(2026-08-18)**。受取人側の口座を凍結してから振込み、`PendingCredit`の
+   `Deposit`が`AccountFrozen`で却下されて`Compensating`→`Compensated`へ進む経路を
+   `transfer-fee-and-points.e2e.test.ts`に追加し、ライブスタックに対して実行・合格確認済み
+   ——消費した220ptが全額返却されることを確認した。
 
 ---
 
@@ -141,7 +140,7 @@
 | 3 | 精度超過のDeposit/WithdrawがE2E未到達 | P1(FC7として既知、この表で再確認)。**構造的に到達不能と結論**——APIGWの構造検証が先に4xx拒否するため、単体テストのみで妥当 | 既存の`production-readiness-matrix.md` FC7と同一 |
 | 4 | ~~`Confirm`/`Cancel`の二重操作拒否がE2E未検証~~ → **対応済み(2026-08-10)** | 済 | `transfer-furikomi.e2e.test.ts`にFC14として追加、ライブスタックに対して実行・合格確認済み(2026-08-12) |
 | 5 | ~~`RecallError::NotFurikomi`がE2E未検証~~ → **対応済み(2026-08-10)** | 済 | `transfer-recall.e2e.test.ts`にFC15として追加、ライブスタックに対して実行・合格確認済み(2026-08-12) |
-| 6 | (2026-08-18追加、未対応)`Compensating`→`Compensated`遷移時の`IssueRefundFee`発行がE2E未検証 | P2(受取人側の口座を凍結/解約してから振込む必要があり、既存のFC10-FC12のセットアップより一手間多い) | `docs/adr/0024`、`transfer-fee-and-points.e2e.test.ts`(現状は`PendingDebit`却下経路のみ検証) |
+| 6 | ~~`Compensating`→`Compensated`遷移時の`IssueRefundFee`発行がE2E未検証~~ → **対応済み(2026-08-18)** | 済 | `transfer-fee-and-points.e2e.test.ts`に追加、ライブスタックに対して実行・合格確認済み(2026-08-18) |
 
 **重要な副産物**: 今回の作業で、`e2e-scenarios.md`のFC3の記述自体が実態より広い保証を謳っていた
 (#1)ことが判明した。プロースのシナリオ記述は「書いた時点では正しいつもりでも、実装の詳細までは

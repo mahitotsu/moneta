@@ -14,7 +14,7 @@ import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { waitFor } from "../support/poll";
 import { waitForOwnerIndexed } from "../support/sagaState";
 import { seedPointsBalance, waitForFeeReservationState, waitForPointsBalance } from "../support/pointsState";
-import { openFreshAccount } from "../support/testAccount";
+import { openFreshAccount, waitForStatus } from "../support/testAccount";
 import { createTransferCommandApi, createTransferQueryApi, waitForTransferState } from "../support/transferClient";
 import { signUpAndSignIn, subFromIdToken, TestIdentity } from "../support/auth";
 
@@ -138,6 +138,56 @@ describe("送金が失敗した場合、消費したポイントは返却され�
     // 出金自体が却下されたので、口座残高は一切変化していない。
     const fromView = await queryApi.getAccount(fromId);
     expect(Number(fromView?.balance)).toBe(100.0);
+
+    const reservation = await waitForFeeReservationState(outputs.feeReservationsTableName, transferId, ["refunded"], {
+      timeoutMs: 45_000,
+    });
+    expect(reservation.pointsUsed).toBe(FURIKOMI_FEE);
+
+    await waitForPointsBalance(outputs.pointsTableName, fromOwnerId!, FURIKOMI_FEE); // 消費した220ptが全額戻る。
+  });
+
+  // docs/decision-tables.md発見6: 上のテストは`PendingDebit`が却下されて`Failed`になる経路
+  // (原資確保後、送金元自身の出金が失敗する)しかカバーしていなかった。もう1つの巻き戻し経路
+  // ——送金先の入金が却下されて`Compensating`→`Compensated`になる場合も同様にポイントが
+  // 返却されることを、受取人側の口座を凍結してから振込むことで再現する。
+  it("送金先の入金が却下されてCompensatingで補償される場合も、ポイントは全額返却される", async () => {
+    const outputs = await fetchStackOutputs();
+    const [identityA, identityB] = await distinctIdentities(outputs.userPoolClientId);
+    const commandApiA = createCommandApi(outputs.commandApiUrl, identityA.idToken);
+    const commandApiB = createCommandApi(outputs.commandApiUrl, identityB.idToken);
+    const queryApi = createQueryApi(outputs.queryApiUrl, identityA.idToken);
+    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl, identityA.idToken);
+    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identityA.idToken);
+    const fromOwnerId = subFromIdToken(identityA.idToken);
+    expect(fromOwnerId).toBeDefined();
+
+    // 手数料(220円)を全額賄えるだけのポイントを持たせる——cash_fee=0になるため、
+    // PendingDebit自体は(送金額分の残高さえあれば)確実に成功する。
+    await seedPointsBalance(outputs.pointsTableName, fromOwnerId!, FURIKOMI_FEE);
+
+    const fromId = await openFreshAccount(commandApiA, queryApi, "1000.00");
+    const toId = await openFreshAccount(commandApiB, queryApi, "0.00");
+    await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, fromId);
+    await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, toId);
+
+    // 送金先を凍結しておく——PendingCreditのDepositがAccountFrozenで却下され、
+    // Compensatingへ進むようにする(FC4と同じ凍結操作)。
+    const freezeResponse = await commandApiB.freeze(toId, "CustomerRequest");
+    expect(freezeResponse.status).toBe(202);
+    await waitForStatus(queryApi, toId, "frozen");
+
+    const transferId = crypto.randomUUID();
+    await transferCommandApi.start({ transferId, fromAccountId: fromId, toAccountId: toId, amount: "300.00" });
+    await waitForTransferState(transferQueryApi, transferId, ["pending_confirmation"]);
+    await transferCommandApi.confirm(transferId);
+
+    const status = await waitForTransferState(transferQueryApi, transferId, ["compensated"], { timeoutMs: 60_000 });
+    expect(status.state).toBe("compensated");
+
+    // 補償(送金額+現金負担分の手数料=0)により、送金元の残高は元通り。
+    const fromView = await queryApi.getAccount(fromId);
+    expect(Number(fromView?.balance)).toBe(1000.0);
 
     const reservation = await waitForFeeReservationState(outputs.feeReservationsTableName, transferId, ["refunded"], {
       timeoutMs: 45_000,
