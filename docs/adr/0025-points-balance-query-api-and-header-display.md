@@ -20,6 +20,14 @@ Accepted。`infra/lib/account-pipeline-stack.ts`(`PointsQueryApi`新規、CloudF
 (Playwright)による確認をまだ行っていない——バックエンドのAPI契約は検証済みだが、
 見た目の検証は次の機会に残す。
 
+**追記(同日)**: 最初のデプロイ後、ユーザーから「手数料が見えない」という指摘を受けて確認した
+ところ、決定3で述べる`cashFee`の投影・表示が実装から漏れていたことが判明した(コンテキストで
+「`transfer-status-projector.rs`が持っている`cash_fee`を送金詳細画面に出せる」と自分で書いて
+おきながら、実際にはポイント残高の話だけを実装して終えていた)。デモデータの問題ではなく
+実装漏れだったため、同じセッション内で決定3として追加・実装し、`api-e2e`の
+`scenarios/transfer-fee-and-points.e2e.test.ts`にAPI経由での確認を追加して再デプロイ・
+再検証した。
+
 ## コンテキスト
 
 [[0024-rewards-service-fee-and-points]]は手数料・ポイントの機能自体をバックエンドに実装したが、
@@ -31,10 +39,11 @@ Accepted。`infra/lib/account-pipeline-stack.ts`(`PointsQueryApi`新規、CloudF
 には照会APIが無く(`api-e2e`のテストがDynamoDBを直接読んでいたのはこのため)、顧客向けに見せる
 経路がそもそも存在しなかった——このADRでその経路を新設する。
 
-スコープは意図的に絞る: 今回は「ポイント残高がどこからでも見える」ことだけを対象とし、
-手数料の内訳(手数料総額・ポイント充当額・現金負担額)の表示は次の増分に残す
-(`fee-service`が現在`transfer-service`に`cash_fee`しか渡していないため(`0024`決定4)、
-内訳を見せるには`fee-service`自身の新しい照会APIが要る——別途合意する)。
+スコープは意図的に絞る: 「ポイント残高がどこからでも見える」ことに加え、`transfer-service`
+自身が既に持っている現金負担分の手数料(`cash_fee`、決定3)も見せるが、**手数料の完全な内訳**
+(手数料総額・ポイント充当額)の表示は次の増分に残す(`fee-service`が現在`transfer-service`に
+`cash_fee`しか渡していないため(`0024`決定4)、内訳を見せるには`fee-service`自身の新しい
+照会APIが要る——別途合意する)。
 
 ## 決定
 
@@ -66,11 +75,23 @@ Accepted。`infra/lib/account-pipeline-stack.ts`(`PointsQueryApi`新規、CloudF
 クエリキー(`["points"]`)で`AccountListScreen`/`TransferListScreen`の両方から共有する——
 アカウントIDのような画面固有のパラメータを持たないため、`useAccountNumber`より単純。
 
+### 3. 送金詳細画面に、現金負担分の手数料(`cashFee`)を表示する
+
+`TransferSaga.cash_fee`(`0024`決定4)は`create_new_saga`の最初の書き込みから常に存在する
+フィールドであり、新しい照会APIを要らない——`transfer-status-projector.rs`(`TransferSagaTable`
+→`TransferStatusView`への既存の投影、`[[0012-transfer-customer-api-and-status-query]]`決定1)
+が`cashFee`も転記するよう1行足すだけで、`GET /transfers/{transferId}`のレスポンスに乗る。
+
+`TransferDetailScreen.tsx`は`cashFee`が存在し、かつ`"0"`でない場合(=実際に現金負担が
+発生した振込)だけ「手数料」の行を表示する。振替・組戻しは常に`"0"`のため何も出ない。
+`GET /customers/me/transfers`(一覧、`CustomerTransfersTable`)には`cashFee`を追加しない——
+一覧を手数料でごちゃつかせない意図的な選択で、詳細画面だけが持てば足りる。
+
 ## トレードオフ
 
-- **手数料の内訳(ポイント充当額・現金負担額)はこのADRでは見せない**: 決定の冒頭で述べた通り、
-  `fee-service`自身の照会APIが要る話であり、次の増分に残す。今回追加するのは「ポイント残高が
-  いくらか」だけで、「なぜ増減したか」の内訳は見えないまま。
+- **手数料の完全な内訳(手数料総額・ポイント充当額)はこのADRでは見せない**: 決定3は現金負担分
+  (`cashFee`)だけを見せる——「手数料はいくらだったか」までは分かるが、「いくらポイントで
+  賄ったか」は`fee-service`自身の照会API(次の増分)が無いと見えないまま。
 - **`DetailAppBar`にはポイント残高が出ない**: 送金詳細・口座詳細を見ている間はヘッダーから
   ポイント残高が消える。「常に」表示を厳密に守るなら妥協だが、`0022`のミニマルな詳細画面設計を
   崩さない方を優先した。

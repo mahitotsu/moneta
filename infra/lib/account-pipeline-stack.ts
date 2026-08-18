@@ -1725,7 +1725,11 @@ export class AccountPipelineStack extends cdk.Stack {
                 '"amount":"$input.path("$.Item.amount.S")",',
                 '"kind":"$input.path("$.Item.kind.S")",',
                 '"state":"$input.path("$.Item.state.S")",',
-                '"updatedAt":"$input.path("$.Item.updatedAt.S")"',
+                '"updatedAt":"$input.path("$.Item.updatedAt.S")",',
+                // docs/adr/0025: 振込の現金負担分の手数料("0"なら振替・組戻し、または
+                // まだ手数料原資確保前)。送金詳細画面に表示するためだけの追加で、
+                // transfer-serviceの他のロジックはこの値を一切参照しない。
+                '"cashFee":"$input.path("$.Item.cashFee.S")"',
                 "}",
                 "#end",
               ].join("\n"),

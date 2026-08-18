@@ -35,6 +35,11 @@ struct SagaImage {
     state: String,
     #[serde(rename = "updatedAt")]
     updated_at: String,
+    /// 振込の現金負担分の手数料(docs/adr/0024決定4)。振替・組戻しでは常に"0"。
+    /// `saga_to_item`(persistence.rs)が`create_new_saga`の最初の書き込みから常に含める
+    /// ため必須フィールドとして扱える(docs/adr/0025で送金詳細画面に表示するために追加)。
+    #[serde(rename = "cashFee")]
+    cash_fee: String,
 }
 
 #[tokio::main]
@@ -91,6 +96,7 @@ async fn project_one(dynamodb: &Client, table_name: &str, record: &EventRecord) 
         .item("kind", AttributeValue::S(image.kind))
         .item("state", AttributeValue::S(image.state))
         .item("updatedAt", AttributeValue::S(image.updated_at))
+        .item("cashFee", AttributeValue::S(image.cash_fee))
         .send()
         .await?;
     Ok(())

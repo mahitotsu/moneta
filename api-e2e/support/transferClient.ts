@@ -27,6 +27,10 @@ export interface TransferStatusView {
   kind: TransferKind;
   state: SagaState;
   updatedAt: string;
+  /** 振込の現金負担分の手数料(docs/adr/0025)。`GET /transfers/{transferId}`にしか無く、
+   *  `GET /customers/me/transfers`には無い(web-ui/src/api/types.tsのTransferStatusViewと
+   *  同じ非対称)ため任意フィールド。 */
+  cashFee?: string;
 }
 
 export interface StartTransferInput {

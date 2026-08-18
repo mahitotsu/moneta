@@ -448,6 +448,14 @@ describe("AccountPipelineStack", () => {
             ]),
           }),
         }),
+        // docs/adr/0025: 送金詳細画面が手数料を表示できるよう、cashFeeもレスポンスへ含める。
+        IntegrationResponses: Match.arrayWith([
+          Match.objectLike({
+            ResponseTemplates: Match.objectLike({
+              "application/json": Match.stringLikeRegexp('"cashFee"'),
+            }),
+          }),
+        ]),
       }),
     });
   });

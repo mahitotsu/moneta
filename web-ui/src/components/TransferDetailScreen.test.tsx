@@ -8,7 +8,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { QueryClientProvider } from "@tanstack/react-query";
 import { createQueryClient } from "../queryClient";
 import { TransferDetailScreen } from "./TransferDetailScreen";
-import type { AccountNumberLookup, MyAccount, TransferStatusView } from "../api/types";
+import { TRANSFER_KIND_LABEL, type AccountNumberLookup, type MyAccount, type TransferStatusView } from "../api/types";
 
 vi.mock("../api/client", () => ({
   getAccountNumber: vi.fn(),
@@ -88,6 +88,44 @@ describe("J5: 振込の確認待ちでは確認/取消ボタンを出す", () =>
       expect(screen.getByText("振込を確定する")).toBeTruthy();
     });
     expect(screen.getByText("取消す")).toBeTruthy();
+  });
+});
+
+// docs/adr/0025: transfer-status-projectorがcashFeeを投影するようになったのに、
+// 送金詳細画面が一度もそれを表示していなかったギャップを埋める。
+describe("docs/adr/0025: 現金負担分の手数料が実際にかかった振込にだけ表示する", () => {
+  it("cashFeeが0でない場合、手数料の行を表示する", async () => {
+    getTransferStatusMock.mockResolvedValue(view({ amount: "300", cashFee: "120" }));
+
+    renderDetail("t-1");
+
+    await waitFor(() => {
+      expect(screen.getByText("手数料")).toBeTruthy();
+    });
+    expect(screen.getByText("¥120")).toBeTruthy();
+  });
+
+  it("cashFeeが0の場合(振替・組戻し、または手数料原資確保前の振込)、手数料の行を出さない", async () => {
+    getTransferStatusMock.mockResolvedValue(view({ kind: "furikae", cashFee: "0" }));
+
+    renderDetail("t-1");
+
+    await waitFor(() => {
+      expect(screen.getByText(TRANSFER_KIND_LABEL.furikae)).toBeTruthy();
+    });
+    expect(screen.queryByText("手数料")).toBeNull();
+  });
+
+  it("cashFeeが無い(GET /customers/me/transfers由来を模したデータの)場合も、手数料の行を出さない", async () => {
+    const { cashFee: _cashFee, ...withoutCashFee } = view({});
+    getTransferStatusMock.mockResolvedValue(withoutCashFee as TransferStatusView);
+
+    renderDetail("t-1");
+
+    await waitFor(() => {
+      expect(screen.getByText(TRANSFER_KIND_LABEL.furikomi)).toBeTruthy();
+    });
+    expect(screen.queryByText("手数料")).toBeNull();
   });
 });
 
