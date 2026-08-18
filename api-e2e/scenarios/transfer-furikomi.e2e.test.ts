@@ -5,6 +5,10 @@
 //
 // 名義不一致は、2つの別々のCognito認証済み識別子(docs/adr/0016決定3)でそれぞれの口座を
 // 開設することで作る——owner_idはもはやリクエストボディの自己申告値ではない。
+//
+// docs/adr/0024: 振込(furikomi)には固定手数料がかかる。このテストのアカウントは
+// ポイント残高が常に0(新規作成のためAwardPointsを一度も受けていない)なので、手数料は
+// 全額現金負担になる(fee-service/reservation.rsのfurikomi_fee_amount()、v1では220円固定)。
 import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { REJECTION_SETTLE_MS, settle, waitFor } from "../support/poll";
@@ -12,6 +16,11 @@ import { waitForOwnerIndexed } from "../support/sagaState";
 import { openFreshAccount } from "../support/testAccount";
 import { createTransferCommandApi, createTransferQueryApi, waitForTransferState } from "../support/transferClient";
 import { signUpAndSignIn, TestIdentity } from "../support/auth";
+
+// docs/adr/0024決定2: v1の固定手数料額(円)。fee-service/src/reservation.rsの
+// furikomi_fee_amount()と一致させる——テストとプロダクションコードの2箇所で値が
+// ドリフトしうるのは意図的な割り切り(コード共有はしない、他のE2E定数と同じ理由)。
+const FURIKOMI_FEE = 220;
 
 // 送金元・送金先で異なる名義にするため、テストごとに2つの別々のCognito識別子を新規作成する
 // (同じ識別子を複数テストで使い回さない——テスト間の独立性、support/testAccount.tsと同じ哲学)。
@@ -61,9 +70,10 @@ describe("J5/J6: 振込(名義不一致)は確認前は出金されず、確認�
     await waitFor(
       async () => {
         const view = await queryApi.getAccount(fromId);
-        return view && Number(view.balance) === 700 ? view : undefined;
+        // 1000 - 300(送金額) - 220(手数料、docs/adr/0024) = 480。
+        return view && Number(view.balance) === 1000 - 300 - FURIKOMI_FEE ? view : undefined;
       },
-      { description: `account ${fromId} balance to reach 700 after confirmed furikomi` },
+      { description: `account ${fromId} balance to reach ${1000 - 300 - FURIKOMI_FEE} after confirmed furikomi (amount + fee)` },
     );
     await waitFor(
       async () => {
@@ -139,7 +149,7 @@ describe("FC14: 確認済み(credited)の振込への二重Confirmは却下さ�
     expect(status?.state).toBe("credited"); // 状態は変化しない。
     const fromView = await queryApi.getAccount(fromId);
     const toView = await queryApi.getAccount(toId);
-    expect(Number(fromView?.balance)).toBe(700.0); // 二重出金されていない。
+    expect(Number(fromView?.balance)).toBe(1000 - 300 - FURIKOMI_FEE); // 二重出金・二重手数料徴収されていない。
     expect(Number(toView?.balance)).toBe(300.0); // 二重入金されていない。
   });
 });

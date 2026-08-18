@@ -35,6 +35,10 @@ async fn main() -> Result<(), Error> {
     let owner_table_name = std::env::var("OWNER_TABLE_NAME").expect("OWNER_TABLE_NAME environment variable must be set");
     let account_command_queue_url =
         std::env::var("ACCOUNT_COMMAND_QUEUE_URL").expect("ACCOUNT_COMMAND_QUEUE_URL environment variable must be set");
+    // docs/adr/0024決定8: fee-service宛のコマンドキュー。`ReservingFee`に入る際
+    // (`confirm`)にのみ使う——`points-service`への直接発行(AwardPoints)は別のキューを使う。
+    let fee_command_queue_url =
+        std::env::var("FEE_COMMAND_QUEUE_URL").expect("FEE_COMMAND_QUEUE_URL environment variable must be set");
     let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
     let dynamodb = aws_sdk_dynamodb::Client::new(&aws_config);
     let sqs = aws_sdk_sqs::Client::new(&aws_config);
@@ -45,9 +49,18 @@ async fn main() -> Result<(), Error> {
         let saga_table_name = saga_table_name.clone();
         let owner_table_name = owner_table_name.clone();
         let account_command_queue_url = account_command_queue_url.clone();
+        let fee_command_queue_url = fee_command_queue_url.clone();
         async move {
-            process_batch(&dynamodb, &sqs, &saga_table_name, &owner_table_name, &account_command_queue_url, event.payload)
-                .await
+            process_batch(
+                &dynamodb,
+                &sqs,
+                &saga_table_name,
+                &owner_table_name,
+                &account_command_queue_url,
+                &fee_command_queue_url,
+                event.payload,
+            )
+            .await
         }
     }))
     .await
@@ -57,12 +70,14 @@ async fn main() -> Result<(), Error> {
 /// (account-serviceのように同一aggregateへの直列化が必要な操作ではない)、account-service
 /// のgrouping.rs/batch.rsのようなグループ単位の失敗スコープは不要——メッセージ単位で
 /// 独立に成否を報告するだけでよい。
+#[allow(clippy::too_many_arguments)]
 async fn process_batch(
     dynamodb: &aws_sdk_dynamodb::Client,
     sqs: &aws_sdk_sqs::Client,
     saga_table_name: &str,
     owner_table_name: &str,
     account_command_queue_url: &str,
+    fee_command_queue_url: &str,
     event: SqsEvent,
 ) -> Result<SqsBatchResponse, Error> {
     let mut failed_message_ids = Vec::new();
@@ -71,7 +86,9 @@ async fn process_batch(
         let Some(message_id) = record.message_id.clone() else { continue };
         let body = record.body.as_deref().unwrap_or_default();
 
-        match process_one(dynamodb, sqs, saga_table_name, owner_table_name, account_command_queue_url, body).await {
+        match process_one(dynamodb, sqs, saga_table_name, owner_table_name, account_command_queue_url, fee_command_queue_url, body)
+            .await
+        {
             Ok(()) => {}
             // 決定論的に確定した拒否はaccount-domainのDomainErrorと同じ扱い:
             // リトライしても結果は変わらないためSQSには失敗として報告しない(docs/adr/0002
@@ -126,12 +143,14 @@ impl From<aws_sdk_sqs::Error> for ProcessError {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_one(
     dynamodb: &aws_sdk_dynamodb::Client,
     sqs: &aws_sdk_sqs::Client,
     saga_table_name: &str,
     owner_table_name: &str,
     account_command_queue_url: &str,
+    fee_command_queue_url: &str,
     body: &str,
 ) -> Result<(), ProcessError> {
     let command: TransferCommand = serde_json::from_str(body).map_err(|err| ProcessError::Infra(err.into()))?;
@@ -142,7 +161,7 @@ async fn process_one(
                 .await
         }
         TransferCommand::Confirm { transfer_id } => {
-            process_confirm(dynamodb, sqs, saga_table_name, account_command_queue_url, transfer_id).await
+            process_confirm(dynamodb, sqs, saga_table_name, fee_command_queue_url, transfer_id).await
         }
         TransferCommand::Cancel { transfer_id } => process_cancel(dynamodb, saga_table_name, transfer_id).await,
         TransferCommand::Recall { transfer_id, original_transfer_id } => {
@@ -183,7 +202,8 @@ async fn process_start(
 
     let now = OffsetDateTime::now_utc();
     let (saga, action) =
-        start(transfer_id, from_account_id, to_account_id, amount, kind, now).map_err(ProcessError::Start)?;
+        start(transfer_id, from_account_id, to_account_id, owner_from, owner_to, amount, kind, now)
+            .map_err(ProcessError::Start)?;
 
     let created = persistence::create_new_saga(dynamodb, saga_table_name, &saga).await?;
     if !created {
@@ -193,14 +213,14 @@ async fn process_start(
         return Ok(());
     }
 
-    issue_action(sqs, account_command_queue_url, &saga.transfer_id, action).await
+    issue_start_action(sqs, account_command_queue_url, &saga.transfer_id, action).await
 }
 
 async fn process_confirm(
     dynamodb: &aws_sdk_dynamodb::Client,
     sqs: &aws_sdk_sqs::Client,
     saga_table_name: &str,
-    account_command_queue_url: &str,
+    fee_command_queue_url: &str,
     transfer_id: String,
 ) -> Result<(), ProcessError> {
     let saga = persistence::load_saga(dynamodb, saga_table_name, &transfer_id)
@@ -217,7 +237,15 @@ async fn process_confirm(
         return Ok(());
     }
 
-    issue_action(sqs, account_command_queue_url, &transfer_id, action).await
+    // confirm()が返しうるのはIssueReserveFeeだけ(docs/adr/0024決定4)。
+    match action {
+        NextAction::IssueReserveFee { transfer_id, owner_id, account_id, transfer_amount } => {
+            commands::send_reserve_fee(sqs, fee_command_queue_url, &transfer_id, &owner_id, account_id, transfer_amount)
+                .await?;
+        }
+        other => unreachable!("confirm() only ever returns IssueReserveFee, got {other:?}"),
+    }
+    Ok(())
 }
 
 async fn process_cancel(
@@ -256,8 +284,19 @@ async fn process_recall(
     // 組戻しは「新しい`kind = Recall`のサガとしてstart()を再利用する」設計(docs/adr/0011)——
     // 新しい終端状態は追加しない。受取人側の出金がDomainError::InsufficientFunds等で却下
     // された場合は、通常のPendingDebit+却下→Failedの経路がそのまま「組戻し失敗」を表現する。
-    let (saga, action) = start(transfer_id, original.to_account_id, original.from_account_id, original.amount, TransferKind::Recall, now)
-        .map_err(ProcessError::Start)?;
+    // 組戻しには手数料がかからない(docs/adr/0024決定2)ため、名義は素通しするだけで
+    // fee-serviceには一切関与させない。
+    let (saga, action) = start(
+        transfer_id,
+        original.to_account_id,
+        original.from_account_id,
+        original.to_owner_id.clone(),
+        original.from_owner_id.clone(),
+        original.amount,
+        TransferKind::Recall,
+        now,
+    )
+    .map_err(ProcessError::Start)?;
 
     let created = persistence::create_new_saga(dynamodb, saga_table_name, &saga).await?;
     if !created {
@@ -265,12 +304,13 @@ async fn process_recall(
         return Ok(());
     }
 
-    issue_action(sqs, account_command_queue_url, &saga.transfer_id, action).await
+    issue_start_action(sqs, account_command_queue_url, &saga.transfer_id, action).await
 }
 
-/// `start`/`confirm`が返す`NextAction`はどちらも`IssueWithdraw`か`None`のいずれかにしか
-/// なりえない(`IssueDeposit`/`IssueCompensatingDeposit`は`advance`だけが返す、saga.rs参照)。
-async fn issue_action(
+/// `start`が返す`NextAction`は`IssueWithdraw`か`None`のいずれかにしかなりえない
+/// (振込は`PendingConfirmation`+`None`、振替/組戻しは`PendingDebit`+`IssueWithdraw`、
+/// saga.rs参照)。`confirm()`が返す`IssueReserveFee`は`process_confirm`が別途扱う。
+async fn issue_start_action(
     sqs: &aws_sdk_sqs::Client,
     account_command_queue_url: &str,
     transfer_id: &str,
@@ -281,8 +321,12 @@ async fn issue_action(
             commands::send_withdraw(sqs, account_command_queue_url, account_id, amount, transfer_id).await?;
         }
         NextAction::None => {}
-        NextAction::IssueDeposit { .. } | NextAction::IssueCompensatingDeposit { .. } => {
-            unreachable!("start()/confirm() never issue Deposit/CompensatingDeposit; only advance() does")
+        NextAction::IssueDeposit { .. }
+        | NextAction::IssueCompensatingDeposit { .. }
+        | NextAction::IssueReserveFee { .. }
+        | NextAction::IssueRefundFee { .. }
+        | NextAction::IssueAwardPoints { .. } => {
+            unreachable!("start() only ever returns IssueWithdraw or None")
         }
     }
     Ok(())

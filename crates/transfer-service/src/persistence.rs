@@ -12,6 +12,7 @@ use crate::saga::{SagaState, TransferKind, TransferSaga};
 fn state_to_str(state: &SagaState) -> &'static str {
     match state {
         SagaState::PendingConfirmation => "pending_confirmation",
+        SagaState::ReservingFee => "reserving_fee",
         SagaState::PendingDebit => "pending_debit",
         SagaState::PendingCredit => "pending_credit",
         SagaState::Compensating => "compensating",
@@ -25,6 +26,7 @@ fn state_to_str(state: &SagaState) -> &'static str {
 fn state_from_str(value: &str) -> SagaState {
     match value {
         "pending_confirmation" => SagaState::PendingConfirmation,
+        "reserving_fee" => SagaState::ReservingFee,
         "pending_debit" => SagaState::PendingDebit,
         "pending_credit" => SagaState::PendingCredit,
         "compensating" => SagaState::Compensating,
@@ -58,7 +60,10 @@ fn saga_to_item(saga: &TransferSaga) -> HashMap<String, AttributeValue> {
     item.insert("transferId".to_string(), AttributeValue::S(saga.transfer_id.clone()));
     item.insert("fromAccountId".to_string(), AttributeValue::S(saga.from_account_id.to_string()));
     item.insert("toAccountId".to_string(), AttributeValue::S(saga.to_account_id.to_string()));
+    item.insert("fromOwnerId".to_string(), AttributeValue::S(saga.from_owner_id.clone()));
+    item.insert("toOwnerId".to_string(), AttributeValue::S(saga.to_owner_id.clone()));
     item.insert("amount".to_string(), AttributeValue::S(saga.amount.to_string()));
+    item.insert("cashFee".to_string(), AttributeValue::S(saga.cash_fee.to_string()));
     item.insert("kind".to_string(), AttributeValue::S(kind_to_str(saga.kind).to_string()));
     item.insert("state".to_string(), AttributeValue::S(state_to_str(&saga.state).to_string()));
     item.insert(
@@ -79,7 +84,10 @@ fn item_to_saga(item: &HashMap<String, AttributeValue>) -> TransferSaga {
         transfer_id: get_s("transferId"),
         from_account_id: Uuid::parse_str(&get_s("fromAccountId")).expect("fromAccountId is always a valid UUID"),
         to_account_id: Uuid::parse_str(&get_s("toAccountId")).expect("toAccountId is always a valid UUID"),
+        from_owner_id: get_s("fromOwnerId"),
+        to_owner_id: get_s("toOwnerId"),
         amount: Decimal::from_str(&get_s("amount")).expect("amount is always a valid decimal string"),
+        cash_fee: Decimal::from_str(&get_s("cashFee")).expect("cashFee is always a valid decimal string"),
         kind: kind_from_str(&get_s("kind")),
         state: state_from_str(&get_s("state")),
         updated_at: OffsetDateTime::parse(&get_s("updatedAt"), &Rfc3339).expect("updatedAt is always valid RFC3339"),
@@ -165,6 +173,44 @@ pub async fn advance_saga_state(
     }
 }
 
+/// `ReservingFee`から`PendingDebit`への遷移専用(docs/adr/0024決定4)。`advance_saga_state`と
+/// 同じCASだが、`cashFee`も同じ`UpdateItem`呼び出しで原子的に書く——状態遷移だけを先に確定させて
+/// 後から`cashFee`を書く二段階にすると、その間にLambdaが落ちた場合に「PendingDebitなのに
+/// `cash_fee`が未設定」という不整合な中間状態が残ってしまうため、1回の呼び出しにまとめる。
+pub async fn advance_saga_to_pending_debit_with_fee(
+    client: &Client,
+    table_name: &str,
+    transfer_id: &str,
+    cash_fee: Decimal,
+    now: OffsetDateTime,
+) -> Result<bool, aws_sdk_dynamodb::Error> {
+    let result = client
+        .update_item()
+        .table_name(table_name)
+        .key("transferId", AttributeValue::S(transfer_id.to_string()))
+        .update_expression("SET #s = :next, cashFee = :cashFee, updatedAt = :now")
+        .condition_expression("#s = :expected")
+        .expression_attribute_names("#s", "state")
+        .expression_attribute_values(":next", AttributeValue::S(state_to_str(&SagaState::PendingDebit).to_string()))
+        .expression_attribute_values(":expected", AttributeValue::S(state_to_str(&SagaState::ReservingFee).to_string()))
+        .expression_attribute_values(":cashFee", AttributeValue::S(cash_fee.to_string()))
+        .expression_attribute_values(
+            ":now",
+            AttributeValue::S(now.format(&Rfc3339).expect("OffsetDateTime always formats as RFC3339")),
+        )
+        .send()
+        .await;
+
+    match result {
+        Ok(_) => Ok(true),
+        Err(err) => {
+            let is_stale =
+                err.as_service_error().is_some_and(|service_err| service_err.is_conditional_check_failed_exception());
+            if is_stale { Ok(false) } else { Err(err.into()) }
+        }
+    }
+}
+
 // --- 口座名義インデックス(docs/adr/0011) -----------------------------------------------
 //
 // `account.event.Opened`だけを購読する専用の小さな投影(`bin/owner_projector.rs`)が書き込み、
@@ -217,7 +263,10 @@ mod tests {
             transfer_id: "transfer-1".to_string(),
             from_account_id: Uuid::new_v4(),
             to_account_id: Uuid::new_v4(),
+            from_owner_id: "owner-from".to_string(),
+            to_owner_id: "owner-to".to_string(),
             amount: dec!(1234.56),
+            cash_fee: dec!(220),
             kind: TransferKind::Furikomi,
             state: SagaState::PendingCredit,
             updated_at: OffsetDateTime::UNIX_EPOCH,
@@ -231,6 +280,7 @@ mod tests {
         for kind in [TransferKind::Furikae, TransferKind::Furikomi, TransferKind::Recall] {
             for state in [
                 SagaState::PendingConfirmation,
+                SagaState::ReservingFee,
                 SagaState::PendingDebit,
                 SagaState::PendingCredit,
                 SagaState::Compensating,
@@ -243,7 +293,10 @@ mod tests {
                     transfer_id: "t".to_string(),
                     from_account_id: Uuid::new_v4(),
                     to_account_id: Uuid::new_v4(),
+                    from_owner_id: "owner-from".to_string(),
+                    to_owner_id: "owner-to".to_string(),
                     amount: dec!(100),
+                    cash_fee: dec!(0),
                     kind,
                     state,
                     updated_at: OffsetDateTime::UNIX_EPOCH,

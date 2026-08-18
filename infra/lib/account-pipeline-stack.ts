@@ -29,6 +29,14 @@ const EVENT_SOURCE = "account-service";
 const EVENT_SCHEMA_REGISTRY_NAME = "moneta-account-service";
 const EVENT_SCHEMA_NAME = `${EVENT_SOURCE}@AccountDomainEvent`;
 
+// docs/adr/0024: fee-service/points-serviceがdomainEventBusへ発行するイベントのsource。
+// どちらもaccount-domainに依存しないため、account-serviceのようなSchema Registry登録は
+// 行わない(スキーマの自己登録という契約はaccount-serviceの設計であり、この2サービスまで
+// 一律に広げる必然性はない——スキーマレスなまま`detail.correlation_id`の存在チェックだけで
+// 十分に絞り込める、TransferSagaObservationRuleの既存の設計を踏襲する)。
+const FEE_EVENT_SOURCE = "fee-service";
+const POINTS_EVENT_SOURCE = "points-service";
+
 // account-domain::Eventの全バリアントに対応するDetailType(account-service/src/outbox.rsの
 // to_outbox_entryが生成する形式と一致させる)。rejection(却下)はここに含めない——却下は
 // viewを変化させないため、Query Serviceは購読しない。
@@ -1235,10 +1243,15 @@ export class AccountPipelineStack extends cdk.Stack {
     // 発行されている(docs/adr/0002決定7)。correlation_idを持つイベントはtransfer-serviceが
     // 発行したコマンドの結果に限られる(顧客の通常操作はこのフィールドを付与しない)ため、
     // 存在チェックだけで十分に絞り込める。
+    //
+    // docs/adr/0024: fee-serviceが発行する`fee.event.FeeReserved`もこのRuleに相乗りする
+    // (新しいRule/Lambdaは追加しない、決定7)——sourceを追加するだけで、
+    // saga_step.rsの`ReservingFee`向け分岐がイベントの中身(account_id/correlation_id/kind/data)
+    // を見て処理する。
     new events.Rule(this, "TransferSagaObservationRule", {
       eventBus: domainEventBus,
       eventPattern: {
-        source: [EVENT_SOURCE],
+        source: [EVENT_SOURCE, FEE_EVENT_SOURCE],
         detail: { correlation_id: [{ exists: true }] },
       },
       targets: [new targets.LambdaFunction(transferSagaStepFn)],
@@ -1268,6 +1281,236 @@ export class AccountPipelineStack extends cdk.Stack {
       },
       targets: [new targets.LambdaFunction(transferOwnerProjectorFn)],
     });
+
+    // ==========================================================================
+    // Points service (docs/adr/0024) — ポイント台帳。account-domainにもtransfer-service/
+    // fee-serviceにも依存しない末端サービス([[0016-cognito-authentication]]のauth-serviceと
+    // 同じ立ち位置)。誰も知らない代わりに、誰からも(fee-service・transfer-serviceの両方から)
+    // 利用される。
+    // ==========================================================================
+
+    // --- [Points service所有] 残高台帳(DynamoDB) -------------------------------
+    const pointsTable = new dynamodb.Table(this, "PointsTable", {
+      tableName: "moneta-points",
+      partitionKey: { name: "ownerId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    // ReservePoints(fee-serviceが結果を待つ)だけがここへ書く(docs/adr/0024決定6)。
+    // account_eventsと同じ「追記専用ログ→DynamoDB Streamsアウトボックス」の形。
+    const pointsEventsTable = new dynamodb.Table(this, "PointsEventsTable", {
+      tableName: "moneta-points-events",
+      partitionKey: { name: "eventId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      stream: dynamodb.StreamViewType.NEW_IMAGE,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    // SQS FIFOのMessageDeduplicationIdは送信時5分間の重複排除にしか効かず、Lambda側の
+    // 再配信(可視性タイムアウト超過等)までは防げないため、account-serviceのprocessedMessages
+    // と同じ専用の冪等性ログを持つ(docs/adr/0002決定4と同じ考え方)。
+    const pointsIdempotencyTable = new dynamodb.Table(this, "PointsIdempotencyTable", {
+      tableName: "moneta-points-idempotency",
+      partitionKey: { name: "idempotencyKey", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    // --- [Points service所有] コマンド受付のSQS FIFOキュー ---------------------
+    // fee-service(ReservePoints/RefundPoints)とtransfer-service(AwardPoints)の両方から
+    // SendMessageされる(docs/adr/0024決定7)。
+    const pointsCommandDlq = new sqs.Queue(this, "PointsCommandDlq", {
+      queueName: "moneta-points-commands.fifo",
+      fifo: true,
+    });
+    addDlqAlarms("PointsCommandDlq", pointsCommandDlq);
+    const pointsCommandQueue = new sqs.Queue(this, "PointsCommandQueue", {
+      queueName: "moneta-points-commands-main.fifo",
+      fifo: true,
+      contentBasedDeduplication: false,
+      deadLetterQueue: {
+        queue: pointsCommandDlq,
+        maxReceiveCount: MAX_RECEIVE_COUNT,
+      },
+    });
+
+    // --- [Points service所有] points-command-intake -----------------------------
+    const pointsCommandIntakeFn = new lambda.Function(this, "PointsCommandIntakeFunction", {
+      runtime: lambda.Runtime.PROVIDED_AL2023,
+      architecture: lambda.Architecture.X86_64,
+      handler: "bootstrap",
+      timeout: cdk.Duration.seconds(30),
+      code: rustLambdaCode("points-service", "points-command-intake"),
+      environment: {
+        POINTS_TABLE_NAME: pointsTable.tableName,
+        POINTS_EVENTS_TABLE_NAME: pointsEventsTable.tableName,
+        POINTS_IDEMPOTENCY_TABLE_NAME: pointsIdempotencyTable.tableName,
+      },
+    });
+    pointsCommandIntakeFn.addEventSource(
+      new SqsEventSource(pointsCommandQueue, {
+        batchSize: 10,
+        reportBatchItemFailures: true,
+      }),
+    );
+    // account-serviceと同じ理由(このファイル冒頭のIAMコメント参照): TransactWriteItemsは
+    // 各TransactItemの個別アクションも別途要求する。
+    pointsTable.grantReadWriteData(pointsCommandIntakeFn);
+    pointsTable.grant(pointsCommandIntakeFn, "dynamodb:TransactWriteItems", "dynamodb:ConditionCheckItem");
+    pointsEventsTable.grant(pointsCommandIntakeFn, "dynamodb:PutItem", "dynamodb:TransactWriteItems");
+    pointsIdempotencyTable.grant(pointsCommandIntakeFn, "dynamodb:PutItem", "dynamodb:TransactWriteItems");
+
+    // --- [Points service所有] points-outbox-projector ---------------------------
+    const pointsOutboxProjectorDlq = new sqs.Queue(this, "PointsOutboxProjectorDlq");
+
+    const pointsOutboxProjectorFn = new lambda.Function(this, "PointsOutboxProjectorFunction", {
+      runtime: lambda.Runtime.PROVIDED_AL2023,
+      architecture: lambda.Architecture.X86_64,
+      handler: "bootstrap",
+      timeout: cdk.Duration.seconds(30),
+      code: rustLambdaCode("points-service", "points-outbox-projector"),
+      environment: {
+        EVENT_BUS_NAME: domainEventBus.eventBusName,
+      },
+    });
+    domainEventBus.grantPutEventsTo(pointsOutboxProjectorFn);
+    pointsOutboxProjectorFn.addEventSource(
+      new DynamoEventSource(pointsEventsTable, {
+        startingPosition: lambda.StartingPosition.TRIM_HORIZON,
+        batchSize: 10,
+        retryAttempts: 3,
+        reportBatchItemFailures: true,
+        onFailure: new SqsDestination(pointsOutboxProjectorDlq),
+      }),
+    );
+
+    // ==========================================================================
+    // Fee service (docs/adr/0024) — 振込手数料のポリシー(金額決定・ポイント充当の可否判断)。
+    // account-domainにもaccount-serviceにも一切依存しない・一切話しかけない——現金負担分は
+    // transfer-service自身の既存のWithdraw/補償Depositに合算される(決定4)。points-serviceを
+    // 利用する(コンパイル依存はゼロ)。
+    // ==========================================================================
+
+    // --- [Fee service所有] 予約台帳(DynamoDB) -----------------------------------
+    const feeReservationsTable = new dynamodb.Table(this, "FeeReservationsTable", {
+      tableName: "moneta-fee-reservations",
+      partitionKey: { name: "transferId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    // FeeReserved(transfer-serviceが結果を待つ)だけがここへ書く(docs/adr/0024決定6)。
+    const feeEventsTable = new dynamodb.Table(this, "FeeEventsTable", {
+      tableName: "moneta-fee-events",
+      partitionKey: { name: "eventId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      stream: dynamodb.StreamViewType.NEW_IMAGE,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    // --- [Fee service所有] コマンド受付のSQS FIFOキュー -------------------------
+    const feeCommandDlq = new sqs.Queue(this, "FeeCommandDlq", {
+      queueName: "moneta-fee-commands.fifo",
+      fifo: true,
+    });
+    addDlqAlarms("FeeCommandDlq", feeCommandDlq);
+    const feeCommandQueue = new sqs.Queue(this, "FeeCommandQueue", {
+      queueName: "moneta-fee-commands-main.fifo",
+      fifo: true,
+      contentBasedDeduplication: false,
+      deadLetterQueue: {
+        queue: feeCommandDlq,
+        maxReceiveCount: MAX_RECEIVE_COUNT,
+      },
+    });
+
+    // --- [Fee service所有] fee-command-intake: ReserveFee/RefundFeeの受付 -------
+    const feeCommandIntakeFn = new lambda.Function(this, "FeeCommandIntakeFunction", {
+      runtime: lambda.Runtime.PROVIDED_AL2023,
+      architecture: lambda.Architecture.X86_64,
+      handler: "bootstrap",
+      timeout: cdk.Duration.seconds(30),
+      code: rustLambdaCode("fee-service", "fee-command-intake"),
+      environment: {
+        FEE_RESERVATIONS_TABLE_NAME: feeReservationsTable.tableName,
+        FEE_EVENTS_TABLE_NAME: feeEventsTable.tableName,
+        POINTS_COMMAND_QUEUE_URL: pointsCommandQueue.queueUrl,
+      },
+    });
+    feeCommandIntakeFn.addEventSource(
+      new SqsEventSource(feeCommandQueue, {
+        batchSize: 10,
+        reportBatchItemFailures: true,
+      }),
+    );
+    feeReservationsTable.grantReadWriteData(feeCommandIntakeFn);
+    pointsCommandQueue.grantSendMessages(feeCommandIntakeFn);
+
+    // --- [Fee service所有] fee-points-observation: PointsReservedの観測 ---------
+    // transfer-serviceのbin/saga_step.rsと同じ役割のfee-service版。
+    const feePointsObservationFn = new lambda.Function(this, "FeePointsObservationFunction", {
+      runtime: lambda.Runtime.PROVIDED_AL2023,
+      architecture: lambda.Architecture.X86_64,
+      handler: "bootstrap",
+      timeout: cdk.Duration.seconds(30),
+      code: rustLambdaCode("fee-service", "fee-points-observation"),
+      environment: {
+        FEE_RESERVATIONS_TABLE_NAME: feeReservationsTable.tableName,
+        FEE_EVENTS_TABLE_NAME: feeEventsTable.tableName,
+      },
+    });
+    feeReservationsTable.grantReadWriteData(feePointsObservationFn);
+    feeReservationsTable.grant(feePointsObservationFn, "dynamodb:TransactWriteItems", "dynamodb:ConditionCheckItem");
+    feeEventsTable.grant(feePointsObservationFn, "dynamodb:PutItem", "dynamodb:TransactWriteItems");
+
+    // points-serviceが発行する`points.event.PointsReserved`だけを購読する(fee-service以外は
+    // このsourceを購読しない——transfer-serviceのTransferSagaObservationRuleには含めない)。
+    new events.Rule(this, "FeePointsObservationRule", {
+      eventBus: domainEventBus,
+      eventPattern: {
+        source: [POINTS_EVENT_SOURCE],
+        detail: { correlation_id: [{ exists: true }] },
+      },
+      targets: [new targets.LambdaFunction(feePointsObservationFn)],
+    });
+
+    // --- [Fee service所有] fee-outbox-projector: FeeReservedの発行 --------------
+    const feeOutboxProjectorDlq = new sqs.Queue(this, "FeeOutboxProjectorDlq");
+
+    const feeOutboxProjectorFn = new lambda.Function(this, "FeeOutboxProjectorFunction", {
+      runtime: lambda.Runtime.PROVIDED_AL2023,
+      architecture: lambda.Architecture.X86_64,
+      handler: "bootstrap",
+      timeout: cdk.Duration.seconds(30),
+      code: rustLambdaCode("fee-service", "fee-outbox-projector"),
+      environment: {
+        EVENT_BUS_NAME: domainEventBus.eventBusName,
+      },
+    });
+    domainEventBus.grantPutEventsTo(feeOutboxProjectorFn);
+    feeOutboxProjectorFn.addEventSource(
+      new DynamoEventSource(feeEventsTable, {
+        startingPosition: lambda.StartingPosition.TRIM_HORIZON,
+        batchSize: 10,
+        retryAttempts: 3,
+        reportBatchItemFailures: true,
+        onFailure: new SqsDestination(feeOutboxProjectorDlq),
+      }),
+    );
+
+    // --- [Transfer service所有] fee-service/points-serviceの利用配線 -----------
+    // docs/adr/0024決定4・決定5・決定7: transfer-serviceはfee-service/points-serviceへ
+    // コンパイル依存を一切持たない(利用のみ)。既存のLambda定義(上のTransfer serviceセクション)
+    // には手を入れず、環境変数・IAM権限だけを後から追加する——このリポジトリの「新機能は
+    // 既存の定義ブロックを書き換えず追記する」という増分の作法に倣う。
+    transferCommandIntakeFn.addEnvironment("FEE_COMMAND_QUEUE_URL", feeCommandQueue.queueUrl);
+    feeCommandQueue.grantSendMessages(transferCommandIntakeFn);
+
+    transferSagaStepFn.addEnvironment("FEE_COMMAND_QUEUE_URL", feeCommandQueue.queueUrl);
+    transferSagaStepFn.addEnvironment("POINTS_COMMAND_QUEUE_URL", pointsCommandQueue.queueUrl);
+    feeCommandQueue.grantSendMessages(transferSagaStepFn);
+    pointsCommandQueue.grantSendMessages(transferSagaStepFn);
 
     // ==========================================================================
     // Transfer serviceの顧客向け入口(docs/adr/0012) — [Transfer service所有]
@@ -1871,5 +2114,14 @@ export class AccountPipelineStack extends cdk.Stack {
     new cdk.CfnOutput(this, "TransferStatusProjectorFunctionName", { value: transferStatusProjectorFn.functionName });
     new cdk.CfnOutput(this, "TransferQueryApiUrl", { value: transferQueryApi.url });
     new cdk.CfnOutput(this, "TransferCommandApiUrl", { value: transferCommandApi.url });
+    new cdk.CfnOutput(this, "PointsTableName", { value: pointsTable.tableName });
+    new cdk.CfnOutput(this, "PointsCommandQueueUrl", { value: pointsCommandQueue.queueUrl });
+    new cdk.CfnOutput(this, "PointsCommandIntakeFunctionName", { value: pointsCommandIntakeFn.functionName });
+    new cdk.CfnOutput(this, "PointsOutboxProjectorFunctionName", { value: pointsOutboxProjectorFn.functionName });
+    new cdk.CfnOutput(this, "FeeReservationsTableName", { value: feeReservationsTable.tableName });
+    new cdk.CfnOutput(this, "FeeCommandQueueUrl", { value: feeCommandQueue.queueUrl });
+    new cdk.CfnOutput(this, "FeeCommandIntakeFunctionName", { value: feeCommandIntakeFn.functionName });
+    new cdk.CfnOutput(this, "FeePointsObservationFunctionName", { value: feePointsObservationFn.functionName });
+    new cdk.CfnOutput(this, "FeeOutboxProjectorFunctionName", { value: feeOutboxProjectorFn.functionName });
   }
 }

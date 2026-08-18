@@ -1219,6 +1219,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
+name = "fee-service"
+version = "0.1.0"
+dependencies = [
+ "aws-config",
+ "aws-sdk-dynamodb",
+ "aws-sdk-eventbridge",
+ "aws-sdk-sqs",
+ "aws-smithy-runtime-api",
+ "aws_lambda_events",
+ "lambda_runtime",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_dynamo",
+ "serde_json",
+ "time",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "ff"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2131,6 +2154,28 @@ name = "pkg-config"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
+
+[[package]]
+name = "points-service"
+version = "0.1.0"
+dependencies = [
+ "aws-config",
+ "aws-sdk-dynamodb",
+ "aws-sdk-eventbridge",
+ "aws-smithy-runtime-api",
+ "aws_lambda_events",
+ "lambda_runtime",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_dynamo",
+ "serde_json",
+ "time",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
 
 [[package]]
 name = "potential_utf"

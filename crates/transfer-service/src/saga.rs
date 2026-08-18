@@ -35,19 +35,31 @@ fn furikomi_max_amount() -> Decimal {
 /// 代理指標だけを実装する——この単純化は意図的なPoCスコープの割り切りであり、ADRに明記する。
 const RECALL_WINDOW: Duration = Duration::hours(24);
 
+/// ポイント付与率(docs/adr/0024決定7)。仮の値として送金(受取)額の0.1%とする——
+/// `furikomi_max_amount()`と同じPoCスコープの単純化。実運用のポイントプログラム(交換レート、
+/// ステージ別料率)を再現するものではない。
+fn award_points_for(amount: Decimal) -> Decimal {
+    amount * Decimal::new(1, 3)
+}
+
 /// 送金サガの状態。DynamoDBの1アイテム=1サガ(docs/adr/0010決定2)。account-domainの
 /// `AccountState`と同じ流儀で、per-variantデータを持つenumとして表現する。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state")]
 pub enum SagaState {
-    /// 振込の確認待ち。まだaccount-serviceには何も発行していない(docs/adr/0011)。
+    /// 振込の確認待ち。まだaccount-serviceにもfee-serviceにも何も発行していない(docs/adr/0011)。
     PendingConfirmation,
-    /// 送金元への`Withdraw`コマンドを発行し、その結果(成功/却下)を待っている。
+    /// 振込の手数料原資確保待ち(docs/adr/0024)。`fee-service`へ`ReserveFee`を発行し、
+    /// `fee.event.FeeReserved`(現金負担分`cash_fee`を伴う)の観測を待っている。振替・組戻しは
+    /// この状態を経由しない。
+    ReservingFee,
+    /// 送金元への`Withdraw`コマンド(送金額+振込なら現金負担分の手数料、docs/adr/0024決定4)を
+    /// 発行し、その結果(成功/却下)を待っている。
     PendingDebit,
     /// 出金は成功した。送金先への`Deposit`コマンドを発行し、その結果を待っている。
     PendingCredit,
-    /// 入金が却下されたため、送金元へ補償の`Deposit`(同額の逆入金)を発行し、その結果を
-    /// 待っている。
+    /// 入金が却下されたため、送金元へ補償の`Deposit`(送金額+振込なら現金負担分の手数料、
+    /// docs/adr/0024決定4)を発行し、その結果を待っている。
     Compensating,
     /// 完了(出金・入金とも成功)。終端状態。
     Credited,
@@ -59,9 +71,12 @@ pub enum SagaState {
     Cancelled,
 }
 
-/// account-serviceから観測した、直前に発行したコマンドの結果。`account.event.*`
-/// (成功)か`account.rejection.*`(却下)かに単純化したもの——具体的にどのイベント種別かは
-/// サガの状態(今どのステップを待っているか)から自明なので、サガ自体はそれを知る必要がない。
+/// account-serviceまたはfee-service/points-serviceから観測した、直前に発行したコマンドの
+/// 結果。`account.event.*`(成功)か`account.rejection.*`(却下)かに単純化したもの——具体的に
+/// どのイベント種別かはサガの状態(今どのステップを待っているか)から自明なので、サガ自体は
+/// それを知る必要がない。`ReservingFee`の観測(`fee.event.FeeReserved`)は成功/却下の2値では
+/// なく具体的な内訳データ(`cash_fee`)を伴うため、この型ではなく専用の`reserve_fee_observed`で
+/// 扱う(docs/adr/0024決定4)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObservedOutcome {
     Accepted,
@@ -71,10 +86,20 @@ pub enum ObservedOutcome {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TransferSaga {
     /// account-serviceへ発行するコマンドの`correlation_id`と同じ値(docs/adr/0010決定4)。
+    /// fee-service/points-serviceへの相関にも同じ値を再利用する(docs/adr/0024決定8)。
     pub transfer_id: String,
     pub from_account_id: Uuid,
     pub to_account_id: Uuid,
+    /// 送金元・送金先の名義(docs/adr/0011の口座名義インデックスから`command_intake.rs`が
+    /// 解決した値)。`fee-service`/`points-service`はaccount_idではなくowner_id単位で
+    /// ポイント/手数料を扱うため(docs/adr/0024決定2)、`command_intake.rs`が振替/振込の判定
+    /// のために既に解決済みのこの値をそのまま持たせる。
+    pub from_owner_id: String,
+    pub to_owner_id: String,
     pub amount: Decimal,
+    /// 振込の手数料のうち現金で負担する分(docs/adr/0024決定4)。振替・組戻しでは常に`ZERO`。
+    /// `ReservingFee`から`PendingDebit`へ進む際(`reserve_fee_observed`)にのみ設定される。
+    pub cash_fee: Decimal,
     pub kind: TransferKind,
     pub state: SagaState,
     /// 直近の状態遷移時刻。`Credited`に達した時刻の代用として使う(終端到達後は変化しないため
@@ -86,9 +111,20 @@ pub struct TransferSaga {
 /// サガ状態遷移の結果、呼び出し側(Lambda glue)が実際に行うべきこと。
 #[derive(Debug, Clone, PartialEq)]
 pub enum NextAction {
+    /// `fee-service`へ手数料の原資確保を依頼する(docs/adr/0024決定4)。`fee_amount`は含まない
+    /// ——手数料の金額はfee-serviceの内部ロジックが決める(決定2)。
+    IssueReserveFee { transfer_id: String, owner_id: String, account_id: Uuid, transfer_amount: Decimal },
     IssueWithdraw { account_id: Uuid, amount: Decimal },
     IssueDeposit { account_id: Uuid, amount: Decimal },
     IssueCompensatingDeposit { account_id: Uuid, amount: Decimal },
+    /// 送金が最終的に失敗/補償された場合の手数料原資の巻き戻し(docs/adr/0024決定5)。
+    /// `fee-service`が内部の予約台帳を見て、ポイントが実際に消費されていた場合のみ
+    /// `points-service`への返却を行う——`transfer-service`は`points_used`を覚えていない。
+    /// 結果を待たないfire-and-forget(docs/adr/0024決定6)。
+    IssueRefundFee { transfer_id: String },
+    /// 振込の着金確定時にポイントを付与する(docs/adr/0024決定7)。`fee-service`を経由せず
+    /// `points-service`へ直接発行する、結果を待たないfire-and-forget。
+    IssueAwardPoints { owner_id: String, amount: Decimal },
     /// 終端状態に達した、確認待ち/取消済みで何も発行していない、または補償自体が却下され
     /// 滞留した(docs/adr/0010の「本ADRのスコープ外」——運用アラートでの手動対応を前提とする)。
     None,
@@ -96,11 +132,11 @@ pub enum NextAction {
 
 /// 今のサガが待っている「次の一歩」の識別情報。全ステップが同じ`correlation_id`
 /// (`transfer_id`)を使う(docs/adr/0010決定4)ため、`correlation_id`が一致するというだけでは
-/// 「どのステップの結果か」までは分からない——出金・入金・補償入金はいずれも同じ
+/// 「どのステップの結果か」までは分からない——出金・入金・補償入金・手数料予約はいずれも同じ
 /// `correlation_id`を持つ。EventBridgeのat-least-once配信により、既に追い越した古いステップの
 /// イベントが後から届くことがあるため、呼び出し側(Lambda glue)は観測したイベントの
-/// `account_id`とイベント種別名がこれと一致する場合のみ`advance`を呼ぶべきで、一致しなければ
-/// 無関係な(古い/重複した)イベントとして無視しなければならない。
+/// `account_id`とイベント種別名がこれと一致する場合のみ`advance`/`reserve_fee_observed`を
+/// 呼ぶべきで、一致しなければ無関係な(古い/重複した)イベントとして無視しなければならない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExpectedStep {
     pub account_id: Uuid,
@@ -112,11 +148,13 @@ pub struct ExpectedStep {
 }
 
 /// 終端状態(`Credited`/`Compensated`/`Failed`/`Cancelled`)と確認待ち(`PendingConfirmation`)
-/// では`None`——後者はまだaccount-serviceに何も発行していないため、そもそも観測すべき
-/// イベントが存在しない。
+/// では`None`——後者はまだaccount-service/fee-serviceに何も発行していないため、そもそも
+/// 観測すべきイベントが存在しない。`ReservingFee`は`fee-service`が発行する
+/// `fee.event.FeeReserved`を待つ——`account_id`は手数料を負担する送金元口座を使う。
 pub fn expected_step(saga: &TransferSaga) -> Option<ExpectedStep> {
     match saga.state {
         SagaState::PendingConfirmation => None,
+        SagaState::ReservingFee => Some(ExpectedStep { account_id: saga.from_account_id, event_variant: "FeeReserved" }),
         SagaState::PendingDebit => Some(ExpectedStep { account_id: saga.from_account_id, event_variant: "Withdrawn" }),
         SagaState::PendingCredit => Some(ExpectedStep { account_id: saga.to_account_id, event_variant: "Deposited" }),
         SagaState::Compensating => Some(ExpectedStep { account_id: saga.from_account_id, event_variant: "Deposited" }),
@@ -142,15 +180,20 @@ pub enum StartError {
 
 /// 新しい送金を受け付け、初期状態のサガと最初のアクションを返す。`kind`は呼び出し側
 /// (command_intake.rs)が名義インデックス投影を引いた結果を渡す——`saga`モジュール自身は
-/// 名義データソースを知らない。
+/// 名義データソースを知らない。`from_owner_id`/`to_owner_id`も同じ投影から呼び出し側が
+/// 既に解決済みの値をそのまま渡す(docs/adr/0024)。
 ///
-/// - `Furikae`/`Recall`は確認不要で即座に`PendingDebit`へ進み、出金コマンドを発行する。
+/// - `Furikae`/`Recall`は確認不要・手数料もかからず即座に`PendingDebit`へ進み、出金コマンドを
+///   発行する。`cash_fee`は常に`ZERO`のまま。
 /// - `Furikomi`は`PendingConfirmation`で止まり、何も発行しない。`confirm`が呼ばれるまで
-///   account-serviceには一切コマンドが送られない(docs/adr/0011)。
+///   account-service/fee-serviceには一切コマンドが送られない(docs/adr/0011、docs/adr/0024)。
+#[allow(clippy::too_many_arguments)]
 pub fn start(
     transfer_id: String,
     from_account_id: Uuid,
     to_account_id: Uuid,
+    from_owner_id: String,
+    to_owner_id: String,
     amount: Decimal,
     kind: TransferKind,
     now: OffsetDateTime,
@@ -174,7 +217,18 @@ pub fn start(
         (SagaState::PendingDebit, NextAction::IssueWithdraw { account_id: from_account_id, amount })
     };
 
-    let saga = TransferSaga { transfer_id, from_account_id, to_account_id, amount, kind, state, updated_at: now };
+    let saga = TransferSaga {
+        transfer_id,
+        from_account_id,
+        to_account_id,
+        from_owner_id,
+        to_owner_id,
+        amount,
+        cash_fee: Decimal::ZERO,
+        kind,
+        state,
+        updated_at: now,
+    };
     Ok((saga, action))
 }
 
@@ -190,19 +244,25 @@ pub enum CancelError {
     NotPendingConfirmation,
 }
 
-/// 振込の確認。`PendingConfirmation`のサガのみ受理し、`PendingDebit`へ進めて出金コマンドの
-/// 発行を指示する(docs/adr/0011)。
+/// 振込の確認。`PendingConfirmation`のサガのみ受理し、`ReservingFee`へ進めて手数料の原資確保を
+/// `fee-service`へ依頼する(docs/adr/0024決定4)——`0011`時点では直接`PendingDebit`へ進んで
+/// いたが、手数料の原資を確保してから送金処理を進めるようにこのADRで変更した。
 pub fn confirm(saga: &TransferSaga, now: OffsetDateTime) -> Result<(TransferSaga, NextAction), ConfirmError> {
     if saga.state != SagaState::PendingConfirmation {
         return Err(ConfirmError::NotPendingConfirmation);
     }
-    let next = TransferSaga { state: SagaState::PendingDebit, updated_at: now, ..saga.clone() };
-    let action = NextAction::IssueWithdraw { account_id: saga.from_account_id, amount: saga.amount };
+    let next = TransferSaga { state: SagaState::ReservingFee, updated_at: now, ..saga.clone() };
+    let action = NextAction::IssueReserveFee {
+        transfer_id: saga.transfer_id.clone(),
+        owner_id: saga.from_owner_id.clone(),
+        account_id: saga.from_account_id,
+        transfer_amount: saga.amount,
+    };
     Ok((next, action))
 }
 
 /// 振込の取消(確認前のキャンセル)。`PendingConfirmation`のサガのみ受理し、`Cancelled`へ
-/// 進める。まだ何もaccount-serviceに発行していないため、これ以上のアクションはない
+/// 進める。まだ何もaccount-service/fee-serviceに発行していないため、これ以上のアクションはない
 /// (docs/adr/0011)。
 pub fn cancel(saga: &TransferSaga, now: OffsetDateTime) -> Result<(TransferSaga, NextAction), CancelError> {
     if saga.state != SagaState::PendingConfirmation {
@@ -210,6 +270,33 @@ pub fn cancel(saga: &TransferSaga, now: OffsetDateTime) -> Result<(TransferSaga,
     }
     let next = TransferSaga { state: SagaState::Cancelled, updated_at: now, ..saga.clone() };
     Ok((next, NextAction::None))
+}
+
+/// `fee-service`からの`fee.event.FeeReserved`観測(現金負担分`cash_fee`を伴う)を受けて
+/// `ReservingFee`から`PendingDebit`へ進める(docs/adr/0024決定4)。`ObservedOutcome`の2値では
+/// なく具体的な内訳データを伴うため、`advance`とは別関数にする——`fee-service`は原資確保を
+/// 拒否しない設計(決定3)なので却下という結果は存在しない。
+///
+/// `ReservingFee`以外の状態に対して呼ばれること自体、通常は起こらない(`expected_step`が
+/// この状態でのみ`"FeeReserved"`を返すため観測ロジックの対象にならない)が、`advance`と同じく
+/// `SagaState`の全バリアントを明示的に扱う(ワイルドドなし)——万一の呼び出しに備えて安全側に
+/// 倒す。
+pub fn reserve_fee_observed(saga: &TransferSaga, cash_fee: Decimal, now: OffsetDateTime) -> (TransferSaga, NextAction) {
+    match saga.state {
+        SagaState::ReservingFee => {
+            let next = TransferSaga { state: SagaState::PendingDebit, cash_fee, updated_at: now, ..saga.clone() };
+            let action = NextAction::IssueWithdraw { account_id: saga.from_account_id, amount: saga.amount + cash_fee };
+            (next, action)
+        }
+        SagaState::PendingConfirmation
+        | SagaState::PendingDebit
+        | SagaState::PendingCredit
+        | SagaState::Compensating
+        | SagaState::Credited
+        | SagaState::Compensated
+        | SagaState::Failed
+        | SagaState::Cancelled => (saga.clone(), NextAction::None),
+    }
 }
 
 /// 組戻し(recall)が許される条件を満たすかどうかを判定する純粋関数。呼び出し側
@@ -251,29 +338,58 @@ pub fn recall_eligibility(original: &TransferSaga, now: OffsetDateTime) -> Resul
 ///
 /// `SagaState`の全バリアントを明示的に扱う(ワイルドカードなし) — 新しい状態を追加したら
 /// ここが必ずコンパイルエラーになる。終端状態(`Credited`/`Compensated`/`Failed`/`Cancelled`)と
-/// `PendingConfirmation`(まだaccount-serviceに何も発行していない)は、以後どんな観測結果が
-/// 来ても状態を変えないno-op——`PendingConfirmation`/`Cancelled`のサガに対して`advance`が
-/// 呼ばれること自体、通常は起こらない(`expected_step`が`None`を返すため観測ロジックの対象に
-/// ならない)が、万一の呼び出しに備えて安全側に倒す。
+/// `PendingConfirmation`/`ReservingFee`(前者はまだ何も発行しておらず、後者は`fee.event.FeeReserved`
+/// を`reserve_fee_observed`が別途処理する)は、以後どんな観測結果が来ても状態を変えないno-op
+/// ——万一の呼び出しに備えて安全側に倒す。
 pub fn advance(saga: &TransferSaga, observed: ObservedOutcome) -> (SagaState, NextAction) {
     match saga.state {
         SagaState::PendingConfirmation => (SagaState::PendingConfirmation, NextAction::None),
+        SagaState::ReservingFee => (SagaState::ReservingFee, NextAction::None),
         SagaState::PendingDebit => match observed {
             ObservedOutcome::Accepted => (
                 SagaState::PendingCredit,
                 NextAction::IssueDeposit { account_id: saga.to_account_id, amount: saga.amount },
             ),
-            ObservedOutcome::Rejected => (SagaState::Failed, NextAction::None),
+            // 出金自体が却下された場合、振込であれば手数料の原資(ポイント消費分)を巻き戻す
+            // (docs/adr/0024決定5)。振替・組戻しはそもそも手数料を予約していないため何もしない。
+            ObservedOutcome::Rejected => {
+                let refund = if saga.kind == TransferKind::Furikomi {
+                    NextAction::IssueRefundFee { transfer_id: saga.transfer_id.clone() }
+                } else {
+                    NextAction::None
+                };
+                (SagaState::Failed, refund)
+            }
         },
         SagaState::PendingCredit => match observed {
-            ObservedOutcome::Accepted => (SagaState::Credited, NextAction::None),
+            // 着金確定時、振込であればポイントを付与する(docs/adr/0024決定7)。
+            ObservedOutcome::Accepted => {
+                let award = if saga.kind == TransferKind::Furikomi {
+                    NextAction::IssueAwardPoints { owner_id: saga.to_owner_id.clone(), amount: award_points_for(saga.amount) }
+                } else {
+                    NextAction::None
+                };
+                (SagaState::Credited, award)
+            }
+            // 入金が却下された場合の補償は、送金額+振込なら現金負担分の手数料を送金元へ返す
+            // (docs/adr/0024決定4)——手数料自体の返却(ポイント分)は決定5の通り、
+            // Compensating完了時にまとめて行う。
             ObservedOutcome::Rejected => (
                 SagaState::Compensating,
-                NextAction::IssueCompensatingDeposit { account_id: saga.from_account_id, amount: saga.amount },
+                NextAction::IssueCompensatingDeposit { account_id: saga.from_account_id, amount: saga.amount + saga.cash_fee },
             ),
         },
         SagaState::Compensating => match observed {
-            ObservedOutcome::Accepted => (SagaState::Compensated, NextAction::None),
+            // 補償の入金が確定した時点で、振込であれば手数料の原資(ポイント消費分)を巻き戻す
+            // (docs/adr/0024決定5)。
+            ObservedOutcome::Accepted => {
+                let refund = if saga.kind == TransferKind::Furikomi {
+                    NextAction::IssueRefundFee { transfer_id: saga.transfer_id.clone() }
+                } else {
+                    NextAction::None
+                };
+                (SagaState::Compensated, refund)
+            }
             // 補償自体の却下はスコープ外(docs/adr/0010)。状態を変えず滞留させ、運用側の
             // 検知(今後の課題)に委ねる。
             ObservedOutcome::Rejected => (SagaState::Compensating, NextAction::None),
@@ -298,20 +414,35 @@ mod tests {
             transfer_id: "transfer-1".to_string(),
             from_account_id: Uuid::new_v4(),
             to_account_id: Uuid::new_v4(),
+            from_owner_id: "owner-from".to_string(),
+            to_owner_id: "owner-to".to_string(),
             amount: dec!(100),
+            cash_fee: dec!(0),
             kind,
             state,
             updated_at: now(),
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn start_with_owners(
+        transfer_id: &str,
+        from: Uuid,
+        to: Uuid,
+        amount: Decimal,
+        kind: TransferKind,
+    ) -> Result<(TransferSaga, NextAction), StartError> {
+        start(transfer_id.to_string(), from, to, "owner-from".to_string(), "owner-to".to_string(), amount, kind, now())
+    }
+
     #[test]
     fn start_furikae_produces_pending_debit_and_issues_withdraw_from_the_source_account() {
         let from = Uuid::new_v4();
         let to = Uuid::new_v4();
-        let (saga, action) = start("transfer-1".to_string(), from, to, dec!(500), TransferKind::Furikae, now()).unwrap();
+        let (saga, action) = start_with_owners("transfer-1", from, to, dec!(500), TransferKind::Furikae).unwrap();
         assert_eq!(saga.state, SagaState::PendingDebit);
         assert_eq!(saga.kind, TransferKind::Furikae);
+        assert_eq!(saga.cash_fee, dec!(0));
         assert_eq!(action, NextAction::IssueWithdraw { account_id: from, amount: dec!(500) });
     }
 
@@ -319,7 +450,7 @@ mod tests {
     fn start_recall_behaves_like_furikae_no_confirmation_required() {
         let from = Uuid::new_v4();
         let to = Uuid::new_v4();
-        let (saga, action) = start("recall-1".to_string(), from, to, dec!(500), TransferKind::Recall, now()).unwrap();
+        let (saga, action) = start_with_owners("recall-1", from, to, dec!(500), TransferKind::Recall).unwrap();
         assert_eq!(saga.state, SagaState::PendingDebit);
         assert_eq!(action, NextAction::IssueWithdraw { account_id: from, amount: dec!(500) });
     }
@@ -328,7 +459,7 @@ mod tests {
     fn start_furikomi_stops_at_pending_confirmation_and_issues_nothing() {
         let from = Uuid::new_v4();
         let to = Uuid::new_v4();
-        let (saga, action) = start("transfer-1".to_string(), from, to, dec!(500), TransferKind::Furikomi, now()).unwrap();
+        let (saga, action) = start_with_owners("transfer-1", from, to, dec!(500), TransferKind::Furikomi).unwrap();
         assert_eq!(saga.state, SagaState::PendingConfirmation);
         assert_eq!(saga.kind, TransferKind::Furikomi);
         assert_eq!(action, NextAction::None);
@@ -339,32 +470,26 @@ mod tests {
         let from = Uuid::new_v4();
         let to = Uuid::new_v4();
         assert_eq!(
-            start("t".to_string(), from, to, dec!(1000000.01), TransferKind::Furikomi, now()),
+            start_with_owners("t", from, to, dec!(1000000.01), TransferKind::Furikomi),
             Err(StartError::ExceedsFurikomiLimit)
         );
         // ちょうど上限額は許可される。
-        assert!(start("t".to_string(), from, to, dec!(1000000), TransferKind::Furikomi, now()).is_ok());
+        assert!(start_with_owners("t", from, to, dec!(1000000), TransferKind::Furikomi).is_ok());
     }
 
     #[test]
     fn start_furikae_is_not_subject_to_the_furikomi_limit() {
         let from = Uuid::new_v4();
         let to = Uuid::new_v4();
-        assert!(start("t".to_string(), from, to, dec!(5000000), TransferKind::Furikae, now()).is_ok());
+        assert!(start_with_owners("t", from, to, dec!(5000000), TransferKind::Furikae).is_ok());
     }
 
     #[test]
     fn start_rejects_non_positive_amounts() {
         let from = Uuid::new_v4();
         let to = Uuid::new_v4();
-        assert_eq!(
-            start("t".to_string(), from, to, dec!(0), TransferKind::Furikae, now()),
-            Err(StartError::NonPositiveAmount)
-        );
-        assert_eq!(
-            start("t".to_string(), from, to, dec!(-1), TransferKind::Furikae, now()),
-            Err(StartError::NonPositiveAmount)
-        );
+        assert_eq!(start_with_owners("t", from, to, dec!(0), TransferKind::Furikae), Err(StartError::NonPositiveAmount));
+        assert_eq!(start_with_owners("t", from, to, dec!(-1), TransferKind::Furikae), Err(StartError::NonPositiveAmount));
     }
 
     #[test]
@@ -372,28 +497,36 @@ mod tests {
         let from = Uuid::new_v4();
         let to = Uuid::new_v4();
         assert_eq!(
-            start("t".to_string(), from, to, dec!(10.123), TransferKind::Furikae, now()),
+            start_with_owners("t", from, to, dec!(10.123), TransferKind::Furikae),
             Err(StartError::InvalidAmountPrecision)
         );
         // ちょうど2桁は許可される。
-        assert!(start("t".to_string(), from, to, dec!(10.12), TransferKind::Furikae, now()).is_ok());
+        assert!(start_with_owners("t", from, to, dec!(10.12), TransferKind::Furikae).is_ok());
     }
 
     #[test]
     fn start_rejects_transfers_to_the_same_account() {
         let account = Uuid::new_v4();
         assert_eq!(
-            start("t".to_string(), account, account, dec!(500), TransferKind::Furikae, now()),
+            start_with_owners("t", account, account, dec!(500), TransferKind::Furikae),
             Err(StartError::SameAccount)
         );
     }
 
     #[test]
-    fn confirm_moves_pending_confirmation_to_pending_debit_and_issues_withdraw() {
+    fn confirm_moves_pending_confirmation_to_reserving_fee_and_requests_a_fee_reservation() {
         let saga = saga_in(TransferKind::Furikomi, SagaState::PendingConfirmation);
         let (next, action) = confirm(&saga, now()).unwrap();
-        assert_eq!(next.state, SagaState::PendingDebit);
-        assert_eq!(action, NextAction::IssueWithdraw { account_id: saga.from_account_id, amount: saga.amount });
+        assert_eq!(next.state, SagaState::ReservingFee);
+        assert_eq!(
+            action,
+            NextAction::IssueReserveFee {
+                transfer_id: saga.transfer_id.clone(),
+                owner_id: saga.from_owner_id.clone(),
+                account_id: saga.from_account_id,
+                transfer_amount: saga.amount,
+            }
+        );
     }
 
     #[test]
@@ -414,6 +547,31 @@ mod tests {
     fn cancel_rejects_sagas_not_pending_confirmation() {
         let saga = saga_in(TransferKind::Furikomi, SagaState::Credited);
         assert_eq!(cancel(&saga, now()), Err(CancelError::NotPendingConfirmation));
+    }
+
+    #[test]
+    fn reserve_fee_observed_moves_reserving_fee_to_pending_debit_and_bundles_the_cash_portion() {
+        let saga = saga_in(TransferKind::Furikomi, SagaState::ReservingFee);
+        let (next, action) = reserve_fee_observed(&saga, dec!(140), now());
+        assert_eq!(next.state, SagaState::PendingDebit);
+        assert_eq!(next.cash_fee, dec!(140));
+        assert_eq!(action, NextAction::IssueWithdraw { account_id: saga.from_account_id, amount: dec!(240) });
+    }
+
+    #[test]
+    fn reserve_fee_observed_with_zero_cash_fee_still_withdraws_just_the_transfer_amount() {
+        let saga = saga_in(TransferKind::Furikomi, SagaState::ReservingFee);
+        let (next, action) = reserve_fee_observed(&saga, dec!(0), now());
+        assert_eq!(next.cash_fee, dec!(0));
+        assert_eq!(action, NextAction::IssueWithdraw { account_id: saga.from_account_id, amount: dec!(100) });
+    }
+
+    #[test]
+    fn reserve_fee_observed_is_a_defensive_no_op_outside_reserving_fee() {
+        let saga = saga_in(TransferKind::Furikomi, SagaState::PendingDebit);
+        let (next, action) = reserve_fee_observed(&saga, dec!(140), now());
+        assert_eq!(next, saga);
+        assert_eq!(action, NextAction::None);
     }
 
     #[test]
@@ -439,6 +597,7 @@ mod tests {
     fn recall_eligibility_rejects_sagas_not_yet_credited() {
         for state in [
             SagaState::PendingConfirmation,
+            SagaState::ReservingFee,
             SagaState::PendingDebit,
             SagaState::PendingCredit,
             SagaState::Compensating,
@@ -467,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn withdraw_rejected_fails_the_saga_without_compensation() {
+    fn withdraw_rejected_fails_the_saga_without_compensation_for_furikae() {
         let saga = saga_in(TransferKind::Furikae, SagaState::PendingDebit);
         let (next, action) = advance(&saga, ObservedOutcome::Rejected);
         assert_eq!(next, SagaState::Failed);
@@ -475,7 +634,16 @@ mod tests {
     }
 
     #[test]
-    fn deposit_accepted_completes_the_saga() {
+    fn withdraw_rejected_for_furikomi_refunds_the_fee_reservation() {
+        let mut saga = saga_in(TransferKind::Furikomi, SagaState::PendingDebit);
+        saga.cash_fee = dec!(140);
+        let (next, action) = advance(&saga, ObservedOutcome::Rejected);
+        assert_eq!(next, SagaState::Failed);
+        assert_eq!(action, NextAction::IssueRefundFee { transfer_id: saga.transfer_id.clone() });
+    }
+
+    #[test]
+    fn deposit_accepted_completes_the_saga_without_awarding_points_for_furikae() {
         let saga = saga_in(TransferKind::Furikae, SagaState::PendingCredit);
         let (next, action) = advance(&saga, ObservedOutcome::Accepted);
         assert_eq!(next, SagaState::Credited);
@@ -483,19 +651,39 @@ mod tests {
     }
 
     #[test]
-    fn deposit_rejected_triggers_compensation_back_to_the_source_account() {
-        let saga = saga_in(TransferKind::Furikae, SagaState::PendingCredit);
-        let (next, action) = advance(&saga, ObservedOutcome::Rejected);
-        assert_eq!(next, SagaState::Compensating);
-        assert_eq!(action, NextAction::IssueCompensatingDeposit { account_id: saga.from_account_id, amount: saga.amount });
+    fn deposit_accepted_for_furikomi_awards_points_to_the_recipient() {
+        let saga = saga_in(TransferKind::Furikomi, SagaState::PendingCredit);
+        let (next, action) = advance(&saga, ObservedOutcome::Accepted);
+        assert_eq!(next, SagaState::Credited);
+        assert_eq!(action, NextAction::IssueAwardPoints { owner_id: saga.to_owner_id.clone(), amount: dec!(0.1) });
     }
 
     #[test]
-    fn compensating_deposit_accepted_completes_compensation() {
+    fn deposit_rejected_triggers_compensation_including_the_cash_fee_back_to_the_source_account() {
+        let mut saga = saga_in(TransferKind::Furikomi, SagaState::PendingCredit);
+        saga.cash_fee = dec!(140);
+        let (next, action) = advance(&saga, ObservedOutcome::Rejected);
+        assert_eq!(next, SagaState::Compensating);
+        assert_eq!(
+            action,
+            NextAction::IssueCompensatingDeposit { account_id: saga.from_account_id, amount: dec!(240) }
+        );
+    }
+
+    #[test]
+    fn compensating_deposit_accepted_completes_compensation_without_fee_refund_for_furikae() {
         let saga = saga_in(TransferKind::Furikae, SagaState::Compensating);
         let (next, action) = advance(&saga, ObservedOutcome::Accepted);
         assert_eq!(next, SagaState::Compensated);
         assert_eq!(action, NextAction::None);
+    }
+
+    #[test]
+    fn compensating_deposit_accepted_for_furikomi_refunds_the_fee_reservation() {
+        let saga = saga_in(TransferKind::Furikomi, SagaState::Compensating);
+        let (next, action) = advance(&saga, ObservedOutcome::Accepted);
+        assert_eq!(next, SagaState::Compensated);
+        assert_eq!(action, NextAction::IssueRefundFee { transfer_id: saga.transfer_id.clone() });
     }
 
     #[test]
@@ -531,7 +719,23 @@ mod tests {
     }
 
     #[test]
+    fn reserving_fee_ignores_advance_as_a_defensive_no_op() {
+        // ReservingFeeの実際の遷移はreserve_fee_observedが専用に扱う(FeeReservedはfee-serviceが
+        // 拒否しない設計のため、ObservedOutcome::Rejectedがここに届くこと自体、通常は起こらない)。
+        let saga = saga_in(TransferKind::Furikomi, SagaState::ReservingFee);
+        let (next, action) = advance(&saga, ObservedOutcome::Accepted);
+        assert_eq!(next, SagaState::ReservingFee);
+        assert_eq!(action, NextAction::None);
+    }
+
+    #[test]
     fn expected_step_tracks_which_account_and_event_variant_the_saga_is_currently_waiting_on() {
+        let saga = saga_in(TransferKind::Furikomi, SagaState::ReservingFee);
+        assert_eq!(
+            expected_step(&saga),
+            Some(ExpectedStep { account_id: saga.from_account_id, event_variant: "FeeReserved" })
+        );
+
         let saga = saga_in(TransferKind::Furikae, SagaState::PendingDebit);
         assert_eq!(
             expected_step(&saga),

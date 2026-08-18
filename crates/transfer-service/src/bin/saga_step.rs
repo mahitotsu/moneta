@@ -1,8 +1,9 @@
-use account_domain::{EventEnvelope, OffsetDateTime};
+use account_domain::{Decimal, EventEnvelope, OffsetDateTime};
 use aws_lambda_events::eventbridge::EventBridgeEvent;
 use lambda_runtime::{run, service_fn, Error, LambdaEvent};
 use serde_json::Value;
-use transfer_service::saga::{advance, expected_step, NextAction, ObservedOutcome};
+use std::str::FromStr;
+use transfer_service::saga::{advance, expected_step, reserve_fee_observed, NextAction, ObservedOutcome, SagaState};
 use transfer_service::{commands, persistence};
 
 const EVENT_KIND: &str = "event";
@@ -15,6 +16,12 @@ async fn main() -> Result<(), Error> {
     let saga_table_name = std::env::var("SAGA_TABLE_NAME").expect("SAGA_TABLE_NAME environment variable must be set");
     let account_command_queue_url =
         std::env::var("ACCOUNT_COMMAND_QUEUE_URL").expect("ACCOUNT_COMMAND_QUEUE_URL environment variable must be set");
+    // docs/adr/0024決定8: fee-service/points-service宛のコマンドキュー。`advance()`が
+    // `IssueRefundFee`/`IssueAwardPoints`を返したときにだけ使う。
+    let fee_command_queue_url =
+        std::env::var("FEE_COMMAND_QUEUE_URL").expect("FEE_COMMAND_QUEUE_URL environment variable must be set");
+    let points_command_queue_url =
+        std::env::var("POINTS_COMMAND_QUEUE_URL").expect("POINTS_COMMAND_QUEUE_URL environment variable must be set");
     let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
     let dynamodb = aws_sdk_dynamodb::Client::new(&aws_config);
     let sqs = aws_sdk_sqs::Client::new(&aws_config);
@@ -24,7 +31,20 @@ async fn main() -> Result<(), Error> {
         let sqs = sqs.clone();
         let saga_table_name = saga_table_name.clone();
         let account_command_queue_url = account_command_queue_url.clone();
-        async move { step_one(&dynamodb, &sqs, &saga_table_name, &account_command_queue_url, event.payload.detail).await }
+        let fee_command_queue_url = fee_command_queue_url.clone();
+        let points_command_queue_url = points_command_queue_url.clone();
+        async move {
+            step_one(
+                &dynamodb,
+                &sqs,
+                &saga_table_name,
+                &account_command_queue_url,
+                &fee_command_queue_url,
+                &points_command_queue_url,
+                event.payload.detail,
+            )
+            .await
+        }
     }))
     .await
 }
@@ -32,7 +52,7 @@ async fn main() -> Result<(), Error> {
 /// account-domainのEvent/DomainErrorはserdeのデフォルト(外部タグ)表現でシリアライズされる:
 /// unitバリアントはJSON文字列、それ以外はキーが1つのオブジェクト(account-serviceの
 /// outbox.rsの`variant_name`と同じロジック——コード共有はしていない。理由はcommands.rsの
-/// コメントを参照)。
+/// コメントを参照)。fee-serviceの`fee.event.FeeReserved`も同じ形で発行する(docs/adr/0024決定8)。
 fn variant_name(payload: &Value) -> String {
     match payload {
         Value::String(name) => name.clone(),
@@ -41,11 +61,20 @@ fn variant_name(payload: &Value) -> String {
     }
 }
 
+/// `fee.event.FeeReserved`のペイロード(`{"FeeReserved": {"cash_portion": "140"}}`)から
+/// `cash_portion`を取り出す。形が想定と違う場合は`None`(呼び出し側が防御的に無視する)。
+fn extract_cash_portion(payload: &Value) -> Option<Decimal> {
+    payload.get("FeeReserved")?.get("cash_portion")?.as_str().and_then(|s| Decimal::from_str(s).ok())
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn step_one(
     dynamodb: &aws_sdk_dynamodb::Client,
     sqs: &aws_sdk_sqs::Client,
     saga_table_name: &str,
     account_command_queue_url: &str,
+    fee_command_queue_url: &str,
+    points_command_queue_url: &str,
     envelope: EventEnvelope,
 ) -> Result<(), Error> {
     let Some(transfer_id) = envelope.correlation_id.clone() else {
@@ -94,6 +123,35 @@ async fn step_one(
         return Ok(());
     }
 
+    // `ReservingFee`だけは`advance`(成功/却下の2値)ではなく`reserve_fee_observed`
+    // (具体的な`cash_portion`を伴う)で扱う(docs/adr/0024決定4)。fee-serviceは原資確保を
+    // 拒否しない設計(決定3)のため、ここに"rejection"が届くこと自体、通常は起こらない——
+    // 万一届いても状態を進めず無視する。
+    if saga.state == SagaState::ReservingFee {
+        let Some(cash_portion) = (observed_outcome == ObservedOutcome::Accepted).then(|| extract_cash_portion(&envelope.data)).flatten()
+        else {
+            tracing::warn!(%transfer_id, ?observed_outcome, "unexpected fee reservation outcome; fee-service should never reject a reservation (docs/adr/0024決定3); ignoring");
+            return Ok(());
+        };
+
+        let (_, action) = reserve_fee_observed(&saga, cash_portion, OffsetDateTime::now_utc());
+        let advanced = persistence::advance_saga_to_pending_debit_with_fee(
+            dynamodb,
+            saga_table_name,
+            &transfer_id,
+            cash_portion,
+            OffsetDateTime::now_utc(),
+        )
+        .await?;
+        if !advanced {
+            tracing::info!(%transfer_id, "saga state already advanced by a concurrent/duplicate delivery; not issuing a command");
+            return Ok(());
+        }
+
+        return issue_action(sqs, account_command_queue_url, fee_command_queue_url, points_command_queue_url, &transfer_id, action)
+            .await;
+    }
+
     let (next_state, action) = advance(&saga, observed_outcome);
 
     // 状態遷移を先にCAS(楽観的並行性制御)でコミットし、成功した場合のみ次のコマンドを
@@ -108,15 +166,40 @@ async fn step_one(
         return Ok(());
     }
 
+    issue_action(sqs, account_command_queue_url, fee_command_queue_url, points_command_queue_url, &transfer_id, action).await
+}
+
+async fn issue_action(
+    sqs: &aws_sdk_sqs::Client,
+    account_command_queue_url: &str,
+    fee_command_queue_url: &str,
+    points_command_queue_url: &str,
+    transfer_id: &str,
+    action: NextAction,
+) -> Result<(), Error> {
     match action {
-        NextAction::IssueWithdraw { .. } => {
-            unreachable!("advance() never issues a fresh Withdraw; that only happens in start()")
+        // docs/adr/0024決定4: `reserve_fee_observed`(ReservingFee→PendingDebit)は
+        // `IssueWithdraw`を返す——旧コード(0011まで)ではWithdrawは`start()`/`confirm()`
+        // からしか発行されなかったが、手数料の原資確保後にPendingDebitへ進むこの経路が
+        // 新たに加わったため、ここでも扱う必要がある(実デプロイで発見: この分岐を
+        // `unreachable!()`のまま残していたためpanicしていた)。
+        NextAction::IssueWithdraw { account_id, amount } => {
+            commands::send_withdraw(sqs, account_command_queue_url, account_id, amount, transfer_id).await?;
         }
         NextAction::IssueDeposit { account_id, amount } => {
-            commands::send_deposit(sqs, account_command_queue_url, account_id, amount, &transfer_id).await?;
+            commands::send_deposit(sqs, account_command_queue_url, account_id, amount, transfer_id).await?;
         }
         NextAction::IssueCompensatingDeposit { account_id, amount } => {
-            commands::send_compensating_deposit(sqs, account_command_queue_url, account_id, amount, &transfer_id).await?;
+            commands::send_compensating_deposit(sqs, account_command_queue_url, account_id, amount, transfer_id).await?;
+        }
+        NextAction::IssueRefundFee { transfer_id } => {
+            commands::send_refund_fee(sqs, fee_command_queue_url, &transfer_id).await?;
+        }
+        NextAction::IssueAwardPoints { owner_id, amount } => {
+            commands::send_award_points(sqs, points_command_queue_url, transfer_id, &owner_id, amount).await?;
+        }
+        NextAction::IssueReserveFee { .. } => {
+            unreachable!("IssueReserveFee is only ever returned by confirm(), handled in command_intake.rs")
         }
         NextAction::None => {}
     }

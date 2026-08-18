@@ -238,6 +238,28 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
   `ChannelEmulatorScreen.tsx`; `TransactionHistory.tsx` shows a `CHANNEL_LABEL`-mapped line
   (mutually exclusive with `0021`'s transfer-detail link, since `channel`/`transferId` are never
   both set).
+- `0024`: adds a 振込(furikomi)-only transfer fee and a points/loyalty program (real-time award
+  on receipt, automatic redemption against the fee) as two new crates — `points-service` (a pure
+  ledger, depends on nothing) and `fee-service` (owns the fee *policy* — v1 a fixed amount,
+  future tiered/stage-based — and decides the points/cash split), chained
+  `transfer-service` → `fee-service` → `points-service` with **usage** only (SQS
+  command/EventBridge event, never a Cargo dependency, same boundary `0003` draws for
+  `account-service`). `account-service`/`query-service` get zero changes. `transfer-service`'s
+  saga gains a `ReservingFee` state between confirmation and debit so the cash portion of the fee
+  rides in the *same* `Withdraw`/compensating `Deposit` the transfer already issues — no
+  separately-issued, independently-failable fee withdrawal — plus a fire-and-forget `AwardPoints`
+  on furikomi credit and `RefundFee`/`RefundPoints` on failure/compensation. Furikae and 組戻し
+  (recall) stay fee-exempt (`0011`'s existing furikomi-only carve-out); recall does **not**
+  retroactively refund the original transfer's fee (deliberate: matches real-bank practice, and
+  keeps `0011` decision 5's "recall reuses `start()`, no new terminal state" simplicity intact).
+  Real-deployment gotcha (same "verify library behavior" pattern as `0013` decision 5): `time`'s
+  human-readable `OffsetDateTime` serialization is not RFC3339, so `fee-service`'s outbox
+  projector (whose `fee.event.FeeReserved` must deserialize into `account-domain`'s
+  `EventEnvelope`, the one thing it still needs to match despite depending on nothing) round-trips
+  through a real `OffsetDateTime` rather than hand-formatting a string. `api-e2e` gained
+  `scenarios/transfer-fee-and-points.e2e.test.ts` (award/redemption/refund, reading the
+  no-query-API `PointsTable`/`FeeReservationsTable` directly via a new `support/pointsState.ts`,
+  same backdoor-but-legitimate stance as `support/sagaState.ts`).
 
 ## Commands
 

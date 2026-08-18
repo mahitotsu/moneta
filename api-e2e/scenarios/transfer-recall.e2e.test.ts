@@ -5,6 +5,12 @@
 //
 // 名義不一致(furikomi)は、2つの別々のCognito認証済み識別子(docs/adr/0016決定3)でそれぞれの
 // 口座を開設することで作る——owner_idはもはやリクエストボディの自己申告値ではない。
+//
+// docs/adr/0024: 組戻し(kind=recall)自体には手数料がかからない(決定2)が、これは
+// 元のfurikomiで既に徴収された手数料を遡って返金することまでは意味しない——実際の銀行でも
+// 振込手数料は組戻し後も非返金であるのが一般的であり、組戻しのサガが元のtransfer_idの
+// 手数料予約に踏み込む結合を持ち込まないためにも、この設計を採用した(組戻しは送金額
+// (300円)だけを戻し、元のfurikomiで徴収された220円の手数料は戻らない)。
 import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi } from "../support/httpClient";
 import { REJECTION_SETTLE_MS, settle, waitFor } from "../support/poll";
@@ -22,6 +28,10 @@ import { signUpAndSignIn, TestIdentity } from "../support/auth";
 async function distinctIdentities(clientId: string): Promise<[TestIdentity, TestIdentity]> {
   return Promise.all([signUpAndSignIn(clientId), signUpAndSignIn(clientId)]);
 }
+
+// docs/adr/0024決定2: v1の固定手数料額(円)。transfer-furikomi.e2e.test.tsと同じ定数
+// (コード共有はしない、他のE2E定数と同じ理由)。
+const FURIKOMI_FEE = 220;
 
 // Given-step共通処理: 名義不一致の2口座を開設し、300円の振込をcredited(着金済み)まで
 // 進める。J9/J10それぞれがこの直後から分岐する。
@@ -48,7 +58,7 @@ async function creditedFurikomi(
 }
 
 describe("J9: 期限内のCredited済み振込は組戻しできる", () => {
-  it("受取人から送金元へ全額が戻る", async () => {
+  it("受取人から送金元へ送金額(手数料は含まない、docs/adr/0024)が戻る", async () => {
     const outputs = await fetchStackOutputs();
     const [identityA, identityB] = await distinctIdentities(outputs.userPoolClientId);
     const commandApiA = createCommandApi(outputs.commandApiUrl, identityA.idToken);
@@ -78,9 +88,11 @@ describe("J9: 期限内のCredited済み振込は組戻しできる", () => {
     await waitFor(
       async () => {
         const view = await queryApi.getAccount(fromId);
-        return view && Number(view.balance) === 1000 ? view : undefined;
+        // 1000 - 300(送金額) - 220(元のfurikomiの手数料) + 300(組戻しで戻る送金額。
+        // 手数料は戻らない、docs/adr/0024) = 780。
+        return view && Number(view.balance) === 1000 - FURIKOMI_FEE ? view : undefined;
       },
-      { description: `account ${fromId} balance to be restored to 1000 after recall` },
+      { description: `account ${fromId} balance to be restored to ${1000 - FURIKOMI_FEE} after recall (fee is not refunded)` },
     );
     await waitFor(
       async () => {
@@ -130,7 +142,7 @@ describe("J10a: 受取人の残高不足での組戻しはfailedになる", () =
 
     const fromView = await queryApi.getAccount(fromId);
     const toView = await queryApi.getAccount(toId);
-    expect(Number(fromView?.balance)).toBe(700.0);
+    expect(Number(fromView?.balance)).toBe(1000 - 300 - FURIKOMI_FEE); // 組戻し失敗時も手数料は既に徴収済みのまま。
     expect(Number(toView?.balance)).toBe(50.0);
   });
 });
@@ -167,7 +179,7 @@ describe("J10b: 組戻し可能な時間窓を過ぎている場合は受付時�
 
     const fromView = await queryApi.getAccount(fromId);
     const toView = await queryApi.getAccount(toId);
-    expect(Number(fromView?.balance)).toBe(700.0);
+    expect(Number(fromView?.balance)).toBe(1000 - 300 - FURIKOMI_FEE); // 組戻し却下時も手数料は既に徴収済みのまま。
     expect(Number(toView?.balance)).toBe(300.0);
   });
 });

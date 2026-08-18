@@ -61,10 +61,18 @@ function jsonHeaders(idToken?: string, idempotencyKey?: string): Record<string, 
   return headers;
 }
 
+// docs/adr/0023: Deposit/Withdrawの外部チャネル(web-ui/src/api/types.tsのChannelと同じ形、
+// このファイル冒頭のコメント通りコード共有はせず型だけ揃える)。DepositCommandModel/
+// WithdrawalCommandModelはどちらも"Atm"を許容するため、テストヘルパーの既定値として使う
+// (呼び出し側が入金/出金それぞれ固有のチャネル("IncomingTransfer"/"BillPayment")を
+// 明示的に検証したい場合は引数で上書きできる)。
+export type DepositChannel = "Atm" | "IncomingTransfer";
+export type WithdrawalChannel = "Atm" | "BillPayment";
+
 export interface CommandApi {
   openAccount(accountId: string, initialBalance: string, idempotencyKey?: string): Promise<RawResponse>;
-  deposit(accountId: string, amount: string, idempotencyKey?: string): Promise<RawResponse>;
-  withdraw(accountId: string, amount: string, idempotencyKey?: string): Promise<RawResponse>;
+  deposit(accountId: string, amount: string, idempotencyKey?: string, channel?: DepositChannel): Promise<RawResponse>;
+  withdraw(accountId: string, amount: string, idempotencyKey?: string, channel?: WithdrawalChannel): Promise<RawResponse>;
   freeze(accountId: string, reason: FreezeReasonRequest, idempotencyKey?: string): Promise<RawResponse>;
   unfreeze(accountId: string, idempotencyKey?: string): Promise<RawResponse>;
   close(accountId: string, idempotencyKey?: string): Promise<RawResponse>;
@@ -99,17 +107,17 @@ export function createCommandApi(baseUrl: string, idToken?: string): CommandApi 
       }
       return response;
     },
-    deposit: (accountId, amount, idempotencyKey = crypto.randomUUID()) =>
+    deposit: (accountId, amount, idempotencyKey = crypto.randomUUID(), channel: DepositChannel = "Atm") =>
       rawRequest(`${baseUrl}/accounts/${accountId}/deposits`, {
         method: "POST",
         headers: jsonHeaders(idToken, idempotencyKey),
-        body: JSON.stringify({ amount }),
+        body: JSON.stringify({ amount, channel }),
       }),
-    withdraw: (accountId, amount, idempotencyKey = crypto.randomUUID()) =>
+    withdraw: (accountId, amount, idempotencyKey = crypto.randomUUID(), channel: WithdrawalChannel = "Atm") =>
       rawRequest(`${baseUrl}/accounts/${accountId}/withdrawals`, {
         method: "POST",
         headers: jsonHeaders(idToken, idempotencyKey),
-        body: JSON.stringify({ amount }),
+        body: JSON.stringify({ amount, channel }),
       }),
     freeze: (accountId, reason, idempotencyKey = crypto.randomUUID()) =>
       rawRequest(`${baseUrl}/accounts/${accountId}/freeze`, {

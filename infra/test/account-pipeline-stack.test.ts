@@ -71,7 +71,8 @@ describe("AccountPipelineStack", () => {
   // 全てのDynamoDBテーブルがこの落とし穴を回避できているかを固定する回帰テスト
   // (docs/adr/0011でTransferAccountOwnersTableを、docs/adr/0013でaccount-service自身の
   // 3テーブルを、docs/adr/0012でTransferStatusViewTableを、docs/adr/0015でAccountNumbersTable
-  // を、docs/adr/0017でCustomerTransfersTableを追加)。
+  // を、docs/adr/0017でCustomerTransfersTableを、docs/adr/0024でpoints-service/fee-service
+  // の5テーブルを追加)。
   test("all DynamoDB tables are set to DESTROY on stack/changeset rollback, not the RETAIN default", () => {
     const tables = template.findResources("AWS::DynamoDB::Table");
     const tableNames = Object.values(tables).map((table) => table.Properties.TableName);
@@ -84,6 +85,11 @@ describe("AccountPipelineStack", () => {
         "moneta-accounts",
         "moneta-customer-accounts",
         "moneta-customer-transfers",
+        "moneta-fee-events",
+        "moneta-fee-reservations",
+        "moneta-points",
+        "moneta-points-events",
+        "moneta-points-idempotency",
         "moneta-processed-messages",
         "moneta-transfer-account-owners",
         "moneta-transfer-sagas",
@@ -107,10 +113,19 @@ describe("AccountPipelineStack", () => {
     });
   });
 
-  test("transfer-saga-step subscribes to any account-service event carrying a correlation_id, regardless of event vs. rejection (docs/adr/0010)", () => {
+  test("transfer-saga-step subscribes to any account-service or fee-service event carrying a correlation_id, regardless of event vs. rejection (docs/adr/0010, docs/adr/0024決定7: fee.event.FeeReservedが同じRuleに相乗りする)", () => {
     template.hasResourceProperties("AWS::Events::Rule", {
       EventPattern: {
-        source: ["account-service"],
+        source: ["account-service", "fee-service"],
+        detail: { correlation_id: [{ exists: true }] },
+      },
+    });
+  });
+
+  test("fee-points-observation subscribes only to points-service events carrying a correlation_id (docs/adr/0024決定7)", () => {
+    template.hasResourceProperties("AWS::Events::Rule", {
+      EventPattern: {
+        source: ["points-service"],
         detail: { correlation_id: [{ exists: true }] },
       },
     });
@@ -128,8 +143,8 @@ describe("AccountPipelineStack", () => {
     });
   });
 
-  test("creates exactly fifteen Lambda functions: write path, outbox projector, query projector, account number projector, customer accounts projector, the three auth-service functions (pre sign-up, post confirmation, post authentication), the five transfer-service functions (command intake, saga step, owner projector, status projector, history projector), and the two Web UI hosting custom-resource handlers (S3 auto-delete-objects, BucketDeployment sync)", () => {
-    template.resourceCountIs("AWS::Lambda::Function", 15);
+  test("creates exactly twenty Lambda functions: write path, outbox projector, query projector, account number projector, customer accounts projector, the three auth-service functions (pre sign-up, post confirmation, post authentication), the five transfer-service functions (command intake, saga step, owner projector, status projector, history projector), the two points-service functions (command intake, outbox projector), the three fee-service functions (command intake, points observation, outbox projector), and the two Web UI hosting custom-resource handlers (S3 auto-delete-objects, BucketDeployment sync)", () => {
+    template.resourceCountIs("AWS::Lambda::Function", 20);
   });
 
   // docs/adr/0015: owner_projector.rs(docs/adr/0011)と同じ理由でaccount.event.Openedのみ
@@ -149,9 +164,15 @@ describe("AccountPipelineStack", () => {
   // 複数grantを1つのIAM::Policyリソースにまとめるため、ステートメント数(リソースARN単位)で
   // 数える。
   test("account-service gets an explicit dynamodb:TransactWriteItems grant covering all three of its own tables (not covered by grantReadWriteData)", () => {
+    // docs/adr/0024でpoints-service/fee-serviceも同じTransactWriteItemsパターンを再利用した
+    // ため、スタック全体を横断して数える(以前の実装)とaccount-service専用の回帰テストで
+    // なくなってしまう。account-serviceの実行ロールのポリシーだけに絞り込む——CDKは
+    // `new lambda.Function(this, "AccountServiceFunction", ...)`のデフォルトロールに
+    // `<ConstructId>ServiceRoleDefaultPolicy<hash>`という論理IDでポリシーを生成する。
     const policies = template.findResources("AWS::IAM::Policy");
     const transactWriteResources = new Set<string>();
-    for (const policy of Object.values(policies)) {
+    for (const [logicalId, policy] of Object.entries(policies)) {
+      if (!logicalId.startsWith("AccountServiceFunctionServiceRoleDefaultPolicy")) continue;
       const statements = policy.Properties.PolicyDocument.Statement as Array<{
         Action: string | string[];
         Resource: unknown;
@@ -271,12 +292,15 @@ describe("AccountPipelineStack", () => {
 
   // docs/production-readiness-matrix.md O1: ADR-0002決定6は「DLQの滞留数・最古メッセージの
   // 経過時間にCloudWatchアラームを張る」と決定していたが、実装が伴っていなかった(2026-08-10発見)。
-  test("both DLQs (account command, transfer command) have alarms on messages-visible and oldest-message-age", () => {
-    template.resourceCountIs("AWS::CloudWatch::Alarm", 4);
+  test("all four DLQs (account command, transfer command, fee command, points command) have alarms on messages-visible and oldest-message-age", () => {
+    // docs/adr/0024でFeeCommandDlq/PointsCommandDlqにも同じaddDlqAlarmsを適用したため、
+    // 4キュー×2アラーム=8件になった。
+    template.resourceCountIs("AWS::CloudWatch::Alarm", 8);
     // DimensionsのValueはキュー論理IDへのFn::GetAtt(QueueName)であり、キュー名の文字列
     // リテラルとしては現れない(CDKの`metricApproximateNumberOfMessagesVisible`の実際の
     // 出力を実行して確認済み)。どのキューかまでは論理IDから間接的にしか分からないため、
-    // ここでは「両メトリクスとも2件ずつ(account用・transfer用)存在する」ことだけを確認する。
+    // ここでは「両メトリクスとも4件ずつ(account/transfer/fee/points用)存在する」ことだけを
+    // 確認する。
     for (const metricName of ["ApproximateNumberOfMessagesVisible", "ApproximateAgeOfOldestMessage"]) {
       template.hasResourceProperties("AWS::CloudWatch::Alarm", {
         MetricName: metricName,
@@ -286,7 +310,7 @@ describe("AccountPipelineStack", () => {
       const matches = template.findResources("AWS::CloudWatch::Alarm", {
         Properties: { MetricName: metricName },
       });
-      expect(Object.keys(matches)).toHaveLength(2);
+      expect(Object.keys(matches)).toHaveLength(4);
     }
   });
 
