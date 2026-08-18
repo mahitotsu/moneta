@@ -1,7 +1,19 @@
-import { Bank, ChevronLeft, LogOut } from "./icons";
+import { Bank, ChevronLeft, LogOut, Star } from "./icons";
 
-/** サインイン後の全画面で共通の「銀行アプリらしい」ヘッダー(docs/adr/0009の顧客体験再現)。 */
-export function BrandAppBar({ customerName, onSignOut }: { customerName: string; onSignOut: () => void }) {
+/**
+ * サインイン後の全画面で共通の「銀行アプリらしい」ヘッダー(docs/adr/0009の顧客体験再現)。
+ * `pointsBalance`(docs/adr/0025)は`undefined`(読み込み中)の間は何も表示しない——チラつきを
+ * 避けるため、0ptの確定値が返るまでバッジ自体を出さない。
+ */
+export function BrandAppBar({
+  customerName,
+  pointsBalance,
+  onSignOut,
+}: {
+  customerName: string;
+  pointsBalance?: string;
+  onSignOut: () => void;
+}) {
   return (
     <header className="appbar">
       <div className="appbar-brand">
@@ -13,6 +25,12 @@ export function BrandAppBar({ customerName, onSignOut }: { customerName: string;
           <span className="appbar-greeting">{customerName} 様</span>
         </div>
       </div>
+      {pointsBalance !== undefined && (
+        <span className="appbar-points" aria-label={`保有ポイント ${pointsBalance}pt`}>
+          <Star />
+          {pointsBalance}pt
+        </span>
+      )}
       <button type="button" className="appbar-action" onClick={onSignOut} aria-label="サインアウト">
         <LogOut />
       </button>

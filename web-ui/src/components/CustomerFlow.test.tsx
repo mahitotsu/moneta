@@ -23,6 +23,7 @@ vi.mock("../api/client", () => ({
   confirmTransfer: vi.fn(),
   cancelTransfer: vi.fn(),
   recallTransfer: vi.fn(),
+  getMyPoints: vi.fn(),
 }));
 
 const { getCurrentSession } = await import("../auth");
@@ -33,6 +34,7 @@ const {
   getTransactionHistory,
   getMyTransfers,
   getTransferStatus,
+  getMyPoints,
 } = await import("../api/client");
 
 const getCurrentSessionMock = vi.mocked(getCurrentSession);
@@ -42,6 +44,7 @@ const getAccountNumberMock = vi.mocked(getAccountNumber);
 const getTransactionHistoryMock = vi.mocked(getTransactionHistory);
 const getMyTransfersMock = vi.mocked(getMyTransfers);
 const getTransferStatusMock = vi.mocked(getTransferStatus);
+const getMyPointsMock = vi.mocked(getMyPoints);
 
 afterEach(cleanup);
 
@@ -72,6 +75,9 @@ function renderApp() {
   getTransactionHistoryMock.mockResolvedValue([]);
   getMyTransfersMock.mockResolvedValue([TRANSFER]);
   getTransferStatusMock.mockResolvedValue(TRANSFER);
+  // docs/adr/0025: BrandAppBarが常時呼ぶようになったフック。ポイント残高自体を主張しない
+  // 既存のテストに影響しない既定値。
+  getMyPointsMock.mockResolvedValue({ balance: "0" });
 
   const queryClient = createQueryClient({ retryDelay: 0 });
   render(

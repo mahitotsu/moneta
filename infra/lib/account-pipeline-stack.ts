@@ -441,6 +441,11 @@ export class AccountPipelineStack extends cdk.Stack {
     const transferCommandAuthorizer = new apigateway.CognitoUserPoolsAuthorizer(this, "TransferCommandAuthorizer", {
       cognitoUserPools: [userPool],
     });
+    // docs/adr/0025: PointsQueryApi専用。同じuserPoolを指す別々のAuthorizerが要る理由は上記の
+    // コメントの通り。
+    const pointsQueryAuthorizer = new apigateway.CognitoUserPoolsAuthorizer(this, "PointsQueryAuthorizer", {
+      cognitoUserPools: [userPool],
+    });
 
     // --- [Query Service所有] 読み取りモデル(DynamoDB) -------------------------
     // account-serviceのaccountsテーブル(正規化された1口座1アイテム)をそのまま複製するの
@@ -1385,6 +1390,69 @@ export class AccountPipelineStack extends cdk.Stack {
       }),
     );
 
+    // --- [Points service所有] PointsQueryApi: GET /customers/me/points(docs/adr/0025) ------
+    // AccountNumberQueryApi([[0015-friendly-account-numbers-and-branch-and-other-bank-placeholder]])
+    // と同じ独立したRestApiとして新設する——points-serviceはaccount-domainにもtransfer-service
+    // にも依存しない独立サービスであり(docs/adr/0024決定1)、その照会APIも同じ独立性を保つ。
+    // ownerIdはリクエストパラメータではなくCognito JWTのsubクレームから取る
+    // (docs/adr/0016決定4の`GET /customers/me/accounts`と同じ形)。
+    const pointsQueryApiDynamoRole = new iam.Role(this, "PointsQueryApiDynamoRole", {
+      assumedBy: new iam.ServicePrincipal("apigateway.amazonaws.com"),
+    });
+    pointsQueryApiDynamoRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["dynamodb:GetItem"],
+        resources: [pointsTable.tableArn],
+      }),
+    );
+
+    const pointsQueryApi = new apigateway.RestApi(this, "PointsQueryApi", {
+      restApiName: "moneta-points-query-api",
+      deployOptions: { stageName: "prod" },
+    });
+
+    // 項目が存在しない(一度もポイントを獲得したことがない顧客)場合は404ではなく
+    // {"balance": "0"}を返す(docs/adr/0025決定1)——ヘッダーに常に何かを表示したいという
+    // 決定2の要件に対する自然な既定値であり、points-service自身も「存在しない項目=残高0」
+    // という扱いを`ledger::reserve`/`credit`で既にしている(docs/adr/0024)。
+    const getMyPointsIntegration = new apigateway.AwsIntegration({
+      service: "dynamodb",
+      action: "GetItem",
+      options: {
+        credentialsRole: pointsQueryApiDynamoRole,
+        passthroughBehavior: apigateway.PassthroughBehavior.NEVER,
+        requestTemplates: {
+          "application/json": JSON.stringify({
+            TableName: pointsTable.tableName,
+            Key: {
+              ownerId: { S: "$context.authorizer.claims.sub" },
+            },
+          }),
+        },
+        integrationResponses: [
+          {
+            statusCode: "200",
+            responseTemplates: {
+              "application/json": [
+                '#if($input.path("$.Item") == "")',
+                '{"balance": "0"}',
+                "#else",
+                '{"balance": "$input.path("$.Item.balance.S")"}',
+                "#end",
+              ].join("\n"),
+            },
+          },
+        ],
+      },
+    });
+
+    const myPointsResource = pointsQueryApi.root.addResource("customers").addResource("me").addResource("points");
+    myPointsResource.addMethod("GET", getMyPointsIntegration, {
+      methodResponses: [{ statusCode: "200" }],
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+      authorizer: pointsQueryAuthorizer,
+    });
+
     // ==========================================================================
     // Fee service (docs/adr/0024) — 振込手数料のポリシー(金額決定・ポイント充当の可否判断)。
     // account-domainにもaccount-serviceにも一切依存しない・一切話しかけない——現金負担分は
@@ -1985,6 +2053,20 @@ export class AccountPipelineStack extends cdk.Stack {
       ),
     });
 
+    // docs/adr/0025。
+    const pointsQueryApiPrefixFunction = new cloudfront.Function(this, "PointsQueryApiPrefixFunction", {
+      runtime: cloudfront.FunctionRuntime.JS_2_0,
+      code: cloudfront.FunctionCode.fromInline(
+        [
+          "function handler(event) {",
+          "  var request = event.request;",
+          '  request.uri = request.uri.replace(/^\\/points-query-api/, "") || "/";',
+          "  return request;",
+          "}",
+        ].join("\n"),
+      ),
+    });
+
     // CloudFrontはデフォルトで任意ヘッダーをオリジンへ転送しないため、Idempotency-Key
     // (ADR-0006決定3)を明示的に転送する(command-apiのみ必要)。
     const commandApiOriginRequestPolicy = new cloudfront.OriginRequestPolicy(this, "CommandApiOriginRequestPolicy", {
@@ -2060,6 +2142,13 @@ export class AccountPipelineStack extends cdk.Stack {
             { function: accountNumberQueryApiPrefixFunction, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST },
           ],
         },
+        "/points-query-api/*": {
+          origin: new origins.RestApiOrigin(pointsQueryApi),
+          cachePolicy: authCachePolicy,
+          functionAssociations: [
+            { function: pointsQueryApiPrefixFunction, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST },
+          ],
+        },
       },
       defaultRootObject: "index.html",
     });
@@ -2118,6 +2207,7 @@ export class AccountPipelineStack extends cdk.Stack {
     new cdk.CfnOutput(this, "PointsCommandQueueUrl", { value: pointsCommandQueue.queueUrl });
     new cdk.CfnOutput(this, "PointsCommandIntakeFunctionName", { value: pointsCommandIntakeFn.functionName });
     new cdk.CfnOutput(this, "PointsOutboxProjectorFunctionName", { value: pointsOutboxProjectorFn.functionName });
+    new cdk.CfnOutput(this, "PointsQueryApiUrl", { value: pointsQueryApi.url });
     new cdk.CfnOutput(this, "FeeReservationsTableName", { value: feeReservationsTable.tableName });
     new cdk.CfnOutput(this, "FeeCommandQueueUrl", { value: feeCommandQueue.queueUrl });
     new cdk.CfnOutput(this, "FeeCommandIntakeFunctionName", { value: feeCommandIntakeFn.functionName });

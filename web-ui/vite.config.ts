@@ -35,6 +35,7 @@ export default defineConfig(({ mode }) => {
         ...apiProxy(env.VITE_TRANSFER_QUERY_API_URL, "/transfer-query-api"),
         ...apiProxy(env.VITE_TRANSFER_COMMAND_API_URL, "/transfer-command-api"),
         ...apiProxy(env.VITE_ACCOUNT_NUMBER_QUERY_API_URL, "/account-number-query-api"),
+        ...apiProxy(env.VITE_POINTS_QUERY_API_URL, "/points-query-api"),
       },
     },
     test: {

@@ -12,16 +12,21 @@ vi.mock("../api/client", () => ({
   getAccountNumber: vi.fn(),
   getMyAccounts: vi.fn(),
   getMyTransfers: vi.fn(),
+  getMyPoints: vi.fn(),
 }));
 
-const { getAccountNumber, getMyAccounts, getMyTransfers } = await import("../api/client");
+const { getAccountNumber, getMyAccounts, getMyTransfers, getMyPoints } = await import("../api/client");
 const getAccountNumberMock = vi.mocked(getAccountNumber);
 const getMyAccountsMock = vi.mocked(getMyAccounts);
 const getMyTransfersMock = vi.mocked(getMyTransfers);
+const getMyPointsMock = vi.mocked(getMyPoints);
 getMyTransfersMock.mockResolvedValue([]);
 // 各送金カードの宛先口座番号(docs/adr/0019)。個々のテストは口座番号の表示自体を
 // 主張しないため、AccountView.test.tsxと同じく未反映(null)のまま固定しておく。
 getAccountNumberMock.mockResolvedValue(null);
+// docs/adr/0025: BrandAppBarが常時呼ぶようになったフック。ポイント残高自体を主張しない
+// 既存のテストに影響しない既定値。
+getMyPointsMock.mockResolvedValue({ balance: "0" });
 
 const ACCOUNTS: MyAccount[] = [
   { accountId: "11111111-1111-1111-1111-111111111111", openedAt: "2026-08-01T00:00:00Z" },

@@ -8,6 +8,7 @@ import { getAccountNumber, getMyAccounts, getMyTransfers } from "../api/client";
 import { signOut } from "../auth";
 import { formatCurrency, formatFriendlyAccountNumber } from "../format";
 import { TRANSFER_KIND_LABEL, TRANSFER_STATE_LABEL, type TransferState, type TransferStatusView } from "../api/types";
+import { usePointsBalance } from "../hooks/usePointsBalance";
 
 // useAccountと同じ間隔(docs/adr/0012決定6、口座一覧のbalanceQueriesと同じ考え方)。
 const POLL_INTERVAL_MS = 3000;
@@ -37,6 +38,7 @@ export function TransferListScreen({ customerName, onSelectTransfer, onSelectTab
   // "other-bank"は非機能なプレースホルダ(docs/adr/0015決定7)——選んでもTransferFormは出さず、
   // 案内文だけを表示する。バックエンド呼び出しは一切発生しない。
   const [openForm, setOpenForm] = useState<"furikae" | "furikomi" | "other-bank" | null>(null);
+  const { data: pointsBalance } = usePointsBalance();
 
   // どの口座が自分のものかはサーバー側のCustomerAccountsTable(docs/adr/0016決定4)から取る
   // (AccountListScreenと同じ理由)。
@@ -102,6 +104,7 @@ export function TransferListScreen({ customerName, onSelectTransfer, onSelectTab
     <>
       <BrandAppBar
         customerName={customerName}
+        pointsBalance={pointsBalance?.balance}
         onSignOut={() => {
           signOut();
           onSignedOut();

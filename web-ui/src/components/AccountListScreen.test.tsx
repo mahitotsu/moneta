@@ -15,12 +15,14 @@ vi.mock("../api/client", () => ({
   getMyAccounts: vi.fn(),
   getAccount: vi.fn(),
   getAccountNumber: vi.fn(),
+  getMyPoints: vi.fn(),
 }));
 
-const { getMyAccounts, getAccount, getAccountNumber } = await import("../api/client");
+const { getMyAccounts, getAccount, getAccountNumber, getMyPoints } = await import("../api/client");
 const getMyAccountsMock = vi.mocked(getMyAccounts);
 const getAccountMock = vi.mocked(getAccount);
 const getAccountNumberMock = vi.mocked(getAccountNumber);
+const getMyPointsMock = vi.mocked(getMyPoints);
 
 afterEach(cleanup);
 
@@ -29,6 +31,9 @@ afterEach(cleanup);
 // (マスクそのものの挙動は下の別describeで検証する)。
 beforeEach(() => {
   setBalanceHidden(false);
+  // docs/adr/0025: BrandAppBarが常時呼ぶようになったフック。ポイント残高自体を主張しない
+  // 既存のテストに影響しない既定値。
+  getMyPointsMock.mockResolvedValue({ balance: "0" });
 });
 
 function renderScreen() {

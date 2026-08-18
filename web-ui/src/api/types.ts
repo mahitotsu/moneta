@@ -62,6 +62,16 @@ export interface MyAccount {
 }
 
 /**
+ * `GET /customers/me/points`のレスポンス(docs/adr/0025)。`MyAccount`と同じくownerIdは
+ * 含まない(JWTのsubから常にサーバー側で決まる)。項目が存在しない(一度もポイントを
+ * 獲得したことがない顧客)場合もAPI側が`"0"`を返すため、この型に`null`は無い
+ * (docs/adr/0025決定1)。
+ */
+export interface PointsBalance {
+  balance: string;
+}
+
+/**
  * `GET /accounts/{id}/transactions`のレスポンス配列の要素
  * (query-service/src/history.rsのhistory_entry_from_eventが単一の真実源、docs/adr/0009)。
  * amountはopened/frozen/unfrozen/closedでは無い(null)——それらは金額の増減を伴わない。

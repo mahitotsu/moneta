@@ -311,6 +311,25 @@ button.secondary {
   white-space: nowrap;
 }
 
+.appbar-points {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.appbar-points svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+
 .appbar-title {
   font-weight: 700;
   font-size: 15px;

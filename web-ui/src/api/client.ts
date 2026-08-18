@@ -6,6 +6,7 @@ import type {
   CommandAcceptedResponse,
   FreezeReasonRequest,
   MyAccount,
+  PointsBalance,
   TransactionEntry,
   TransferStatusView,
 } from "./types";
@@ -20,6 +21,9 @@ const TRANSFER_QUERY_API_BASE = "/transfer-query-api";
 const TRANSFER_COMMAND_API_BASE = "/transfer-command-api";
 // 人間可読な口座番号(支店+7桁)の照会API(docs/adr/0015)。読み取り専用、他の2つとも別プレフィックス。
 const ACCOUNT_NUMBER_QUERY_API_BASE = "/account-number-query-api";
+// ポイント残高の照会API(docs/adr/0025)。points-serviceはaccount-domainにもtransfer-service
+// にも依存しない独立サービスであり、その照会APIも同じ独立性を保つため別プレフィックス。
+const POINTS_QUERY_API_BASE = "/points-query-api";
 
 // 画面にはHTTPステータスやレスポンス本文といった内部実装を一切出さず、業務的な文言だけを
 // 見せる。生の失敗内容は開発者向けにconsole.errorへ残す(このPoCにサーバーサイドの
@@ -191,6 +195,18 @@ export async function getMyAccounts(): Promise<MyAccount[]> {
     "getMyAccounts",
   );
   return response.json() as Promise<MyAccount[]>;
+}
+
+/** docs/adr/0025。`getMyAccounts`と同じ「ownerIdはJWTのsubから」という形だが、項目が
+ *  存在しない場合もAPI側が`{"balance": "0"}`を返すため404分岐は無い。 */
+export async function getMyPoints(): Promise<PointsBalance> {
+  const response = await fetchOrThrow(
+    `${POINTS_QUERY_API_BASE}/customers/me/points`,
+    { headers: await authHeaders() },
+    QUERY_FAILURE_MESSAGE,
+    "getMyPoints",
+  );
+  return response.json() as Promise<PointsBalance>;
 }
 
 /**

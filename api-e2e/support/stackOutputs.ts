@@ -38,10 +38,11 @@ export interface StackOutputs {
   // 顧客ごとの送金履歴(docs/adr/0017)。support/testDataCleanup.tsのcleanupTestDataが
   // テストで作った送金の後片付けに使う。
   customerTransfersTableName: string;
-  // 振込手数料とポイント(docs/adr/0024)。照会APIは無く(バックエンド専用)、
-  // support/pointsState.tsが直接DynamoDBを読む。
+  // 振込手数料とポイント(docs/adr/0024)。ポイント残高だけは照会API(docs/adr/0025)を持つが、
+  // 手数料の内訳はまだ無く、support/pointsState.tsが直接DynamoDBを読む。
   pointsTableName: string;
   feeReservationsTableName: string;
+  pointsQueryApiUrl: string;
 }
 
 const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
@@ -68,6 +69,7 @@ const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
   customerTransfersTableName: "CustomerTransfersTableName",
   pointsTableName: "PointsTableName",
   feeReservationsTableName: "FeeReservationsTableName",
+  pointsQueryApiUrl: "PointsQueryApiUrl",
 };
 
 export async function fetchStackOutputs(): Promise<StackOutputs> {

@@ -496,6 +496,43 @@ describe("AccountPipelineStack", () => {
     });
   });
 
+  // docs/adr/0025決定1: 項目が存在しない場合は404ではなく{"balance": "0"}を返す——
+  // ヘッダーに常に何かを表示したいという決定2の要件に対する既定値。
+  test("exposes GET /customers/me/points as a direct DynamoDB GetItem integration defaulting to balance 0", () => {
+    template.hasResourceProperties("AWS::ApiGateway::Method", {
+      HttpMethod: "GET",
+      Integration: Match.objectLike({
+        Type: "AWS",
+        IntegrationHttpMethod: "POST",
+        RequestTemplates: Match.objectLike({
+          "application/json": Match.objectLike({
+            "Fn::Join": Match.arrayWith([Match.arrayWith([Match.stringLikeRegexp("TableName"), Match.stringLikeRegexp("ownerId")])]),
+          }),
+        }),
+        IntegrationResponses: Match.arrayWith([
+          Match.objectLike({
+            ResponseTemplates: Match.objectLike({
+              "application/json": Match.stringLikeRegexp('"balance": "0"'),
+            }),
+          }),
+        ]),
+      }),
+    });
+  });
+
+  test("routes /points-query-api/* to the points query REST API (docs/adr/0025)", () => {
+    template.hasResourceProperties("AWS::CloudFront::Distribution", {
+      DistributionConfig: Match.objectLike({
+        CacheBehaviors: Match.arrayWith([
+          Match.objectLike({
+            PathPattern: "/points-query-api/*",
+            FunctionAssociations: Match.arrayWith([Match.objectLike({ EventType: "viewer-request" })]),
+          }),
+        ]),
+      }),
+    });
+  });
+
   // docs/adr/0006決定5: 金額の精度は小数点以下2桁まで(実デプロイでDBラウンドトリップ由来の
   // スケールのブレを発見したことを契機に、APIの仕様として明示した)。3桁以上はAPI Gatewayの
   // リクエスト検証で構造的に拒否する(account-domainのAMOUNT_DECIMAL_PLACESと合わせる)。
@@ -591,13 +628,13 @@ describe("AccountPipelineStack", () => {
 
   // CDKのCognitoUserPoolsAuthorizerは1つのインスタンスを複数のRestApiへまたがって使うと
   // "Cannot attach authorizer to two different rest APIs"でsynth自体が失敗する(cdk synth時点で
-  // 判明した実際の制約)。5つのRestApi(AccountQueryApi・AccountCommandApi・TransferQueryApi・
-  // TransferCommandApi・AccountNumberQueryApi)それぞれに1つずつ、同じuserPoolを指す別々の
-  // Authorizerリソースを持つ。
-  test("one Cognito User Pools authorizer per protected REST API (5 total), all backed by the same User Pool", () => {
+  // 判明した実際の制約)。6つのRestApi(AccountQueryApi・AccountCommandApi・TransferQueryApi・
+  // TransferCommandApi・AccountNumberQueryApi・PointsQueryApi[docs/adr/0025])それぞれに1つずつ、
+  // 同じuserPoolを指す別々のAuthorizerリソースを持つ。
+  test("one Cognito User Pools authorizer per protected REST API (6 total), all backed by the same User Pool", () => {
     const authorizers = template.findResources("AWS::ApiGateway::Authorizer");
     const values = Object.values(authorizers);
-    expect(values).toHaveLength(5);
+    expect(values).toHaveLength(6);
     for (const authorizer of values) {
       expect(authorizer.Properties.Type).toBe("COGNITO_USER_POOLS");
     }
@@ -610,17 +647,17 @@ describe("AccountPipelineStack", () => {
   });
 
   // docs/adr/0016決定2: Deposit/Withdraw(外部チャネル、ADR-0009決定1)だけは認証を要求しない。
-  // それ以外の全メソッド(15個中13個 + GET /customers/me/accounts + 新設のGET
-  // /customers/me/transfers[docs/adr/0017] = 15個)はCognito認証必須にする——この非対称こそが
-  // 今回の変更の核心なので、個数を固定する。
-  test("15 of 17 API methods require Cognito auth; Deposit/Withdraw are the only two exceptions", () => {
+  // それ以外の全メソッド(15個中13個 + GET /customers/me/accounts + GET /customers/me/transfers
+  // [docs/adr/0017] + 新設のGET /customers/me/points[docs/adr/0025] = 16個)はCognito認証必須に
+  // する——この非対称こそが今回の変更の核心なので、個数を固定する。
+  test("16 of 18 API methods require Cognito auth; Deposit/Withdraw are the only two exceptions", () => {
     const methods = template.findResources("AWS::ApiGateway::Method");
     const allMethods = Object.values(methods);
     const authorized = allMethods.filter((m) => m.Properties?.AuthorizationType === "COGNITO_USER_POOLS");
     const unauthorized = allMethods.filter((m) => m.Properties?.AuthorizationType !== "COGNITO_USER_POOLS");
 
-    expect(allMethods).toHaveLength(17);
-    expect(authorized).toHaveLength(15);
+    expect(allMethods).toHaveLength(18);
+    expect(authorized).toHaveLength(16);
     expect(unauthorized).toHaveLength(2);
     // 認証なしの2つが、まさにdeposits/withdrawalsのSQS統合であることを確認する
     // (Uriにキューの論理IDが現れる、既存のtransfer command API判定テストと同じ手法)。
@@ -700,16 +737,21 @@ describe("AccountPipelineStack", () => {
     }
   });
 
-  test("all 5 customer-facing CloudFront behaviors use the Authorization-forwarding CachePolicy, not the AWS-managed CachingDisabled policy", () => {
+  test("all 6 customer-facing CloudFront behaviors use the Authorization-forwarding CachePolicy, not the AWS-managed CachingDisabled policy", () => {
     const distributions = template.findResources("AWS::CloudFront::Distribution");
     const [distribution] = Object.values(distributions);
     const behaviors = distribution.Properties.DistributionConfig.CacheBehaviors as { PathPattern: string; CachePolicyId: unknown }[];
     const apiBehaviors = behaviors.filter((b) =>
-      ["/query-api/*", "/command-api/*", "/transfer-query-api/*", "/transfer-command-api/*", "/account-number-query-api/*"].includes(
-        b.PathPattern,
-      ),
+      [
+        "/query-api/*",
+        "/command-api/*",
+        "/transfer-query-api/*",
+        "/transfer-command-api/*",
+        "/account-number-query-api/*",
+        "/points-query-api/*",
+      ].includes(b.PathPattern),
     );
-    expect(apiBehaviors).toHaveLength(5);
+    expect(apiBehaviors).toHaveLength(6);
     for (const behavior of apiBehaviors) {
       expect(JSON.stringify(behavior.CachePolicyId)).not.toContain("4135ea2d-6df8-44a3-9df3-4b5a84be39ad");
     }

@@ -8,6 +8,7 @@ import { getAccount, getAccountNumber, getMyAccounts } from "../api/client";
 import { MASKED_BALANCE, formatCurrency, formatFriendlyAccountNumber } from "../format";
 import { signOut } from "../auth";
 import { useBalanceHidden } from "../hooks/useBalanceVisibility";
+import { usePointsBalance } from "../hooks/usePointsBalance";
 
 const STATUS_LABEL: Record<string, string> = { active: "有効", frozen: "凍結中", closed: "解約済み" };
 const STATUS_BADGE_CLASS: Record<string, string> = {
@@ -33,6 +34,7 @@ export function AccountListScreen({ customerName, onSelectAccount, onSelectTab, 
   // 口座詳細(AccountView)と共有する残高マスクの状態。以前は詳細画面にしか目アイコンが
   // 無く、この一覧では合計残高・各口座カードの残高が常時平文表示だった(改善前の問題)。
   const [balanceHidden, toggleBalanceHidden] = useBalanceHidden();
+  const { data: pointsBalance } = usePointsBalance();
 
   // 「どの口座を自分が持っているか」はもうlocalStorageではなく、サーバー側の
   // CustomerAccountsTable(docs/adr/0016決定4)——ownerIdはCognito JWTのsubから
@@ -73,6 +75,7 @@ export function AccountListScreen({ customerName, onSelectAccount, onSelectTab, 
     <>
       <BrandAppBar
         customerName={customerName}
+        pointsBalance={pointsBalance?.balance}
         onSignOut={() => {
           signOut();
           onSignedOut();
