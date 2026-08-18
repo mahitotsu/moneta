@@ -257,9 +257,33 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
   projector (whose `fee.event.FeeReserved` must deserialize into `account-domain`'s
   `EventEnvelope`, the one thing it still needs to match despite depending on nothing) round-trips
   through a real `OffsetDateTime` rather than hand-formatting a string. `api-e2e` gained
-  `scenarios/transfer-fee-and-points.e2e.test.ts` (award/redemption/refund, reading the
-  no-query-API `PointsTable`/`FeeReservationsTable` directly via a new `support/pointsState.ts`,
-  same backdoor-but-legitimate stance as `support/sagaState.ts`).
+  `scenarios/transfer-fee-and-points.e2e.test.ts` (award/redemption/refund, reading
+  `PointsTable`/`FeeReservationsTable` directly via a new `support/pointsState.ts` — at the time
+  neither had a query API yet, see `0025` — same backdoor-but-legitimate stance as
+  `support/sagaState.ts`). Known gap surfaced by `docs/decision-tables.md`: the `Compensating`→
+  `Compensated` path's `RefundFee` (as opposed to the `PendingDebit`-rejected path's) is unit-
+  tested only, never exercised end-to-end.
+- `0025`: closes a gap `0024` deliberately deferred — `points-service`'s `PointsTable` had no
+  query API at all, so a customer's points balance was invisible everywhere, defeating the
+  feature's own point (motivating engagement via points nobody can see). Adds `PointsQueryApi`
+  (`GET /customers/me/points`, Lambda-less DynamoDB `GetItem`, ownerId from the Cognito JWT `sub`
+  claim — same shape as `0016` decision 4's `GET /customers/me/accounts` — returning
+  `{"balance": "0"}` instead of 404 when the customer has never earned any, matching
+  `points-service`'s own "missing item = balance 0" treatment) and a `usePointsBalance()` hook
+  feeding a badge in `BrandAppBar` (the header on the account-list/transfer-list screens, not
+  `DetailAppBar`'s deliberately minimal detail screens, `0022`). Also threads
+  `TransferSaga.cash_fee` (already existed since `0024`) through `transfer-status-projector.rs`
+  into `TransferStatusView` so `TransferDetailScreen` can show the fee — a decision the ADR's own
+  first draft described but initially failed to actually implement, caught only when the user
+  found no fee visible anywhere; a second real-deployment bug followed the same thread (existing
+  `TransferStatusView` items predating `cash_fee` lack the attribute entirely — DynamoDB doesn't
+  backfill schema changes, the same gotcha `0011` hit with `owner_id` — and the VTL's
+  `$input.path` on that missing attribute silently returned `""` rather than throwing, rendering
+  as a bare "¥" client-side; fixed with a `#if`/`#else` defaulting to `"0"`). Final design,
+  reached after a second round of user feedback: show the fee line whenever `cashFee` is present
+  **at all**, `¥0` included, rather than hiding it at zero — hiding it made "no fee for this kind
+  of transfer" indistinguishable from "fee data unavailable," which defeated the point of adding
+  the field in the first place.
 
 ## Commands
 
@@ -348,9 +372,16 @@ publish events even accidentally. `transfer-service` (ADR-0010) is a fourth crat
 cross-account transfer saga; like `query-service` it depends only on `account-domain` (not
 `account-service`) — it talks to account-service exclusively through the same public interface
 any other caller would use (SQS `SendMessage` against account-service's command queue,
-EventBridge subscription for the results), never through shared code or a shared database. If
-you're about to add a non-domain dependency to `account-domain`, or reach into another crate's
-persistence internals from `query-service` or `transfer-service`, stop — it belongs elsewhere.
+EventBridge subscription for the results), never through shared code or a shared database.
+
+Three more crates go further and depend on **nothing account-related at all** (not even
+`account-domain`) — `auth-service` (ADR-0016), `points-service`, and `fee-service` (both
+ADR-0024). `points-service` is the leaf of a one-way **usage** chain
+`transfer-service` → `fee-service` → `points-service` — SQS commands and EventBridge events only,
+never a Cargo dependency in either direction, the same boundary `account-service`/
+`transfer-service` already draw. If you're about to add a non-domain dependency to
+`account-domain`, or reach into another crate's persistence internals from `query-service`,
+`transfer-service`, `fee-service`, or `points-service`, stop — it belongs elsewhere.
 
 ### Domain model conventions (`account-domain`)
 

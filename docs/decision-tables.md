@@ -53,21 +53,28 @@
 
 ## TransferSaga: 状態 × トリガー
 
-[saga.rs](../crates/transfer-service/src/saga.rs)の`confirm`/`cancel`/`advance`を機械的に列挙。
-`Observed(Accepted/Rejected)`は`expected_step`が`None`を返す状態(終端状態・`PendingConfirmation`)
-には通常到達しない(呼び出し側が観測ロジックの対象にしない)ため、その行は防御的no-opとして
-コードに存在するのみ。
+[saga.rs](../crates/transfer-service/src/saga.rs)の`confirm`/`cancel`/`advance`/
+`reserve_fee_observed`を機械的に列挙。[[0024-rewards-service-fee-and-points]]で
+`ReservingFee`状態と`reserve_fee_observed`(専用トリガー`FeeReserved`)を追加したため
+更新した(2026-08-18、この決定表を先に更新してから`docs/e2e-scenarios.md`へ反映する運用、
+本ファイル末尾の規約通り)。`Observed(Accepted/Rejected)`は`expected_step`が`None`を返す状態
+(終端状態・`PendingConfirmation`)には通常到達しない(呼び出し側が観測ロジックの対象にしない)
+ため、その行は防御的no-opとしてコードに存在するのみ——`ReservingFee`も同じ理由で
+`Observed(*)`は防御的no-opであり、実際の遷移は専用の`FeeReserved`トリガー
+(`reserve_fee_observed`)が担う。`furikae`/`recall`は`cash_fee`/`points_used`が常に`ZERO`の
+ため`ReservingFee`を経由せず`start()`が直接`PendingDebit`へ進む(表には現れない)。
 
-| 状態 \ トリガー | Confirm | Cancel | Observed(Accepted) | Observed(Rejected) |
-|---|---|---|---|---|
-| **PendingConfirmation** | ✅ → PendingDebit | ✅ → Cancelled | 🔸 no-op(防御的) | 🔸 no-op(防御的) |
-| **PendingDebit** | ❌ Err(NotPendingConfirmation) | ❌ Err(NotPendingConfirmation) | ✅ → PendingCredit | ✅ → Failed |
-| **PendingCredit** | ❌ Err(NotPendingConfirmation) | ❌ Err(NotPendingConfirmation) | ✅ → Credited | ✅ → Compensating |
-| **Compensating** | ❌ Err(NotPendingConfirmation) | ❌ Err(NotPendingConfirmation) | ✅(R6/旧J3に内包) → Compensated | 🔸 no-op(意図的にスコープ外、R7) |
-| **Credited**(終端) | ❌ | ❌ | 🔸 no-op(防御的) | 🔸 no-op(防御的) |
-| **Compensated**(終端) | ❌ | ❌ | 🔸 | 🔸 |
-| **Failed**(終端) | ❌ | ❌ | 🔸 | 🔸 |
-| **Cancelled**(終端) | ❌ | ❌ | 🔸 | 🔸 |
+| 状態 \ トリガー | Confirm | Cancel | FeeReserved | Observed(Accepted) | Observed(Rejected) |
+|---|---|---|---|---|---|
+| **PendingConfirmation** | ✅ → ReservingFee(`IssueReserveFee`発行) | ✅ → Cancelled | - | 🔸 no-op(防御的) | 🔸 no-op(防御的) |
+| **ReservingFee** | ❌ Err(NotPendingConfirmation) | ❌ Err(NotPendingConfirmation) | ✅ → PendingDebit(送金額+現金負担分の手数料で`Withdraw`) | 🔸 no-op(防御的、`advance`経由では到達しない設計) | 🔸 no-op(同左。`fee-service`は原資確保を拒否しない設計のため実際には届かない、決定3) |
+| **PendingDebit** | ❌ Err(NotPendingConfirmation) | ❌ Err(NotPendingConfirmation) | - | ✅ → PendingCredit | ✅ → Failed [furikomiなら`IssueRefundFee`も発行、✅] |
+| **PendingCredit** | ❌ Err(NotPendingConfirmation) | ❌ Err(NotPendingConfirmation) | - | ✅ → Credited [furikomiなら`IssueAwardPoints`も発行、✅] | ✅ → Compensating |
+| **Compensating** | ❌ Err(NotPendingConfirmation) | ❌ Err(NotPendingConfirmation) | - | ✅(R6/旧J3に内包) → Compensated [furikomiなら`IssueRefundFee`も発行、❌**未検証**] | 🔸 no-op(意図的にスコープ外、R7) |
+| **Credited**(終端) | ❌ | ❌ | - | 🔸 no-op(防御的) | 🔸 no-op(防御的) |
+| **Compensated**(終端) | ❌ | ❌ | - | 🔸 | 🔸 |
+| **Failed**(終端) | ❌ | ❌ | - | 🔸 | 🔸 |
+| **Cancelled**(終端) | ❌ | ❌ | - | 🔸 | 🔸 |
 
 ### この表で新たに見つかった穴
 
@@ -76,6 +83,12 @@
    二重確認・確認後のキャンセル試行といった、UIの二度押しやネットワーク再送で現実的に起こりうる
    操作。優先度は中程度(P2)だが、`R8`(複数発行元の同時競合)と近い性質の問題であり、
    実装コストは低い。
+6. **(2026-08-18追加)`Compensating`→`Compensated`遷移時の`IssueRefundFee`発行が、単体テスト
+   (`compensating_deposit_accepted_for_furikomi_refunds_the_fee_reservation`)のみでE2E未検証。**
+   `transfer-fee-and-points.e2e.test.ts`は「`PendingDebit`が却下されて`Failed`になる経路」の
+   ポイント返却だけを検証しており、「送金先の入金が却下されて`Compensating`→`Compensated`に
+   なる経路」でも同様にポイントが返却されることは、実デプロイに対して一度も確認していない。
+   受取人側の口座を凍結/解約してから振込むことで再現できる見込み。
 
 ---
 
@@ -119,7 +132,7 @@
 
 ---
 
-## まとめ: 見つかった5件
+## まとめ: 見つかった6件
 
 | # | 内容 | 優先度 | 影響する既存文書 |
 |---|---|---|---|
@@ -128,6 +141,7 @@
 | 3 | 精度超過のDeposit/WithdrawがE2E未到達 | P1(FC7として既知、この表で再確認)。**構造的に到達不能と結論**——APIGWの構造検証が先に4xx拒否するため、単体テストのみで妥当 | 既存の`production-readiness-matrix.md` FC7と同一 |
 | 4 | ~~`Confirm`/`Cancel`の二重操作拒否がE2E未検証~~ → **対応済み(2026-08-10)** | 済 | `transfer-furikomi.e2e.test.ts`にFC14として追加、ライブスタックに対して実行・合格確認済み(2026-08-12) |
 | 5 | ~~`RecallError::NotFurikomi`がE2E未検証~~ → **対応済み(2026-08-10)** | 済 | `transfer-recall.e2e.test.ts`にFC15として追加、ライブスタックに対して実行・合格確認済み(2026-08-12) |
+| 6 | (2026-08-18追加、未対応)`Compensating`→`Compensated`遷移時の`IssueRefundFee`発行がE2E未検証 | P2(受取人側の口座を凍結/解約してから振込む必要があり、既存のFC10-FC12のセットアップより一手間多い) | `docs/adr/0024`、`transfer-fee-and-points.e2e.test.ts`(現状は`PendingDebit`却下経路のみ検証) |
 
 **重要な副産物**: 今回の作業で、`e2e-scenarios.md`のFC3の記述自体が実態より広い保証を謳っていた
 (#1)ことが判明した。プロースのシナリオ記述は「書いた時点では正しいつもりでも、実装の詳細までは
