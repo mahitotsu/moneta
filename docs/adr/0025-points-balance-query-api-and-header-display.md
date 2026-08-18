@@ -35,8 +35,15 @@ Accepted。`infra/lib/account-pipeline-stack.ts`(`PointsQueryApi`新規、CloudF
 `owner_id`導入時と同じ既知の現象)、②それに加えて自分のVTL側の不備で、属性が存在しない場合に
 `$input.path(...)`が返す空文字列をそのまま`"cashFee":""`としてしまい、
 `formatCurrency("")`が「¥」だけの壊れた表示になっていた。②を`#if`による`"0"`への
-フォールバックとして修正し(振替・組戻しと同じ「手数料なし」表示に収束する)、実際に壊れて
-見えていた送金IDに対して修正後のAPIレスポンスが`"cashFee":"0"`になることを直接確認した。
+フォールバックとして修正し、実際に壊れて見えていた送金IDに対して修正後のAPIレスポンスが
+`"cashFee":"0"`になることを直接確認した。
+
+**追記3(同日)**: この時点ではまだ`TransferDetailScreen.tsx`側が`cashFee !== "0"`の場合
+だけ行を表示する設計(決定3の初版)のままだったため、修正の結果「手数料の行自体が消えた」
+状態になった。ユーザーから「0円のときは非表示なのか」と問われ、さらに「手数料という概念が
+導入されている以上、¥0が明示的に表示されるべきではないか」という指摘を受けて設計を再考し、
+決定3を「`cashFee`が存在する限り`"0"`でも明示的に表示する」へ変更した(本文は最新版に更新
+済み)。
 
 ## コンテキスト
 
@@ -92,8 +99,14 @@ Accepted。`infra/lib/account-pipeline-stack.ts`(`PointsQueryApi`新規、CloudF
 →`TransferStatusView`への既存の投影、`[[0012-transfer-customer-api-and-status-query]]`決定1)
 が`cashFee`も転記するよう1行足すだけで、`GET /transfers/{transferId}`のレスポンスに乗る。
 
-`TransferDetailScreen.tsx`は`cashFee`が存在し、かつ`"0"`でない場合(=実際に現金負担が
-発生した振込)だけ「手数料」の行を表示する。振替・組戻しは常に`"0"`のため何も出ない。
+`TransferDetailScreen.tsx`は`cashFee`が存在する限り(`GET /transfers/{transferId}`由来なら
+常に存在する、決定2のVTL参照)、`"0"`でも「手数料 ¥0」と明示的に表示する——`"0"`だから隠す
+設計を最初は採ったが、実機確認で「0円だから非表示なのか、データが無いから非表示なのか
+見分けがつかず、かえって不透明」という指摘を受けて撤回した。手数料という概念がシステムに
+存在する以上、振替・組戻し・`cashFee`導入前の既存送金も含めて「¥0」を明示する方が透明性が
+高いと判断した——`cashFee`自体が存在しない(`GET /customers/me/transfers`一覧由来を
+`TransferDetailScreen`が受け取った場合等)ときだけ、行そのものを出さない。
+
 `GET /customers/me/transfers`(一覧、`CustomerTransfersTable`)には`cashFee`を追加しない——
 一覧を手数料でごちゃつかせない意図的な選択で、詳細画面だけが持てば足りる。
 

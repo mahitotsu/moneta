@@ -92,9 +92,12 @@ describe("J5: 振込の確認待ちでは確認/取消ボタンを出す", () =>
 });
 
 // docs/adr/0025: transfer-status-projectorがcashFeeを投影するようになったのに、
-// 送金詳細画面が一度もそれを表示していなかったギャップを埋める。
-describe("docs/adr/0025: 現金負担分の手数料が実際にかかった振込にだけ表示する", () => {
-  it("cashFeeが0でない場合、手数料の行を表示する", async () => {
+// 送金詳細画面が一度もそれを表示していなかったギャップを埋める。当初は0円のとき行自体を
+// 隠す設計にしたが、「手数料という概念がある以上、0円だからなのかデータが無いから
+// なのか見分けがつかないのはかえって不透明」という指摘を受け、cashFeeが取得できて
+// いる限り0円でも明示的に表示する設計へ変更した。
+describe("docs/adr/0025: cashFeeが取得できている限り、0円でも明示的に表示する", () => {
+  it("cashFeeが0でない場合、その金額を表示する", async () => {
     getTransferStatusMock.mockResolvedValue(view({ amount: "300", cashFee: "120" }));
 
     renderDetail("t-1");
@@ -105,7 +108,7 @@ describe("docs/adr/0025: 現金負担分の手数料が実際にかかった振�
     expect(screen.getByText("¥120")).toBeTruthy();
   });
 
-  it("cashFeeが0の場合(振替・組戻し、または手数料原資確保前の振込)、手数料の行を出さない", async () => {
+  it("cashFeeが0の場合(振替・組戻し、またはcashFee導入前の既存送金)、¥0と明示的に表示する", async () => {
     getTransferStatusMock.mockResolvedValue(view({ kind: "furikae", cashFee: "0" }));
 
     renderDetail("t-1");
@@ -113,10 +116,11 @@ describe("docs/adr/0025: 現金負担分の手数料が実際にかかった振�
     await waitFor(() => {
       expect(screen.getByText(TRANSFER_KIND_LABEL.furikae)).toBeTruthy();
     });
-    expect(screen.queryByText("手数料")).toBeNull();
+    expect(screen.getByText("手数料")).toBeTruthy();
+    expect(screen.getByText("¥0")).toBeTruthy();
   });
 
-  it("cashFeeが無い(GET /customers/me/transfers由来を模したデータの)場合も、手数料の行を出さない", async () => {
+  it("cashFeeが無い(GET /customers/me/transfers由来を模したデータの)場合のみ、手数料の行を出さない", async () => {
     const { cashFee: _cashFee, ...withoutCashFee } = view({});
     getTransferStatusMock.mockResolvedValue(withoutCashFee as TransferStatusView);
 

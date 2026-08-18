@@ -177,10 +177,14 @@ export function TransferDetailScreen({ transferId, onBack, onSelectTab, onRecall
                     </>
                   )}
                 </dd>
-                {/* docs/adr/0025: 振込のみ・手数料が実際に現金負担された場合だけ表示する
-                    (振替・組戻し・まだ手数料原資確保前は"0"のまま、dataがcashFeeを持たない
-                    GET /customers/me/transfers由来の場合も同様に何も出さない)。 */}
-                {data.cashFee !== undefined && data.cashFee !== "0" && (
+                {/* docs/adr/0025: cashFeeが取得できている限り、0円でも明示的に「¥0」と表示する
+                    (行自体を隠さない)。手数料という概念がシステムに存在する以上、「0円だから
+                    非表示」と「データが無いから非表示」が見分けられない状態はかえって
+                    不透明だという指摘を受けての判断——振替・組戻し・cashFee導入前の
+                    既存送金は¥0、実際に現金負担が発生した振込はその金額を表示する。
+                    dataがcashFeeを持たない(GET /customers/me/transfers由来)場合のみ何も
+                    出さない。 */}
+                {data.cashFee !== undefined && (
                   <>
                     <dt>手数料</dt>
                     <dd>{formatCurrency(data.cashFee)}</dd>
