@@ -9,7 +9,12 @@ Accepted。`crates/points-service`(`src/history.rs`新規、`src/persistence.rs`
 `AppBar.tsx`(ポイントバッジをボタン化)・`CustomerFlow.tsx`。
 
 cargo test/clippy(全crate)、infra CDK synthテスト(44件)、web-ui vitest(62件)がすべて
-green。デプロイ・ライブ検証は次のステップ。
+green。デプロイ後、実デプロイ済みスタックに対して検証済み(2026-08-19):
+`points-query.e2e.test.ts`(振込受取による付与が正しい種別・金額・transferIdで見える、
+未認証401)、`transfer-fee-and-points.e2e.test.ts`(充当・`PendingDebit`却下時と
+`Compensating`経路それぞれの返却が履歴に残る)がいずれもgreen。`AwardPoints`のワイヤー形状
+変更(`transfer_id`追加)による回帰も`transfer-furikomi.e2e.test.ts`/
+`transfer-recall.e2e.test.ts`で確認済み。
 
 ## コンテキスト
 
