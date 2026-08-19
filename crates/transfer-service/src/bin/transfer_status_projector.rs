@@ -40,6 +40,10 @@ struct SagaImage {
     /// ため必須フィールドとして扱える(docs/adr/0025で送金詳細画面に表示するために追加)。
     #[serde(rename = "cashFee")]
     cash_fee: String,
+    /// 振込の手数料のうちポイントで充当した分(docs/adr/0025決定4)。`cash_fee`と同じく
+    /// `saga_to_item`が常に含めるため必須フィールドとして扱える。
+    #[serde(rename = "pointsUsed")]
+    points_used: String,
 }
 
 #[tokio::main]
@@ -97,6 +101,7 @@ async fn project_one(dynamodb: &Client, table_name: &str, record: &EventRecord) 
         .item("state", AttributeValue::S(image.state))
         .item("updatedAt", AttributeValue::S(image.updated_at))
         .item("cashFee", AttributeValue::S(image.cash_fee))
+        .item("pointsUsed", AttributeValue::S(image.points_used))
         .send()
         .await?;
     Ok(())

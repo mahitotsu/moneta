@@ -222,10 +222,10 @@ Then 送金額に加えて固定額の手数料(220円)が送金元から徴収�
 原資(ポイント/現金の内訳)は送金額そのものの出金より先に確保され、その後の出金が残高不足で
 失敗した場合、または送金先の入金が却下されて補償(`Compensating`)される場合のいずれも、
 消費したポイントが全額返却される。着金した受取人には送金額の0.1%相当のポイントが付与される。
-送金詳細画面(`GET /transfers/{transferId}`)には現金負担分の手数料が振替・組戻しも含め常に
-(0円でも)表示される
+送金詳細画面(`GET /transfers/{transferId}`)には手数料の合計・ポイント充当分・現金負担分が
+振替・組戻しも含め常に(0円/0ptでも)表示される
 → [[0024-rewards-service-fee-and-points]]決定1〜8、
-[[0025-points-balance-query-api-and-header-display]]決定1〜3 — **P0** —
+[[0025-points-balance-query-api-and-header-display]]決定1〜4 — **P0** —
 `transfer-fee-and-points.e2e.test.ts`(手数料徴収・ポイント充当・`PendingDebit`却下時と
 `Compensating`経路それぞれでの返却)・`points-query.e2e.test.ts`(`GET /customers/me/points`の
 未獲得時0円・未認証401・実際の付与反映)・`transfer-furikomi.e2e.test.ts`/

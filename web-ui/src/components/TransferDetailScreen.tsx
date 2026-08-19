@@ -177,16 +177,27 @@ export function TransferDetailScreen({ transferId, onBack, onSelectTab, onRecall
                     </>
                   )}
                 </dd>
-                {/* docs/adr/0025: cashFeeが取得できている限り、0円でも明示的に「¥0」と表示する
+                {/* docs/adr/0025決定3: cashFeeが取得できている限り、0円でも明示的に「¥0」と表示する
                     (行自体を隠さない)。手数料という概念がシステムに存在する以上、「0円だから
                     非表示」と「データが無いから非表示」が見分けられない状態はかえって
                     不透明だという指摘を受けての判断——振替・組戻し・cashFee導入前の
                     既存送金は¥0、実際に現金負担が発生した振込はその金額を表示する。
-                    dataがcashFeeを持たない(GET /customers/me/transfers由来)場合のみ何も
-                    出さない。 */}
-                {data.cashFee !== undefined && (
+                    dataがcashFee/pointsUsedを持たない(GET /customers/me/transfers由来)場合
+                    のみ何も出さない。
+
+                    決定4: 手数料の合計額(cashFee+pointsUsed)のうちどれだけをポイントで
+                    充当したかも、同じ「0でも隠さない」方針で常に表示する——ポイントを
+                    全く使わなかった送金と、使った事実自体が見えない送金とを区別できなく
+                    してしまうと、決定3で解消したのと同じ不透明さがポイント充当について
+                    再発するため。合計額はfee-serviceが所有する手数料額(docs/adr/0024決定2)
+                    を複製せず、常にcashFee+pointsUsedとして導出する。 */}
+                {data.cashFee !== undefined && data.pointsUsed !== undefined && (
                   <>
-                    <dt>手数料</dt>
+                    <dt>手数料(合計)</dt>
+                    <dd>{formatCurrency(String(Number(data.cashFee) + Number(data.pointsUsed)))}</dd>
+                    <dt>うちポイント充当</dt>
+                    <dd>{data.pointsUsed}pt</dd>
+                    <dt>うち現金でのお支払い</dt>
                     <dd>{formatCurrency(data.cashFee)}</dd>
                   </>
                 )}

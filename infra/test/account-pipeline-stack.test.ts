@@ -448,11 +448,14 @@ describe("AccountPipelineStack", () => {
             ]),
           }),
         }),
-        // docs/adr/0025: 送金詳細画面が手数料を表示できるよう、cashFeeもレスポンスへ含める。
+        // docs/adr/0025: 送金詳細画面が手数料を表示できるよう、cashFee/pointsUsedもレスポンスへ含める。
+        // Match.allOfはこのaws-cdk-libのバージョンに無いため、肯定先読みを2つ重ねた1つの
+        // 正規表現で「両方含む」を表現する——テンプレート文字列は改行を含むため、`.`ではなく
+        // `[\s\S]`を使う(`.`はデフォルトで改行にマッチしない)。
         IntegrationResponses: Match.arrayWith([
           Match.objectLike({
             ResponseTemplates: Match.objectLike({
-              "application/json": Match.stringLikeRegexp('"cashFee"'),
+              "application/json": Match.stringLikeRegexp('(?=[\\s\\S]*"cashFee")(?=[\\s\\S]*"pointsUsed")'),
             }),
           }),
         ]),

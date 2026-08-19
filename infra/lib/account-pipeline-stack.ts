@@ -1738,9 +1738,17 @@ export class AccountPipelineStack extends cdk.Stack {
                 // 壊れた表示になる(実機で発見)。"0"にフォールバックし、振替・組戻しと
                 // 同じ「手数料なし」として扱う。
                 '#if($input.path("$.Item.cashFee") == "")',
-                '"cashFee":"0"',
+                '"cashFee":"0",',
                 "#else",
-                '"cashFee":"$input.path("$.Item.cashFee.S")"',
+                '"cashFee":"$input.path("$.Item.cashFee.S")",',
+                "#end",
+                // docs/adr/0025決定4: 振込の手数料のうちポイントで充当した分。cashFeeと
+                // 同じ「未設定なら0にフォールバック」を適用する(このフィールド自体が
+                // cashFeeより後から追加されたため、既存項目はより広範囲に欠けている)。
+                '#if($input.path("$.Item.pointsUsed") == "")',
+                '"pointsUsed":"0"',
+                "#else",
+                '"pointsUsed":"$input.path("$.Item.pointsUsed.S")"',
                 "#end",
                 "}",
                 "#end",

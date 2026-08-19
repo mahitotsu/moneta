@@ -61,10 +61,15 @@ fn variant_name(payload: &Value) -> String {
     }
 }
 
-/// `fee.event.FeeReserved`のペイロード(`{"FeeReserved": {"cash_portion": "140"}}`)から
-/// `cash_portion`を取り出す。形が想定と違う場合は`None`(呼び出し側が防御的に無視する)。
+/// `fee.event.FeeReserved`のペイロード(`{"FeeReserved": {"cash_portion": "140", "points_used": "80"}}`)
+/// から`cash_portion`/`points_used`を取り出す。形が想定と違う場合は`None`(呼び出し側が防御的に
+/// 無視する)。
 fn extract_cash_portion(payload: &Value) -> Option<Decimal> {
     payload.get("FeeReserved")?.get("cash_portion")?.as_str().and_then(|s| Decimal::from_str(s).ok())
+}
+
+fn extract_points_used(payload: &Value) -> Option<Decimal> {
+    payload.get("FeeReserved")?.get("points_used")?.as_str().and_then(|s| Decimal::from_str(s).ok())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -128,18 +133,22 @@ async fn step_one(
     // 拒否しない設計(決定3)のため、ここに"rejection"が届くこと自体、通常は起こらない——
     // 万一届いても状態を進めず無視する。
     if saga.state == SagaState::ReservingFee {
-        let Some(cash_portion) = (observed_outcome == ObservedOutcome::Accepted).then(|| extract_cash_portion(&envelope.data)).flatten()
+        let accepted = observed_outcome == ObservedOutcome::Accepted;
+        let Some((cash_portion, points_used)) = accepted
+            .then(|| extract_cash_portion(&envelope.data).zip(extract_points_used(&envelope.data)))
+            .flatten()
         else {
             tracing::warn!(%transfer_id, ?observed_outcome, "unexpected fee reservation outcome; fee-service should never reject a reservation (docs/adr/0024決定3); ignoring");
             return Ok(());
         };
 
-        let (_, action) = reserve_fee_observed(&saga, cash_portion, OffsetDateTime::now_utc());
+        let (_, action) = reserve_fee_observed(&saga, cash_portion, points_used, OffsetDateTime::now_utc());
         let advanced = persistence::advance_saga_to_pending_debit_with_fee(
             dynamodb,
             saga_table_name,
             &transfer_id,
             cash_portion,
+            points_used,
             OffsetDateTime::now_utc(),
         )
         .await?;

@@ -106,7 +106,7 @@ pub async fn advance_to_reserved(
         .build()
         .expect("Update is fully populated");
 
-    let data = serde_json::json!({ "FeeReserved": { "cash_portion": cash_portion.to_string() } });
+    let data = serde_json::json!({ "FeeReserved": { "cash_portion": cash_portion.to_string(), "points_used": points_used.to_string() } });
     let event_put = Put::builder()
         .table_name(&tables.events)
         .item("eventId", AttributeValue::S(Uuid::new_v4().to_string()))

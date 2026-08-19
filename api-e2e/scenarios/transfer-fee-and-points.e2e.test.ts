@@ -96,10 +96,11 @@ describe("保有ポイントで手数料の一部を充当できる(docs/adr/002
       { description: `account ${fromId} balance to reflect the points-reduced cash fee` },
     );
 
-    // docs/adr/0025: 送金詳細画面が表示するcashFeeも、DynamoDB直接読みのreservationと
-    // 同じ値をGET /transfers/{transferId}経由で確認できる。
+    // docs/adr/0025決定3・4: 送金詳細画面が表示するcashFee/pointsUsedも、DynamoDB直接読みの
+    // reservationと同じ値をGET /transfers/{transferId}経由で確認できる。
     const status = await transferQueryApi.getTransferStatus(transferId);
     expect(Number(status?.cashFee)).toBe(cashPortion);
+    expect(Number(status?.pointsUsed)).toBe(seededPoints);
     await waitForPointsBalance(outputs.pointsTableName, fromOwnerId!, 0); // 保有ポイントを使い切った。
   });
 });

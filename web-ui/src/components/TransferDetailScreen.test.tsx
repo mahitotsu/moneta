@@ -95,41 +95,52 @@ describe("J5: 振込の確認待ちでは確認/取消ボタンを出す", () =>
 // 送金詳細画面が一度もそれを表示していなかったギャップを埋める。当初は0円のとき行自体を
 // 隠す設計にしたが、「手数料という概念がある以上、0円だからなのかデータが無いから
 // なのか見分けがつかないのはかえって不透明」という指摘を受け、cashFeeが取得できて
-// いる限り0円でも明示的に表示する設計へ変更した。
-describe("docs/adr/0025: cashFeeが取得できている限り、0円でも明示的に表示する", () => {
-  it("cashFeeが0でない場合、その金額を表示する", async () => {
-    getTransferStatusMock.mockResolvedValue(view({ amount: "300", cashFee: "120" }));
+// いる限り0円でも明示的に表示する設計へ変更した(決定3)。
+//
+// 決定4: ポイント充当の内訳(手数料合計のうちポイントで賄った分)も同じ理由で常に表示する
+// ——cashFeeだけでは「手数料220円のうちポイントを使ったのか、そもそも220円全額現金なのか」
+// が画面から区別できず、決定3で解消したのと同じ不透明さがポイント充当について残っていた。
+describe("docs/adr/0025決定3・4: cashFee/pointsUsedが取得できている限り、0でも明示的に表示する", () => {
+  it("ポイントで一部充当した場合、合計・ポイント充当分・現金負担分をそれぞれ表示する", async () => {
+    getTransferStatusMock.mockResolvedValue(view({ amount: "300", cashFee: "120", pointsUsed: "100" }));
 
     renderDetail("t-1");
 
     await waitFor(() => {
-      expect(screen.getByText("手数料")).toBeTruthy();
+      expect(screen.getByText("手数料(合計)")).toBeTruthy();
     });
+    expect(screen.getByText("¥220")).toBeTruthy();
+    expect(screen.getByText("うちポイント充当")).toBeTruthy();
+    expect(screen.getByText("100pt")).toBeTruthy();
+    expect(screen.getByText("うち現金でのお支払い")).toBeTruthy();
     expect(screen.getByText("¥120")).toBeTruthy();
   });
 
-  it("cashFeeが0の場合(振替・組戻し、またはcashFee導入前の既存送金)、¥0と明示的に表示する", async () => {
-    getTransferStatusMock.mockResolvedValue(view({ kind: "furikae", cashFee: "0" }));
+  it("cashFee/pointsUsedがともに0の場合(振替・組戻し、または導入前の既存送金)、¥0/0ptと明示的に表示する", async () => {
+    getTransferStatusMock.mockResolvedValue(view({ kind: "furikae", cashFee: "0", pointsUsed: "0" }));
 
     renderDetail("t-1");
 
     await waitFor(() => {
       expect(screen.getByText(TRANSFER_KIND_LABEL.furikae)).toBeTruthy();
     });
-    expect(screen.getByText("手数料")).toBeTruthy();
-    expect(screen.getByText("¥0")).toBeTruthy();
+    expect(screen.getByText("手数料(合計)")).toBeTruthy();
+    expect(screen.getByText("うちポイント充当")).toBeTruthy();
+    expect(screen.getByText("0pt")).toBeTruthy();
+    // 「合計」と「現金負担分」がともに¥0になるため2箇所出現する。
+    expect(screen.getAllByText("¥0")).toHaveLength(2);
   });
 
-  it("cashFeeが無い(GET /customers/me/transfers由来を模したデータの)場合のみ、手数料の行を出さない", async () => {
-    const { cashFee: _cashFee, ...withoutCashFee } = view({});
-    getTransferStatusMock.mockResolvedValue(withoutCashFee as TransferStatusView);
+  it("cashFee/pointsUsedが無い(GET /customers/me/transfers由来を模したデータの)場合、手数料の行を出さない", async () => {
+    const { cashFee: _cashFee, pointsUsed: _pointsUsed, ...withoutFeeFields } = view({});
+    getTransferStatusMock.mockResolvedValue(withoutFeeFields as TransferStatusView);
 
     renderDetail("t-1");
 
     await waitFor(() => {
       expect(screen.getByText(TRANSFER_KIND_LABEL.furikomi)).toBeTruthy();
     });
-    expect(screen.queryByText("手数料")).toBeNull();
+    expect(screen.queryByText("手数料(合計)")).toBeNull();
   });
 });
 

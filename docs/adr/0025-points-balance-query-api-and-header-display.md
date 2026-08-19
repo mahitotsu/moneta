@@ -45,6 +45,14 @@ Accepted。`infra/lib/account-pipeline-stack.ts`(`PointsQueryApi`新規、CloudF
 決定3を「`cashFee`が存在する限り`"0"`でも明示的に表示する」へ変更した(本文は最新版に更新
 済み)。
 
+**追記4(2026-08-19)**: 決定3実装当時のトレードオフ「手数料の完全な内訳は次の増分に残す」を
+埋める決定4を追加(下記)。当初想定していた「`fee-service`自身の新しい照会API」は不要だった
+——`fee.event.FeeReserved`のペイロードに`points_used`を1フィールド足すだけで、`cashFee`が
+たどっているのと同じ既存の経路(`fee-service`のイベント→`saga_step.rs`の
+`reserve_fee_observed`→`TransferSagaTable`→`transfer-status-projector`→
+`TransferStatusView`→VTL)にそのまま相乗りできた。新しいAPI/テーブル/Lambdaを一切増やさず、
+既存パイプラインへのフィールド追加のみで完結している。
+
 ## コンテキスト
 
 [[0024-rewards-service-fee-and-points]]は手数料・ポイントの機能自体をバックエンドに実装したが、
@@ -110,11 +118,40 @@ Accepted。`infra/lib/account-pipeline-stack.ts`(`PointsQueryApi`新規、CloudF
 `GET /customers/me/transfers`(一覧、`CustomerTransfersTable`)には`cashFee`を追加しない——
 一覧を手数料でごちゃつかせない意図的な選択で、詳細画面だけが持てば足りる。
 
+### 4. 送金詳細画面に、手数料の充当内訳(ポイント充当額・現金負担分・合計)を表示する
+
+決定3で`cashFee`(現金負担分)だけを表示していたため、ポイントで手数料の一部/全部を充当した
+送金では「手数料 ¥120」のように現金分しか見えず、実際に何ポイント消費したかが画面のどこにも
+出ないという透明性ギャップが残っていた(`points-service`のポイント残高自体は決定1・2で見える
+ようになったが、「この送金でいくら使ったか」は依然として不可視)。決定3が解消した
+「0円だから非表示なのか判別できない」問題と同じ種類の不透明さがポイント充当について再発して
+いたため、決定3と同じ方針(存在する限り0でも隠さない)をポイント充当にも適用する。
+
+`fee-service`の`FeeReservation.points_used`(`0024`)は`FeeReservationsTable`にしか存在せず、
+`fee.event.FeeReserved`イベントのペイロードは`cash_portion`のみを運んでいた
+(`fee-service/src/persistence.rs`の`advance_to_reserved`)。このペイロードに`points_used`を
+追加し、`cash_fee`が既にたどっている経路(`saga_step.rs`の`reserve_fee_observed`→
+`TransferSaga.points_used`(新規フィールド)→`persistence.rs`のDynamoDB項目変換→
+`transfer_status_projector.rs`→`TransferStatusView`→`GET /transfers/{transferId}`のVTL)に
+そのまま相乗りさせる——`cashFee`と全く同じ形で1フィールド追加しただけで、新しいAPI/テーブル/
+Lambdaは一切増やしていない。
+
+手数料の合計額(`fee_amount`)自体はtransfer-serviceに複製しない——常に
+`cash_fee + points_used`が成り立つため(`points_reserved`で`cash_portion = fee_amount -
+points_used`と計算している、`fee-service/src/reservation.rs`)、`web-ui`側で導出する。
+これにより「`fee-service`が手数料額を所有する」という`0024`決定2の境界を崩さずに済む。
+
+`TransferDetailScreen.tsx`は「手数料(合計)」「うちポイント充当」「うち現金でのお支払い」の
+3行を、`cashFee`と`pointsUsed`の両方が存在する場合にのみ表示する(決定3と同じく、
+`GET /customers/me/transfers`一覧由来のデータではどちらも存在しないため何も出さない)。
+0でも隠さない(決定3の方針を継承)。
+
+`api-e2e/scenarios/transfer-fee-and-points.e2e.test.ts`の既存シナリオ(ポイント充当あり/なし)
+に、`GET /transfers/{transferId}`の`pointsUsed`フィールドが期待通りの値を返すことの確認を
+追加し、実デプロイ済みスタックに対して検証済み(2026-08-19)。
+
 ## トレードオフ
 
-- **手数料の完全な内訳(手数料総額・ポイント充当額)はこのADRでは見せない**: 決定3は現金負担分
-  (`cashFee`)だけを見せる——「手数料はいくらだったか」までは分かるが、「いくらポイントで
-  賄ったか」は`fee-service`自身の照会API(次の増分)が無いと見えないまま。
 - **`DetailAppBar`にはポイント残高が出ない**: 送金詳細・口座詳細を見ている間はヘッダーから
   ポイント残高が消える。「常に」表示を厳密に守るなら妥協だが、`0022`のミニマルな詳細画面設計を
   崩さない方を優先した。

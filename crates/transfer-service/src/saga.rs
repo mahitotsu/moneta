@@ -100,6 +100,12 @@ pub struct TransferSaga {
     /// 振込の手数料のうち現金で負担する分(docs/adr/0024決定4)。振替・組戻しでは常に`ZERO`。
     /// `ReservingFee`から`PendingDebit`へ進む際(`reserve_fee_observed`)にのみ設定される。
     pub cash_fee: Decimal,
+    /// 振込の手数料のうちポイントで充当した分(docs/adr/0025決定4)。振替・組戻しでは常に
+    /// `ZERO`。`cash_fee`と同じタイミング(`reserve_fee_observed`)にのみ設定される——
+    /// `fee_amount`(手数料合計)自体はtransfer-serviceが覚える必要はなく、常に
+    /// `cash_fee + points_used`として導出できる(`fee-service`が手数料額を所有するという
+    /// docs/adr/0024決定2を維持するため、合計額を別途複製して持たない)。
+    pub points_used: Decimal,
     pub kind: TransferKind,
     pub state: SagaState,
     /// 直近の状態遷移時刻。`Credited`に達した時刻の代用として使う(終端到達後は変化しないため
@@ -225,6 +231,7 @@ pub fn start(
         to_owner_id,
         amount,
         cash_fee: Decimal::ZERO,
+        points_used: Decimal::ZERO,
         kind,
         state,
         updated_at: now,
@@ -281,10 +288,10 @@ pub fn cancel(saga: &TransferSaga, now: OffsetDateTime) -> Result<(TransferSaga,
 /// この状態でのみ`"FeeReserved"`を返すため観測ロジックの対象にならない)が、`advance`と同じく
 /// `SagaState`の全バリアントを明示的に扱う(ワイルドドなし)——万一の呼び出しに備えて安全側に
 /// 倒す。
-pub fn reserve_fee_observed(saga: &TransferSaga, cash_fee: Decimal, now: OffsetDateTime) -> (TransferSaga, NextAction) {
+pub fn reserve_fee_observed(saga: &TransferSaga, cash_fee: Decimal, points_used: Decimal, now: OffsetDateTime) -> (TransferSaga, NextAction) {
     match saga.state {
         SagaState::ReservingFee => {
-            let next = TransferSaga { state: SagaState::PendingDebit, cash_fee, updated_at: now, ..saga.clone() };
+            let next = TransferSaga { state: SagaState::PendingDebit, cash_fee, points_used, updated_at: now, ..saga.clone() };
             let action = NextAction::IssueWithdraw { account_id: saga.from_account_id, amount: saga.amount + cash_fee };
             (next, action)
         }
@@ -418,6 +425,7 @@ mod tests {
             to_owner_id: "owner-to".to_string(),
             amount: dec!(100),
             cash_fee: dec!(0),
+            points_used: dec!(0),
             kind,
             state,
             updated_at: now(),
@@ -552,24 +560,26 @@ mod tests {
     #[test]
     fn reserve_fee_observed_moves_reserving_fee_to_pending_debit_and_bundles_the_cash_portion() {
         let saga = saga_in(TransferKind::Furikomi, SagaState::ReservingFee);
-        let (next, action) = reserve_fee_observed(&saga, dec!(140), now());
+        let (next, action) = reserve_fee_observed(&saga, dec!(140), dec!(80), now());
         assert_eq!(next.state, SagaState::PendingDebit);
         assert_eq!(next.cash_fee, dec!(140));
+        assert_eq!(next.points_used, dec!(80));
         assert_eq!(action, NextAction::IssueWithdraw { account_id: saga.from_account_id, amount: dec!(240) });
     }
 
     #[test]
     fn reserve_fee_observed_with_zero_cash_fee_still_withdraws_just_the_transfer_amount() {
         let saga = saga_in(TransferKind::Furikomi, SagaState::ReservingFee);
-        let (next, action) = reserve_fee_observed(&saga, dec!(0), now());
+        let (next, action) = reserve_fee_observed(&saga, dec!(0), dec!(220), now());
         assert_eq!(next.cash_fee, dec!(0));
+        assert_eq!(next.points_used, dec!(220));
         assert_eq!(action, NextAction::IssueWithdraw { account_id: saga.from_account_id, amount: dec!(100) });
     }
 
     #[test]
     fn reserve_fee_observed_is_a_defensive_no_op_outside_reserving_fee() {
         let saga = saga_in(TransferKind::Furikomi, SagaState::PendingDebit);
-        let (next, action) = reserve_fee_observed(&saga, dec!(140), now());
+        let (next, action) = reserve_fee_observed(&saga, dec!(140), dec!(80), now());
         assert_eq!(next, saga);
         assert_eq!(action, NextAction::None);
     }

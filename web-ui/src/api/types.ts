@@ -118,8 +118,8 @@ export type TransferState =
  * (`transfer-status-projector`のフィールド写像が単一の真実源、docs/adr/0012決定1)。
  * `GET /customers/me/transfers`(docs/adr/0017)の配列要素もほぼ同じ形——
  * `transfer-history-projector`が同じソース(`TransferSagaTable`)から同じフィールドを
- * 写像するためだが、`cashFee`(docs/adr/0025)だけは`GET /transfers/{transferId}`にしか
- * 無い(一覧を手数料でごちゃつかせない意図的な選択、送金詳細画面だけが必要とする)ため
+ * 写像するためだが、`cashFee`/`pointsUsed`(docs/adr/0025)だけは`GET /transfers/{transferId}`
+ * にしか無い(一覧を手数料でごちゃつかせない意図的な選択、送金詳細画面だけが必要とする)ため
  * 任意フィールドにしてある。 */
 export interface TransferStatusView {
   transferId: string;
@@ -131,6 +131,9 @@ export interface TransferStatusView {
   updatedAt: string;
   /** 振込の現金負担分の手数料(docs/adr/0025)。振替・組戻しでは常に`"0"`。 */
   cashFee?: string;
+  /** 振込の手数料のうちポイントで充当した分(docs/adr/0025決定4)。振替・組戻しでは常に`"0"`。
+   * 手数料合計は`cashFee + pointsUsed`として画面側で導出する。 */
+  pointsUsed?: string;
 }
 
 /**

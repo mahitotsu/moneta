@@ -64,6 +64,7 @@ fn saga_to_item(saga: &TransferSaga) -> HashMap<String, AttributeValue> {
     item.insert("toOwnerId".to_string(), AttributeValue::S(saga.to_owner_id.clone()));
     item.insert("amount".to_string(), AttributeValue::S(saga.amount.to_string()));
     item.insert("cashFee".to_string(), AttributeValue::S(saga.cash_fee.to_string()));
+    item.insert("pointsUsed".to_string(), AttributeValue::S(saga.points_used.to_string()));
     item.insert("kind".to_string(), AttributeValue::S(kind_to_str(saga.kind).to_string()));
     item.insert("state".to_string(), AttributeValue::S(state_to_str(&saga.state).to_string()));
     item.insert(
@@ -88,6 +89,7 @@ fn item_to_saga(item: &HashMap<String, AttributeValue>) -> TransferSaga {
         to_owner_id: get_s("toOwnerId"),
         amount: Decimal::from_str(&get_s("amount")).expect("amount is always a valid decimal string"),
         cash_fee: Decimal::from_str(&get_s("cashFee")).expect("cashFee is always a valid decimal string"),
+        points_used: Decimal::from_str(&get_s("pointsUsed")).expect("pointsUsed is always a valid decimal string"),
         kind: kind_from_str(&get_s("kind")),
         state: state_from_str(&get_s("state")),
         updated_at: OffsetDateTime::parse(&get_s("updatedAt"), &Rfc3339).expect("updatedAt is always valid RFC3339"),
@@ -174,26 +176,29 @@ pub async fn advance_saga_state(
 }
 
 /// `ReservingFee`から`PendingDebit`への遷移専用(docs/adr/0024決定4)。`advance_saga_state`と
-/// 同じCASだが、`cashFee`も同じ`UpdateItem`呼び出しで原子的に書く——状態遷移だけを先に確定させて
-/// 後から`cashFee`を書く二段階にすると、その間にLambdaが落ちた場合に「PendingDebitなのに
-/// `cash_fee`が未設定」という不整合な中間状態が残ってしまうため、1回の呼び出しにまとめる。
+/// 同じCASだが、`cashFee`/`pointsUsed`も同じ`UpdateItem`呼び出しで原子的に書く——状態遷移だけを
+/// 先に確定させて後からこれらを書く二段階にすると、その間にLambdaが落ちた場合に「PendingDebit
+/// なのに`cash_fee`/`points_used`が未設定」という不整合な中間状態が残ってしまうため、1回の
+/// 呼び出しにまとめる。
 pub async fn advance_saga_to_pending_debit_with_fee(
     client: &Client,
     table_name: &str,
     transfer_id: &str,
     cash_fee: Decimal,
+    points_used: Decimal,
     now: OffsetDateTime,
 ) -> Result<bool, aws_sdk_dynamodb::Error> {
     let result = client
         .update_item()
         .table_name(table_name)
         .key("transferId", AttributeValue::S(transfer_id.to_string()))
-        .update_expression("SET #s = :next, cashFee = :cashFee, updatedAt = :now")
+        .update_expression("SET #s = :next, cashFee = :cashFee, pointsUsed = :pointsUsed, updatedAt = :now")
         .condition_expression("#s = :expected")
         .expression_attribute_names("#s", "state")
         .expression_attribute_values(":next", AttributeValue::S(state_to_str(&SagaState::PendingDebit).to_string()))
         .expression_attribute_values(":expected", AttributeValue::S(state_to_str(&SagaState::ReservingFee).to_string()))
         .expression_attribute_values(":cashFee", AttributeValue::S(cash_fee.to_string()))
+        .expression_attribute_values(":pointsUsed", AttributeValue::S(points_used.to_string()))
         .expression_attribute_values(
             ":now",
             AttributeValue::S(now.format(&Rfc3339).expect("OffsetDateTime always formats as RFC3339")),
@@ -267,6 +272,7 @@ mod tests {
             to_owner_id: "owner-to".to_string(),
             amount: dec!(1234.56),
             cash_fee: dec!(220),
+            points_used: dec!(80),
             kind: TransferKind::Furikomi,
             state: SagaState::PendingCredit,
             updated_at: OffsetDateTime::UNIX_EPOCH,
@@ -297,6 +303,7 @@ mod tests {
                     to_owner_id: "owner-to".to_string(),
                     amount: dec!(100),
                     cash_fee: dec!(0),
+                    points_used: dec!(0),
                     kind,
                     state,
                     updated_at: OffsetDateTime::UNIX_EPOCH,
