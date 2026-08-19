@@ -29,11 +29,13 @@ interface Props {
   onSelectTransfer: (transferId: string) => void;
   onSelectTab: (tab: CustomerTab) => void;
   onSignedOut: () => void;
+  /** ヘッダーのポイントバッジをタップした時の遷移先(docs/adr/0026)。 */
+  onViewPointsHistory: () => void;
 }
 
 /** 顧客が関わった送金の一覧(サーバー側`CustomerTransfersTable`、docs/adr/0017)+
  * 振替/振込の新規依頼。AccountListScreenと対になる、「送金」タブの中身。 */
-export function TransferListScreen({ customerName, onSelectTransfer, onSelectTab, onSignedOut }: Props) {
+export function TransferListScreen({ customerName, onSelectTransfer, onSelectTab, onSignedOut, onViewPointsHistory }: Props) {
   const queryClient = useQueryClient();
   // "other-bank"は非機能なプレースホルダ(docs/adr/0015決定7)——選んでもTransferFormは出さず、
   // 案内文だけを表示する。バックエンド呼び出しは一切発生しない。
@@ -105,6 +107,7 @@ export function TransferListScreen({ customerName, onSelectTransfer, onSelectTab
       <BrandAppBar
         customerName={customerName}
         pointsBalance={pointsBalance?.balance}
+        onViewPointsHistory={onViewPointsHistory}
         onSignOut={() => {
           signOut();
           onSignedOut();

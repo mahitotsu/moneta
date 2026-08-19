@@ -317,11 +317,15 @@ button.secondary {
   gap: 4px;
   flex: none;
   padding: 5px 10px;
+  border: none;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.16);
+  color: inherit;
+  font: inherit;
   font-size: 13px;
   font-weight: 700;
   white-space: nowrap;
+  cursor: pointer;
 }
 
 .appbar-points svg {

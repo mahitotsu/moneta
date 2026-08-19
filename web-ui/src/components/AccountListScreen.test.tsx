@@ -16,6 +16,7 @@ vi.mock("../api/client", () => ({
   getAccount: vi.fn(),
   getAccountNumber: vi.fn(),
   getMyPoints: vi.fn(),
+  getMyPointsHistory: vi.fn(),
 }));
 
 const { getMyAccounts, getAccount, getAccountNumber, getMyPoints } = await import("../api/client");
@@ -45,6 +46,7 @@ function renderScreen() {
         onSelectAccount={() => {}}
         onSelectTab={() => {}}
         onSignedOut={() => {}}
+        onViewPointsHistory={() => {}}
       />
     </QueryClientProvider>,
   );

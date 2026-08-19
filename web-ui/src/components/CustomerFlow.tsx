@@ -6,6 +6,7 @@ import { AccountListScreen } from "./AccountListScreen";
 import { CustomerAccountDetail } from "./CustomerAccountDetail";
 import { TransferListScreen } from "./TransferListScreen";
 import { TransferDetailScreen } from "./TransferDetailScreen";
+import { PointsHistoryScreen } from "./PointsHistoryScreen";
 import type { CustomerTab } from "./CustomerTabBar";
 
 // 口座タブ・送金タブはそれぞれ独立した画面状態(一覧/詳細)を持つ(docs/adr/0022)。タブを
@@ -30,11 +31,17 @@ export function CustomerFlow() {
   const [activeTab, setActiveTab] = useState<CustomerTab>("accounts");
   const [accountsTabView, setAccountsTabView] = useState<AccountsTabView>(ACCOUNTS_LIST);
   const [transfersTabView, setTransfersTabView] = useState<TransfersTabView>(TRANSFERS_LIST);
+  // ポイント履歴(docs/adr/0026)は「口座」「送金」どちらのタブとも独立した、ヘッダーバッジ
+  // から開く画面(3つ目の常設タブにはしない設計判断)。どちらのタブのview状態も一切触らない
+  // ため、閉じれば開いた時点の画面へそのまま戻る——accountsTabView/transfersTabViewと同じ
+  // 「タブの状態は勝手に変えない」というADR-0022の考え方をここにも適用している。
+  const [pointsHistoryOpen, setPointsHistoryOpen] = useState(false);
 
   const resetNavigation = () => {
     setActiveTab("accounts");
     setAccountsTabView(ACCOUNTS_LIST);
     setTransfersTabView(TRANSFERS_LIST);
+    setPointsHistoryOpen(false);
   };
 
   const onSignedOut = () => {
@@ -52,6 +59,22 @@ export function CustomerFlow() {
         onSignedIn={(newSession) => {
           setSession(newSession);
           resetNavigation();
+        }}
+      />
+    );
+  } else if (pointsHistoryOpen) {
+    content = (
+      <PointsHistoryScreen
+        onBack={() => setPointsHistoryOpen(false)}
+        activeTab={activeTab}
+        onSelectTab={(tab) => {
+          setPointsHistoryOpen(false);
+          setActiveTab(tab);
+        }}
+        onViewTransfer={(transferId) => {
+          setPointsHistoryOpen(false);
+          setTransfersTabView({ screen: "detail", transferId });
+          setActiveTab("transfers");
         }}
       />
     );
@@ -73,6 +96,7 @@ export function CustomerFlow() {
           onSelectAccount={(accountId) => setAccountsTabView({ screen: "detail", accountId })}
           onSelectTab={setActiveTab}
           onSignedOut={onSignedOut}
+          onViewPointsHistory={() => setPointsHistoryOpen(true)}
         />
       );
   } else {
@@ -94,6 +118,7 @@ export function CustomerFlow() {
           onSelectTransfer={(transferId) => setTransfersTabView({ screen: "detail", transferId })}
           onSelectTab={setActiveTab}
           onSignedOut={onSignedOut}
+          onViewPointsHistory={() => setPointsHistoryOpen(true)}
         />
       );
   }

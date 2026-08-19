@@ -24,6 +24,7 @@ vi.mock("../api/client", () => ({
   cancelTransfer: vi.fn(),
   recallTransfer: vi.fn(),
   getMyPoints: vi.fn(),
+  getMyPointsHistory: vi.fn(),
 }));
 
 const { getCurrentSession } = await import("../auth");
@@ -35,6 +36,7 @@ const {
   getMyTransfers,
   getTransferStatus,
   getMyPoints,
+  getMyPointsHistory,
 } = await import("../api/client");
 
 const getCurrentSessionMock = vi.mocked(getCurrentSession);
@@ -45,6 +47,7 @@ const getTransactionHistoryMock = vi.mocked(getTransactionHistory);
 const getMyTransfersMock = vi.mocked(getMyTransfers);
 const getTransferStatusMock = vi.mocked(getTransferStatus);
 const getMyPointsMock = vi.mocked(getMyPoints);
+const getMyPointsHistoryMock = vi.mocked(getMyPointsHistory);
 
 afterEach(cleanup);
 
@@ -67,7 +70,7 @@ const TRANSFER: TransferStatusView = {
   updatedAt: "2026-08-14T00:00:00Z",
 };
 
-function renderApp() {
+function renderApp(pointsBalance = "0") {
   getCurrentSessionMock.mockReturnValue({ sub: "sub-1", username: "taro" });
   getMyAccountsMock.mockResolvedValue([ACCOUNT]);
   getAccountMock.mockResolvedValue(ACCOUNT_VIEW);
@@ -75,9 +78,12 @@ function renderApp() {
   getTransactionHistoryMock.mockResolvedValue([]);
   getMyTransfersMock.mockResolvedValue([TRANSFER]);
   getTransferStatusMock.mockResolvedValue(TRANSFER);
-  // docs/adr/0025: BrandAppBarが常時呼ぶようになったフック。ポイント残高自体を主張しない
-  // 既存のテストに影響しない既定値。
-  getMyPointsMock.mockResolvedValue({ balance: "0" });
+  // docs/adr/0025: BrandAppBarが常時呼ぶようになったフック。既定値は既存のテストに
+  // 影響しない"0"だが、バッジタップの検証(docs/adr/0026)のために上書きできる。
+  getMyPointsMock.mockResolvedValue({ balance: pointsBalance });
+  // docs/adr/0026: ポイントバッジをタップした場合にのみ呼ばれる。バッジタップ自体を
+  // 主張しない既存のテストに影響しない既定値。
+  getMyPointsHistoryMock.mockResolvedValue([]);
 
   const queryClient = createQueryClient({ retryDelay: 0 });
   render(
@@ -123,5 +129,63 @@ describe("タブごとに独立した画面状態を持つ(docs/adr/0022)", () =
       expect(screen.getByText("本店 123-4567")).toBeTruthy();
     });
     expect(screen.queryByText("口座詳細")).toBeNull();
+  });
+});
+
+// docs/adr/0026: ポイント履歴は「口座」「送金」どちらのタブとも独立した、ヘッダーバッジから
+// 開く画面——どちらのタブのview状態も一切変えないため、閉じれば開いた時点の画面へそのまま戻る
+// (accountsTabView/transfersTabViewと同じ「タブの状態は勝手に変えない」という考え方)。
+describe("ポイント履歴はヘッダーバッジから開く、タブとは独立した画面(docs/adr/0026)", () => {
+  it("バッジをタップして開き、「戻る」を押すと開いた時点の画面へそのまま戻る", async () => {
+    renderApp("42");
+
+    await waitFor(() => {
+      expect(screen.getByText("42pt")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /保有ポイント 42pt/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText("ポイント履歴")).toBeTruthy();
+    });
+    // 開いた時点で表示していたタブ(口座)がタブバーのハイライトに引き継がれる。
+    expect(screen.getByText("口座")).toBeTruthy();
+    expect(screen.getByText("送金")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "戻る" }));
+    await waitFor(() => {
+      expect(screen.getByText("本店 123-4567")).toBeTruthy();
+    });
+    expect(screen.queryByText("ポイント履歴")).toBeNull();
+  });
+
+  it("履歴の行から送金の詳細へ飛べる(ADR-0021と同じ相互リンクの考え方)", async () => {
+    renderApp("42");
+    // renderApp自身が既定値([])にmockResolvedValueするため、上書きは呼び出し後に行う——
+    // 実際にgetMyPointsHistoryが呼ばれるのはバッジをタップしてポイント履歴画面がマウントされて
+    // からなので、この時点で上書きしても間に合う。
+    getMyPointsHistoryMock.mockResolvedValue([
+      {
+        type: "awarded",
+        amount: "3",
+        balanceAfter: "42",
+        occurredAt: "2026-08-19T00:00:00Z",
+        eventId: "22222222-2222-2222-2222-222222222222",
+        transferId: "xfer-1",
+      },
+    ]);
+
+    await waitFor(() => {
+      expect(screen.getByText("42pt")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /保有ポイント 42pt/ }));
+    await waitFor(() => {
+      expect(screen.getByText("送金の詳細を見る")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByText("送金の詳細を見る"));
+    await waitFor(() => {
+      expect(screen.getByText("送金の詳細")).toBeTruthy();
+    });
+    expect(screen.queryByText("ポイント履歴")).toBeNull();
   });
 });

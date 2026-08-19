@@ -30,6 +30,17 @@ export interface MyAccountEntry {
   openedAt: string;
 }
 
+// `GET /customers/me/points/history`のレスポンス配列の要素(docs/adr/0026)。
+// web-ui/src/api/types.tsのPointsHistoryEntryと同じ形。
+export interface PointsHistoryEntry {
+  type: "reserved" | "awarded" | "refunded";
+  amount: string;
+  balanceAfter: string;
+  occurredAt: string;
+  eventId: string;
+  transferId: string;
+}
+
 export interface RawResponse<T = unknown> {
   status: number;
   body: T;
@@ -51,6 +62,12 @@ export async function rawRequest<T = unknown>(url: string, init: RequestInit = {
 // している。web-ui/src/api/client.tsのauthHeaders()と同じ形。
 export function authHeaders(idToken?: string): Record<string, string> {
   return idToken !== undefined ? { Authorization: `Bearer ${idToken}` } : {};
+}
+
+// docs/adr/0026: 新しい順に最大50件(ページネーション省略、`AccountHistoryTable`の
+// `GET .../transactions`と同じPoCスコープの割り切り)。
+export async function getMyPointsHistory(pointsQueryApiUrl: string, idToken: string): Promise<RawResponse<PointsHistoryEntry[]>> {
+  return rawRequest<PointsHistoryEntry[]>(`${pointsQueryApiUrl}/customers/me/points/history`, { headers: authHeaders(idToken) });
 }
 
 function jsonHeaders(idToken?: string, idempotencyKey?: string): Record<string, string> {

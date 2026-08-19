@@ -92,7 +92,10 @@ enum FeeCommand {
 #[derive(Serialize)]
 #[serde(tag = "kind")]
 enum PointsCommand {
-    AwardPoints { owner_id: String, amount: Decimal },
+    // docs/adr/0026: transfer_idを追加(以前はowner_id/amountのみ)——ポイント履歴から
+    // 「どの送金による付与か」へ辿れるようにするため(ADR-0021が口座履歴↔送金履歴に付けた
+    // 相互リンクと同じ理由)。
+    AwardPoints { transfer_id: String, owner_id: String, amount: Decimal },
 }
 
 async fn send_fee_command(
@@ -163,7 +166,7 @@ pub async fn send_award_points(
     amount: Decimal,
 ) -> Result<(), aws_sdk_sqs::Error> {
     let idempotency_key = format!("{transfer_id}-award-points");
-    let command = PointsCommand::AwardPoints { owner_id: owner_id.to_string(), amount };
+    let command = PointsCommand::AwardPoints { transfer_id: transfer_id.to_string(), owner_id: owner_id.to_string(), amount };
     let body = serde_json::to_string(&command).expect("PointsCommand serialization is infallible");
     sqs.send_message()
         .queue_url(queue_url)

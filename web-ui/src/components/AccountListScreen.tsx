@@ -26,9 +26,11 @@ interface Props {
   onSelectAccount: (accountId: string) => void;
   onSelectTab: (tab: CustomerTab) => void;
   onSignedOut: () => void;
+  /** ヘッダーのポイントバッジをタップした時の遷移先(docs/adr/0026)。 */
+  onViewPointsHistory: () => void;
 }
 
-export function AccountListScreen({ customerName, onSelectAccount, onSelectTab, onSignedOut }: Props) {
+export function AccountListScreen({ customerName, onSelectAccount, onSelectTab, onSignedOut, onViewPointsHistory }: Props) {
   const [addOpen, setAddOpen] = useState(false);
   const queryClient = useQueryClient();
   // 口座詳細(AccountView)と共有する残高マスクの状態。以前は詳細画面にしか目アイコンが
@@ -76,6 +78,7 @@ export function AccountListScreen({ customerName, onSelectAccount, onSelectTab, 
       <BrandAppBar
         customerName={customerName}
         pointsBalance={pointsBalance?.balance}
+        onViewPointsHistory={onViewPointsHistory}
         onSignOut={() => {
           signOut();
           onSignedOut();

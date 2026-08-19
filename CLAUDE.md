@@ -283,7 +283,38 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
   reached after a second round of user feedback: show the fee line whenever `cashFee` is present
   **at all**, `¥0` included, rather than hiding it at zero — hiding it made "no fee for this kind
   of transfer" indistinguishable from "fee data unavailable," which defeated the point of adding
-  the field in the first place.
+  the field in the first place. Decision 4 (added same week): the transfer detail screen only
+  ever showed `cashFee` (the cash-charged portion), so a furikomi partly or fully paid with points
+  still showed just "手数料 ¥120" with zero indication that points were spent at all — a
+  transparency gap in the points feature's own stated purpose. Fixed by extending
+  `fee.event.FeeReserved`'s payload with `points_used` (previously `cash_portion` only) and
+  threading it through the exact same already-proven pipeline `cashFee` uses end to end
+  (`reserve_fee_observed` → `TransferSaga.points_used` → `TransferStatusView` → VTL, same
+  `#if`/`#else` missing-attribute fallback) — no new API/table/Lambda. `TransferDetailScreen` now
+  shows three lines (合計/ポイント充当/現金でのお支払い), zero included, matching decision 3's
+  policy. Total fee is derived as `cashFee + pointsUsed` in the UI rather than duplicating
+  `fee-service`'s owned `fee_amount` (`0024` decision 2).
+- `0026`: fills a gap surfaced while scoping "what's next" after `0025` — points balance was
+  visible but points *history* (when/why it moved) was not, unlike account/transfer history
+  (`0009`/`0017`). Required two prerequisites first: `points-service`'s `PointsEventsTable` was
+  only ever written by `ReservePoints` (the one command fee-service awaits, `0024` decision 6) —
+  `AwardPoints`/`RefundPoints` left no record at all — and `AwardPoints`'s wire command lacked
+  `transfer_id` (unlike `RefundPoints`), even though `transfer-service` already had it in scope
+  (used for the idempotency key). Adds a new `PointsHistoryTable` (same PK=ownerId/SK=zero-padded-
+  nanosecond-timestamp+eventId shape as `AccountHistoryTable`, `0009`) written **directly** by
+  `points-service`'s own `command_intake.rs` in the same `TransactWriteItems` that updates the
+  balance — deliberately not an EventBridge-projected read model like `AccountHistoryTable`/
+  `CustomerTransfersTable`, since nothing outside points-service consumes these records, extending
+  `0024` decision 6's "outbox only for awaited responses" logic to "direct write when nothing else
+  needs to react." New Lambda-less `GET /customers/me/points/history` (same `#foreach`-over-
+  pre-serialized-`entry`-strings VTL pattern as `AccountHistoryTable`'s query, avoiding the VTL-
+  JSON-assembly bugs `0006` hit repeatedly). Web-ui: `BrandAppBar`'s points badge (`0025` decision
+  2) becomes a button opening a new `PointsHistoryScreen` — deliberately *not* a third persistent
+  tab alongside 口座/送金 (`0022`'s "tab switching is always the tab bar's job" stays intact;
+  points is secondary, not a daily-use primary screen) — tracked as a `pointsHistoryOpen` boolean
+  in `CustomerFlow.tsx` independent of both tabs' own nav state, so closing it always returns to
+  whatever was showing when it opened. History rows cross-link to the causing transfer (`0021`'s
+  pattern) since `transferId` is now always present on `awarded`/`refunded`/`reserved` entries.
 
 ## Commands
 

@@ -72,7 +72,7 @@ describe("AccountPipelineStack", () => {
   // (docs/adr/0011でTransferAccountOwnersTableを、docs/adr/0013でaccount-service自身の
   // 3テーブルを、docs/adr/0012でTransferStatusViewTableを、docs/adr/0015でAccountNumbersTable
   // を、docs/adr/0017でCustomerTransfersTableを、docs/adr/0024でpoints-service/fee-service
-  // の5テーブルを追加)。
+  // の5テーブルを、docs/adr/0026でPointsHistoryTableを追加)。
   test("all DynamoDB tables are set to DESTROY on stack/changeset rollback, not the RETAIN default", () => {
     const tables = template.findResources("AWS::DynamoDB::Table");
     const tableNames = Object.values(tables).map((table) => table.Properties.TableName);
@@ -89,6 +89,7 @@ describe("AccountPipelineStack", () => {
         "moneta-fee-reservations",
         "moneta-points",
         "moneta-points-events",
+        "moneta-points-history",
         "moneta-points-idempotency",
         "moneta-processed-messages",
         "moneta-transfer-account-owners",
@@ -659,16 +660,17 @@ describe("AccountPipelineStack", () => {
 
   // docs/adr/0016決定2: Deposit/Withdraw(外部チャネル、ADR-0009決定1)だけは認証を要求しない。
   // それ以外の全メソッド(15個中13個 + GET /customers/me/accounts + GET /customers/me/transfers
-  // [docs/adr/0017] + 新設のGET /customers/me/points[docs/adr/0025] = 16個)はCognito認証必須に
-  // する——この非対称こそが今回の変更の核心なので、個数を固定する。
-  test("16 of 18 API methods require Cognito auth; Deposit/Withdraw are the only two exceptions", () => {
+  // [docs/adr/0017] + GET /customers/me/points[docs/adr/0025] + 新設のGET
+  // /customers/me/points/history[docs/adr/0026] = 17個)はCognito認証必須にする——この非対称
+  // こそが今回の変更の核心なので、個数を固定する。
+  test("17 of 19 API methods require Cognito auth; Deposit/Withdraw are the only two exceptions", () => {
     const methods = template.findResources("AWS::ApiGateway::Method");
     const allMethods = Object.values(methods);
     const authorized = allMethods.filter((m) => m.Properties?.AuthorizationType === "COGNITO_USER_POOLS");
     const unauthorized = allMethods.filter((m) => m.Properties?.AuthorizationType !== "COGNITO_USER_POOLS");
 
-    expect(allMethods).toHaveLength(18);
-    expect(authorized).toHaveLength(16);
+    expect(allMethods).toHaveLength(19);
+    expect(authorized).toHaveLength(17);
     expect(unauthorized).toHaveLength(2);
     // 認証なしの2つが、まさにdeposits/withdrawalsのSQS統合であることを確認する
     // (Uriにキューの論理IDが現れる、既存のtransfer command API判定テストと同じ手法)。

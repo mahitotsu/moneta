@@ -1322,6 +1322,19 @@ export class AccountPipelineStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
+    // 顧客向けポイント履歴(docs/adr/0026)。pointsEventsTable(fee-service向けアウトボックス、
+    // ReservePoints専用)とは別の独立したテーブル——他サービスは一切読まないためEventBridge/
+    // Lambda投影を経由させず、points-command-intakeが残高更新と同じTransactWriteItemsで
+    // 直接書く。ソートキーはaccountHistoryTable(docs/adr/0009)と同じ「ゼロ埋めナノ秒
+    // タイムスタンプ#eventId」——時刻順ソートと一意性を両立させる。
+    const pointsHistoryTable = new dynamodb.Table(this, "PointsHistoryTable", {
+      tableName: "moneta-points-history",
+      partitionKey: { name: "ownerId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "sk", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
     // --- [Points service所有] コマンド受付のSQS FIFOキュー ---------------------
     // fee-service(ReservePoints/RefundPoints)とtransfer-service(AwardPoints)の両方から
     // SendMessageされる(docs/adr/0024決定7)。
@@ -1351,6 +1364,7 @@ export class AccountPipelineStack extends cdk.Stack {
         POINTS_TABLE_NAME: pointsTable.tableName,
         POINTS_EVENTS_TABLE_NAME: pointsEventsTable.tableName,
         POINTS_IDEMPOTENCY_TABLE_NAME: pointsIdempotencyTable.tableName,
+        POINTS_HISTORY_TABLE_NAME: pointsHistoryTable.tableName,
       },
     });
     pointsCommandIntakeFn.addEventSource(
@@ -1365,6 +1379,7 @@ export class AccountPipelineStack extends cdk.Stack {
     pointsTable.grant(pointsCommandIntakeFn, "dynamodb:TransactWriteItems", "dynamodb:ConditionCheckItem");
     pointsEventsTable.grant(pointsCommandIntakeFn, "dynamodb:PutItem", "dynamodb:TransactWriteItems");
     pointsIdempotencyTable.grant(pointsCommandIntakeFn, "dynamodb:PutItem", "dynamodb:TransactWriteItems");
+    pointsHistoryTable.grant(pointsCommandIntakeFn, "dynamodb:PutItem", "dynamodb:TransactWriteItems");
 
     // --- [Points service所有] points-outbox-projector ---------------------------
     const pointsOutboxProjectorDlq = new sqs.Queue(this, "PointsOutboxProjectorDlq");
@@ -1403,6 +1418,12 @@ export class AccountPipelineStack extends cdk.Stack {
       new iam.PolicyStatement({
         actions: ["dynamodb:GetItem"],
         resources: [pointsTable.tableArn],
+      }),
+    );
+    pointsQueryApiDynamoRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["dynamodb:Query"],
+        resources: [pointsHistoryTable.tableArn],
       }),
     );
 
@@ -1448,6 +1469,53 @@ export class AccountPipelineStack extends cdk.Stack {
 
     const myPointsResource = pointsQueryApi.root.addResource("customers").addResource("me").addResource("points");
     myPointsResource.addMethod("GET", getMyPointsIntegration, {
+      methodResponses: [{ statusCode: "200" }],
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+      authorizer: pointsQueryAuthorizer,
+    });
+
+    // GET /customers/me/points/history(docs/adr/0026)。accountHistoryTableの
+    // listTransactionsIntegrationと同じ形——DynamoDB Query直接統合、新しい順
+    // (ScanIndexForward: false)に最大50件、レスポンスVTLは各アイテムの`entry`属性
+    // (points-service側で組み立て済みのJSON文字列、docs/adr/0009の教訓と同じくVTLでの
+    // JSON組み立ては避ける)を`#foreach`で連結するだけ。
+    const listPointsHistoryIntegration = new apigateway.AwsIntegration({
+      service: "dynamodb",
+      action: "Query",
+      options: {
+        credentialsRole: pointsQueryApiDynamoRole,
+        passthroughBehavior: apigateway.PassthroughBehavior.NEVER,
+        requestTemplates: {
+          "application/json": JSON.stringify({
+            TableName: pointsHistoryTable.tableName,
+            KeyConditionExpression: "ownerId = :ownerId",
+            ExpressionAttributeValues: {
+              ":ownerId": { S: "$context.authorizer.claims.sub" },
+            },
+            ScanIndexForward: false,
+            Limit: 50,
+          }),
+        },
+        integrationResponses: [
+          {
+            statusCode: "200",
+            responseTemplates: {
+              "application/json": [
+                "#set($items = $input.path('$.Items'))",
+                "[",
+                "#foreach($item in $items)",
+                "$item.entry.S#if($foreach.hasNext),#end",
+                "#end",
+                "]",
+              ].join("\n"),
+            },
+          },
+        ],
+      },
+    });
+
+    const myPointsHistoryResource = myPointsResource.addResource("history");
+    myPointsHistoryResource.addMethod("GET", listPointsHistoryIntegration, {
       methodResponses: [{ statusCode: "200" }],
       authorizationType: apigateway.AuthorizationType.COGNITO,
       authorizer: pointsQueryAuthorizer,
@@ -2228,6 +2296,7 @@ export class AccountPipelineStack extends cdk.Stack {
     new cdk.CfnOutput(this, "TransferQueryApiUrl", { value: transferQueryApi.url });
     new cdk.CfnOutput(this, "TransferCommandApiUrl", { value: transferCommandApi.url });
     new cdk.CfnOutput(this, "PointsTableName", { value: pointsTable.tableName });
+    new cdk.CfnOutput(this, "PointsHistoryTableName", { value: pointsHistoryTable.tableName });
     new cdk.CfnOutput(this, "PointsCommandQueueUrl", { value: pointsCommandQueue.queueUrl });
     new cdk.CfnOutput(this, "PointsCommandIntakeFunctionName", { value: pointsCommandIntakeFn.functionName });
     new cdk.CfnOutput(this, "PointsOutboxProjectorFunctionName", { value: pointsOutboxProjectorFn.functionName });

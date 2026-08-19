@@ -4,15 +4,22 @@ import { Bank, ChevronLeft, LogOut, Star } from "./icons";
  * サインイン後の全画面で共通の「銀行アプリらしい」ヘッダー(docs/adr/0009の顧客体験再現)。
  * `pointsBalance`(docs/adr/0025)は`undefined`(読み込み中)の間は何も表示しない——チラつきを
  * 避けるため、0ptの確定値が返るまでバッジ自体を出さない。
+ *
+ * `onViewPointsHistory`(docs/adr/0026)を渡すとバッジがボタンになり、タップでポイント履歴
+ * 画面へ遷移する——「口座」「送金」と並ぶ3つ目の常設タブは追加しない設計判断(ADR-0022が
+ * 確立した「タブ切替は常にタブバーの仕事」を崩さない、副次的な情報なので発見しやすさより
+ * 詳細画面の最小さを優先)。
  */
 export function BrandAppBar({
   customerName,
   pointsBalance,
   onSignOut,
+  onViewPointsHistory,
 }: {
   customerName: string;
   pointsBalance?: string;
   onSignOut: () => void;
+  onViewPointsHistory?: () => void;
 }) {
   return (
     <header className="appbar">
@@ -26,10 +33,15 @@ export function BrandAppBar({
         </div>
       </div>
       {pointsBalance !== undefined && (
-        <span className="appbar-points" aria-label={`保有ポイント ${pointsBalance}pt`}>
+        <button
+          type="button"
+          className="appbar-points"
+          onClick={onViewPointsHistory}
+          aria-label={`保有ポイント ${pointsBalance}pt。タップでポイント履歴を見る`}
+        >
           <Star />
           {pointsBalance}pt
-        </span>
+        </button>
       )}
       <button type="button" className="appbar-action" onClick={onSignOut} aria-label="サインアウト">
         <LogOut />

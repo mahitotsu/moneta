@@ -231,6 +231,19 @@ Then 送金額に加えて固定額の手数料(220円)が送金元から徴収�
 未獲得時0円・未認証401・実際の付与反映)・`transfer-furikomi.e2e.test.ts`/
 `transfer-recall.e2e.test.ts`(手数料込みの残高計算への回帰確認)
 
+**FC21: ポイント履歴**
+Given 顧客としてポイントが増減する操作(振込の受取による付与、手数料への充当、送金失敗/補償に
+よる返却)を行う
+When `GET /customers/me/points/history`を照会する、またはWeb UIでヘッダーのポイントバッジを
+タップする
+Then 新しい順に最大50件、種別(付与/充当/返却)・増減幅・操作後残高・原因となった送金の
+transferIdを持つ履歴が返る。充当は減る方向、付与・返却は増える方向として表現される。Web UIは
+「口座」「送金」と並ぶ3つ目の常設タブを増やさず、ヘッダーのポイントバッジから開く独立した画面
+としてこれを表示し、各行から原因の送金の詳細へ相互リンクできる
+→ [[0026-points-history]]決定1〜3 — **P0** — `points-query.e2e.test.ts`(振込受取による付与が
+正しい種別・金額・transferIdで見えること、未認証401)・`transfer-fee-and-points.e2e.test.ts`
+(充当・`PendingDebit`却下時と`Compensating`経路それぞれの返却が履歴に残ること)
+
 ---
 
 ## ① AWS Well-Architected Framework

@@ -7,6 +7,7 @@ import type {
   FreezeReasonRequest,
   MyAccount,
   PointsBalance,
+  PointsHistoryEntry,
   TransactionEntry,
   TransferStatusView,
 } from "./types";
@@ -207,6 +208,17 @@ export async function getMyPoints(): Promise<PointsBalance> {
     "getMyPoints",
   );
   return response.json() as Promise<PointsBalance>;
+}
+
+/** 新しい順に最大50件(ページネーションは省略、`getTransactionHistory`と同じ理由、docs/adr/0026)。 */
+export async function getMyPointsHistory(): Promise<PointsHistoryEntry[]> {
+  const response = await fetchOrThrow(
+    `${POINTS_QUERY_API_BASE}/customers/me/points/history`,
+    { headers: await authHeaders() },
+    QUERY_FAILURE_MESSAGE,
+    "getMyPointsHistory",
+  );
+  return response.json() as Promise<PointsHistoryEntry[]>;
 }
 
 /**

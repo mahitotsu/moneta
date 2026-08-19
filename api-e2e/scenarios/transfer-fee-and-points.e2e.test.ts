@@ -10,7 +10,7 @@
 // support/pointsState.tsで直接DynamoDBを読む——support/sagaState.tsのwaitForOwnerIndexedと
 // 同じ位置づけの正当な検証手段。
 import { fetchStackOutputs } from "../support/stackOutputs";
-import { createCommandApi, createQueryApi } from "../support/httpClient";
+import { createCommandApi, createQueryApi, getMyPointsHistory } from "../support/httpClient";
 import { waitFor } from "../support/poll";
 import { waitForOwnerIndexed } from "../support/sagaState";
 import { seedPointsBalance, waitForFeeReservationState, waitForPointsBalance } from "../support/pointsState";
@@ -102,6 +102,13 @@ describe("保有ポイントで手数料の一部を充当できる(docs/adr/002
     expect(Number(status?.cashFee)).toBe(cashPortion);
     expect(Number(status?.pointsUsed)).toBe(seededPoints);
     await waitForPointsBalance(outputs.pointsTableName, fromOwnerId!, 0); // 保有ポイントを使い切った。
+
+    // docs/adr/0026: 充当(reserved)がポイント履歴の1行として、正しい種別・金額・transferIdで見える。
+    const historyResponse = await getMyPointsHistory(outputs.pointsQueryApiUrl, identityA.idToken);
+    expect(historyResponse.status).toBe(200);
+    const historyEntry = historyResponse.body.find((e) => e.transferId === transferId);
+    expect(historyEntry?.type).toBe("reserved");
+    expect(Number(historyEntry?.amount)).toBe(seededPoints);
   });
 });
 
@@ -146,6 +153,15 @@ describe("送金が失敗した場合、消費したポイントは返却され�
     expect(reservation.pointsUsed).toBe(FURIKOMI_FEE);
 
     await waitForPointsBalance(outputs.pointsTableName, fromOwnerId!, FURIKOMI_FEE); // 消費した220ptが全額戻る。
+
+    // docs/adr/0026: 充当(reserved)・返却(refunded)がどちらもポイント履歴に残る。
+    const historyResponse = await getMyPointsHistory(outputs.pointsQueryApiUrl, identityA.idToken);
+    expect(historyResponse.status).toBe(200);
+    const entriesForTransfer = historyResponse.body.filter((e) => e.transferId === transferId);
+    expect(entriesForTransfer.map((e) => e.type).sort()).toEqual(["refunded", "reserved"]);
+    for (const e of entriesForTransfer) {
+      expect(Number(e.amount)).toBe(FURIKOMI_FEE);
+    }
   });
 
   // docs/decision-tables.md発見6: 上のテストは`PendingDebit`が却下されて`Failed`になる経路
@@ -196,5 +212,15 @@ describe("送金が失敗した場合、消費したポイントは返却され�
     expect(reservation.pointsUsed).toBe(FURIKOMI_FEE);
 
     await waitForPointsBalance(outputs.pointsTableName, fromOwnerId!, FURIKOMI_FEE); // 消費した220ptが全額戻る。
+
+    // docs/adr/0026: Compensating経路でも同様に、充当(reserved)・返却(refunded)がどちらも
+    // ポイント履歴に残る。
+    const historyResponse = await getMyPointsHistory(outputs.pointsQueryApiUrl, identityA.idToken);
+    expect(historyResponse.status).toBe(200);
+    const entriesForTransfer = historyResponse.body.filter((e) => e.transferId === transferId);
+    expect(entriesForTransfer.map((e) => e.type).sort()).toEqual(["refunded", "reserved"]);
+    for (const e of entriesForTransfer) {
+      expect(Number(e.amount)).toBe(FURIKOMI_FEE);
+    }
   });
 });

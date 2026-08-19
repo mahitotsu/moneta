@@ -7,6 +7,7 @@
 
 use aws_lambda_events::sqs::{SqsBatchResponse, SqsEvent};
 use lambda_runtime::{run, service_fn, Error, LambdaEvent};
+use points_service::history::HistoryKind;
 use points_service::persistence::{self, ApplyError, PointsTables};
 use rust_decimal::Decimal;
 use serde::Deserialize;
@@ -24,7 +25,10 @@ use std::time::Duration;
 enum PointsCommand {
     ReservePoints { transfer_id: String, owner_id: String, up_to: Decimal },
     RefundPoints { transfer_id: String, owner_id: String, amount: Decimal },
-    AwardPoints { owner_id: String, amount: Decimal },
+    // docs/adr/0026: transfer_idを追加(以前はowner_id/amountのみ)——ポイント履歴から
+    // 「どの送金による付与か」へ辿れるようにするため(docs/adr/0021が口座履歴↔送金履歴に
+    // 付けた相互リンクと同じ理由)。
+    AwardPoints { transfer_id: String, owner_id: String, amount: Decimal },
 }
 
 const MAX_ATTEMPTS: u32 = 5;
@@ -39,13 +43,19 @@ async fn main() -> Result<(), Error> {
         events: std::env::var("POINTS_EVENTS_TABLE_NAME").expect("POINTS_EVENTS_TABLE_NAME environment variable must be set"),
         idempotency: std::env::var("POINTS_IDEMPOTENCY_TABLE_NAME")
             .expect("POINTS_IDEMPOTENCY_TABLE_NAME environment variable must be set"),
+        history: std::env::var("POINTS_HISTORY_TABLE_NAME").expect("POINTS_HISTORY_TABLE_NAME environment variable must be set"),
     };
     let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
     let dynamodb = aws_sdk_dynamodb::Client::new(&aws_config);
 
     run(service_fn(move |event: LambdaEvent<SqsEvent>| {
         let dynamodb = dynamodb.clone();
-        let tables = PointsTables { points: tables.points.clone(), events: tables.events.clone(), idempotency: tables.idempotency.clone() };
+        let tables = PointsTables {
+            points: tables.points.clone(),
+            events: tables.events.clone(),
+            idempotency: tables.idempotency.clone(),
+            history: tables.history.clone(),
+        };
         async move { process_batch(&dynamodb, &tables, event.payload).await }
     }))
     .await
@@ -83,10 +93,10 @@ async fn process_one(dynamodb: &aws_sdk_dynamodb::Client, tables: &PointsTables,
             }
             PointsCommand::RefundPoints { transfer_id, owner_id, amount } => {
                 tracing::info!(%transfer_id, %owner_id, %amount, "refunding points reserved for a failed/compensated transfer");
-                persistence::credit_points(dynamodb, tables, message_id, owner_id, *amount).await
+                persistence::credit_points(dynamodb, tables, HistoryKind::Refunded, message_id, transfer_id, owner_id, *amount).await
             }
-            PointsCommand::AwardPoints { owner_id, amount } => {
-                persistence::credit_points(dynamodb, tables, message_id, owner_id, *amount).await
+            PointsCommand::AwardPoints { transfer_id, owner_id, amount } => {
+                persistence::credit_points(dynamodb, tables, HistoryKind::Awarded, message_id, transfer_id, owner_id, *amount).await
             }
         };
 

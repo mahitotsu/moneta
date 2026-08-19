@@ -120,6 +120,7 @@ DLQ自体は放置すべきではない)。`support/dlq.ts`の`waitForMatchingMe
 | FC18(docs/adr/0016) | `scenarios/auth.e2e.test.ts` | 実装済み(セルフサインアップ+サインインした識別子での口座開設と`GET /customers/me/accounts`が自分の口座だけを返すこと、Authorizationヘッダー無しの保護エンドポイントが401になること、Deposit/Withdrawが引き続き無認証で動くことを検証) |
 | FC19(docs/adr/0017) | `scenarios/transfer-history.e2e.test.ts` | 実装済み(`GET /customers/me/transfers`が同じtransferIdにつき1行だけを常に最新状態で返すこと、振込は送金元・送金先どちらの一覧にも現れること、振替は1件に収束することを検証) |
 | FC20(docs/adr/0024・0025) | `scenarios/transfer-fee-and-points.e2e.test.ts`, `scenarios/points-query.e2e.test.ts` | 実装済み(振込の手数料徴収・ポイント充当、`PendingDebit`却下時と`Compensating`経路それぞれでのポイント返却、`GET /customers/me/points`の未獲得時0円・未認証401・実際の付与反映) |
+| FC21(docs/adr/0026) | `scenarios/points-query.e2e.test.ts`, `scenarios/transfer-fee-and-points.e2e.test.ts` | テスト実装済み・**ライブスタックでの実行は未検証**(デプロイ後に検証予定)。`GET /customers/me/points/history`が付与/充当/返却それぞれ正しい種別・金額・transferIdで返すことを検証 |
 
 **`docs/production-readiness-matrix.md`で🔴/🟡・未実装と判定された主要項目**(この表にファイルが
 存在しないもの): R2(OCCリトライの回復)・R3(SQS再配信の成功パス)・R8(複数発行元の同時競合)・

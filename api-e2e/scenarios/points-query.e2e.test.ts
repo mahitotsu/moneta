@@ -3,7 +3,7 @@
 // PointsTableをDynamoDB直接読みで検証していたが、このAPI自体(GetItem統合、ownerIdの
 // JWT解決、項目が存在しない場合の既定値)は一度も実際に叩いていなかった。
 import { fetchStackOutputs } from "../support/stackOutputs";
-import { authHeaders, createCommandApi, createQueryApi, rawRequest } from "../support/httpClient";
+import { authHeaders, createCommandApi, createQueryApi, getMyPointsHistory, rawRequest } from "../support/httpClient";
 import { waitForPointsBalance } from "../support/pointsState";
 import { waitForOwnerIndexed } from "../support/sagaState";
 import { openFreshAccount } from "../support/testAccount";
@@ -63,5 +63,47 @@ describe("GET /customers/me/points(docs/adr/0025)", () => {
     const response = await getMyPoints(outputs.pointsQueryApiUrl, identityB.idToken);
     expect(response.status).toBe(200);
     expect(Number((response.body as { balance: string }).balance)).toBe(300 * 0.001);
+  });
+});
+
+// docs/adr/0026: GET /customers/me/points/history。同じ振込フローを再利用し(新規の送金は
+// 起こさない)、着金による付与が履歴の1行として正しく見えることをHTTPレベルで検証する。
+describe("GET /customers/me/points/history(docs/adr/0026)", () => {
+  it("振込の着金による付与が、正しい種別・金額・transferIdの履歴として見える", async () => {
+    const outputs = await fetchStackOutputs();
+    const [identityA, identityB] = await Promise.all([
+      signUpAndSignIn(outputs.userPoolClientId),
+      signUpAndSignIn(outputs.userPoolClientId),
+    ]);
+    const commandApiA = createCommandApi(outputs.commandApiUrl, identityA.idToken);
+    const commandApiB = createCommandApi(outputs.commandApiUrl, identityB.idToken);
+    const queryApi = createQueryApi(outputs.queryApiUrl, identityA.idToken);
+    const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl, identityA.idToken);
+    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identityA.idToken);
+
+    const fromId = await openFreshAccount(commandApiA, queryApi, "1000.00");
+    const toId = await openFreshAccount(commandApiB, queryApi, "0.00");
+    await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, fromId);
+    await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, toId);
+
+    const transferId = crypto.randomUUID();
+    await transferCommandApi.start({ transferId, fromAccountId: fromId, toAccountId: toId, amount: "300.00" });
+    await waitForTransferState(transferQueryApi, transferId, ["pending_confirmation"]);
+    await transferCommandApi.confirm(transferId);
+    await waitForTransferState(transferQueryApi, transferId, ["credited"], { timeoutMs: 45_000 });
+    await waitForPointsBalance(outputs.pointsTableName, identityB.sub, 300 * 0.001, { timeoutMs: 45_000 });
+
+    const response = await getMyPointsHistory(outputs.pointsQueryApiUrl, identityB.idToken);
+    expect(response.status).toBe(200);
+    const entry = response.body.find((e) => e.transferId === transferId);
+    expect(entry).toBeDefined();
+    expect(entry?.type).toBe("awarded");
+    expect(Number(entry?.amount)).toBe(300 * 0.001);
+  });
+
+  it("認証なしのリクエストは401になる", async () => {
+    const outputs = await fetchStackOutputs();
+    const response = await rawRequest(`${outputs.pointsQueryApiUrl}/customers/me/points/history`);
+    expect(response.status).toBe(401);
   });
 });

@@ -72,6 +72,24 @@ export interface PointsBalance {
 }
 
 /**
+ * `GET /customers/me/points/history`のレスポンス配列の要素
+ * (points-service/src/history.rsのhistory_entryが単一の真実源、docs/adr/0026)。
+ * `TransactionEntry`(docs/adr/0009)と同じ「新しい順に最大50件」の形だが、amountは常に
+ * 非負の増減幅——増えたか減ったかは`type`だけで表現する(`reserved`=手数料充当で減る、
+ * `awarded`/`refunded`=付与/返却で増える)。
+ */
+export interface PointsHistoryEntry {
+  type: "reserved" | "awarded" | "refunded";
+  amount: string;
+  balanceAfter: string;
+  occurredAt: string;
+  eventId: string;
+  /** この増減の原因となった送金のtransferId(docs/adr/0026、ADR-0021と同じ相互リンクの考え方)。
+   *  ポイントの増減は現状すべて振込(furikomi)に起因するため、常に値を持つ。 */
+  transferId: string;
+}
+
+/**
  * `GET /accounts/{id}/transactions`のレスポンス配列の要素
  * (query-service/src/history.rsのhistory_entry_from_eventが単一の真実源、docs/adr/0009)。
  * amountはopened/frozen/unfrozen/closedでは無い(null)——それらは金額の増減を伴わない。
