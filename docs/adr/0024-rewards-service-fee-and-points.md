@@ -35,6 +35,32 @@ furikaeのみを使う資金保存則のプロパティベーステストで手�
 リソース競合により600秒のタイムアウトぎりぎりで超過しただけと判明——単独実行では約101秒で
 合格することを確認済み。
 
+**追記(2026-08-19)**: `infra/scripts/seed-demo-data.ts`(ADR-0024後もデモデータは更新されて
+いるか、という確認)を実行中、実際にポイントを獲得した顧客が別の振込でそのポイントを充当
+しようとした瞬間に振込が`Failed`になる、という実害のあるバグを発見した。原因は
+`award_points_for(amount) = amount * Decimal::new(1, 3)`——rust_decimalの乗算は両オペランドの
+scaleの和をそのまま持ち越すため(例: `20000.00 * 0.001` = `20.00000`、5桁)、この値が
+`points-service`の残高としてそのまま永続化される。この不整合な精度の値は、後で
+`ledger::reserve`(`points_used`)→`fee-service`の`cash_portion`計算→`TransferSaga.cash_fee`
+と伝播し、最終的に`account-service`へ送る`Withdraw`の`amount`(`transfer_amount + cash_fee`)が
+5桁精度のまま組み立てられ、`AMOUNT_DECIMAL_PLACES`(2桁まで)を強制する
+`DomainError::InvalidAmountPrecision`で機械的に却下される——`PendingDebit`が却下→`Failed`→
+`RefundFee`という、コード上は正しく動作する巻き戻し経路ではあるが、振込そのものは100%失敗する。
+
+この経路は既存の`api-e2e`では一度も踏まれていなかった:`transfer-fee-and-points.e2e.test.ts`は
+`seedPointsBalance`でポイント残高を整数のまま直接DynamoDBに書き込んでいたため
+(テスト専用の裏口、`support/pointsState.ts`)、「実際に`AwardPoints`で獲得したポイントを
+その後の振込で充当する」という一連の流れを一度も実際には通していなかった。ADR-0025の検証時に
+この`0.1`が`"0.300"`のような文字列になりうることには気づいていた(テストの期待値を数値比較に
+直して済ませた)が、これを「表示上のフォーマットの問題」としてのみ扱い、下流の`Withdraw`金額の
+精度制約を壊しうることには気づいていなかった。
+
+`award_points_for`の戻り値を`account-domain`の`normalize_amount`と同じ`rescale`
+(`AMOUNT_DECIMAL_PLACES`、不足はゼロ埋め・超過は丸め)で発生源において2桁へ正規化する形で
+修正し、`saga.rs`に専用の回帰テスト(戻り値の`scale()`を直接検証)を追加した。デプロイ後、
+壊れた状態のまま残っていたデモの`demo-customer-2`の20ptを一度Cognitoユーザーごと削除して
+再投入し直し、修正後は問題なく充当できることを確認する。
+
 ## コンテキスト
 
 口座管理・振込・振替(`0011`)に続く増分として、「デジタルデータ/ITを活用したネットバンキング

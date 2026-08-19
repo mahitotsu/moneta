@@ -207,6 +207,25 @@ async function waitForTransferState(
   }, `transfer ${transferId} to reach state in [${expected.join(", ")}]`, 60_000);
 }
 
+// docs/adr/0025。振込(furikomi)には固定額の手数料がかかり保有ポイントで自動充当されるため
+// (docs/adr/0024)、振込を行った後の残高は必ずこの値を経由して確認する——2026-08-19に、
+// このスクリプトが一度も更新されないまま2026-08-16に投入したデータが残り続け、ADR-0024以降の
+// 手数料/ポイント機能をデモ上で一切確認できない状態になっていたことが発覚した。
+async function getPointsBalance(outputs: StackOutputs, idToken: string): Promise<string> {
+  const r = await fetch(`${outputs.pointsQueryApiUrl}/customers/me/points`, { headers: authHeaders(idToken) });
+  if (r.status !== 200) throw new Error(`getPointsBalance unexpected status ${r.status}`);
+  return ((await r.json()) as { balance: string }).balance;
+}
+
+// AwardPoints(docs/adr/0024決定7)は結果を待たないfire-and-forgetのため、着金確認
+// (waitForTransferState credited)の直後でもまだ反映されていないことがある——反映されるまで待つ。
+async function waitForPointsAwarded(outputs: StackOutputs, idToken: string): Promise<string> {
+  return waitFor(async () => {
+    const balance = await getPointsBalance(outputs, idToken);
+    return balance !== "0" ? balance : undefined;
+  }, "points balance to reflect an award");
+}
+
 async function confirmTransfer(outputs: StackOutputs, idToken: string, transferId: string): Promise<void> {
   const response = await fetch(`${outputs.transferCommandApiUrl}/transfers/${transferId}/confirm`, {
     method: "POST",
@@ -253,38 +272,59 @@ async function main(): Promise<void> {
   const furikae = await startTransfer(outputs, customer.idToken, account1, account2, "50000.00");
   await waitForTransferState(outputs, customer.idToken, furikae, ["credited"]);
 
-  console.log(`[furikomi] ${account1} -> ${account3} (${customer2.username}): 20000.00`);
+  // docs/adr/0024: このfurikomiには固定額の手数料(220円)がかかる——customerはまだ1ポイントも
+  // 持っていないため全額現金負担になり、受け取ったcustomer2には送金額の0.1%相当のポイントが
+  // 付与される(次のfurikomiでcustomer2自身の手数料に自動充当されるところまでを見せるための、
+  // あえての順序)。
+  console.log(`[furikomi] ${account1} -> ${account3} (${customer2.username}): 20000.00 (手数料220円、現金全額負担)`);
   const toNumber = await resolveAccountNumber(outputs, customer.idToken, account3);
   const furikomi = await startTransfer(outputs, customer.idToken, account1, account3, "20000.00");
   await waitForTransferState(outputs, customer.idToken, furikomi, ["pending_confirmation"]);
   await confirmTransfer(outputs, customer.idToken, furikomi);
   await waitForTransferState(outputs, customer.idToken, furikomi, ["credited"]);
+  const customer2Points = await waitForPointsAwarded(outputs, customer2.idToken);
+  console.log(`[points] ${customer2.username}: +${customer2Points}pt (振込受取による付与、docs/adr/0024決定7)`);
 
   // 逆方向の振込(customer2 -> customer)も1件作る(docs/adr/0020)。demo-customerだけで
   // サインインして、送金一覧・詳細の「送った(様へ)」「受け取った(様より)」両方の表示を
   // 見比べられるようにするため——上のfurikomiだけでは、demo-customerから見て常に送信側にしか
   // ならず、受信側の表示(相手方の名義・入金アイコン)を確認する手段がdemo-customer-2への
-  // サインインを要求してしまっていた。
-  console.log(`[furikomi] ${account3} -> ${account1} (${customer.username}, incoming for demo-customer): 5000.00`);
+  // サインインを要求してしまっていた。あわせて、直前でcustomer2が獲得したポイントが今度は
+  // customer2自身の手数料へ自動充当される様子(docs/adr/0024決定3・4)も示す。
+  console.log(
+    `[furikomi] ${account3} -> ${account1} (${customer.username}, incoming for demo-customer): 5000.00 ` +
+      `(手数料220円、保有ポイントで一部充当)`,
+  );
   const fromNumber = await resolveAccountNumber(outputs, customer2.idToken, account1);
   const furikomiIncoming = await startTransfer(outputs, customer2.idToken, account3, account1, "5000.00");
   await waitForTransferState(outputs, customer2.idToken, furikomiIncoming, ["pending_confirmation"]);
   await confirmTransfer(outputs, customer2.idToken, furikomiIncoming);
   await waitForTransferState(outputs, customer2.idToken, furikomiIncoming, ["credited"]);
+  const customerPoints = await waitForPointsAwarded(outputs, customer.idToken);
+  console.log(`[points] ${customer.username}: +${customerPoints}pt (振込受取による付与、docs/adr/0024決定7)`);
 
   const balance1 = await getBalance(outputs, customer.idToken, account1);
   const balance2 = await getBalance(outputs, customer.idToken, account2);
   const balance3 = await getBalance(outputs, customer2.idToken, account3);
+  const finalCustomer2Points = await getPointsBalance(outputs, customer2.idToken);
 
   console.log("\nDone. Sign in to the web-ui with:");
   for (const username of DEMO_USERNAMES) {
     console.log(`  username: ${username} / password: ${DEMO_PASSWORD}`);
   }
-  console.log(`\n${customer.username}: ${account1} (${balance1}), ${account2} (${balance2})`);
-  console.log(`${customer2.username}: ${account3} (${balance3}), branch ${toNumber.branchCode} no. ${toNumber.accountNumber}`);
+  console.log(`\n${customer.username}: ${account1} (${balance1}), ${account2} (${balance2}), ${customerPoints}pt`);
+  console.log(
+    `${customer2.username}: ${account3} (${balance3}), ${finalCustomer2Points}pt, ` +
+      `branch ${toNumber.branchCode} no. ${toNumber.accountNumber}`,
+  );
   console.log(
     `${customer.username}'s account1 also has an incoming furikomi from ${customer2.username} ` +
       `(branch ${fromNumber.branchCode} no. ${fromNumber.accountNumber}), for comparing sent/received display.`,
+  );
+  console.log(
+    "\nFee/points (docs/adr/0024〜0026): open either customer's 送金 tab and tap the header's ポイント badge " +
+      "to see the points history screen (award/redemption entries), or open the second furikomi's transfer " +
+      "detail to see the 手数料(合計)/ポイント充当/現金でのお支払い breakdown.",
   );
 }
 

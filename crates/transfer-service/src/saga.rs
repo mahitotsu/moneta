@@ -38,8 +38,23 @@ const RECALL_WINDOW: Duration = Duration::hours(24);
 /// ポイント付与率(docs/adr/0024決定7)。仮の値として送金(受取)額の0.1%とする——
 /// `furikomi_max_amount()`と同じPoCスコープの単純化。実運用のポイントプログラム(交換レート、
 /// ステージ別料率)を再現するものではない。
+/// `amount * Decimal::new(1, 3)`はrust_decimalの乗算規則により、両オペランドのscaleの和
+/// (通常2+3=5)をそのまま持ち越す(例: `20000.00 * 0.001` = `20.00000`)——ADR-0025の検証時
+/// これ自体は「表示上の見た目」の問題として文字列比較ではなく数値比較でテストを書くことで
+/// 済ませていたが、実際にはこの値がそのまま`points-service`の残高として永続化され、後日
+/// `fee-service`の`cash_portion`計算に混入し、最終的に`account-service`へ送る`Withdraw`の
+/// `amount`が5桁精度になって`DomainError::InvalidAmountPrecision`で機械的に却下される
+/// (`AMOUNT_DECIMAL_PLACES`は2桁までしか許さない)という実害のあるバグだった——実際に
+/// デモデータ投入(2026-08-19)で、ポイントを獲得した顧客が次の振込でそのポイントを充当
+/// しようとした瞬間に発覚した(既存のe2eテストはポイント残高を`seedPointsBalance`で整数の
+/// まま直接書き込んでいたため、この経路を一度も実際には通っていなかった)。
+/// `account-domain`の`normalize_amount`と同じ`rescale`(不足はゼロ埋め、超過は丸め)で
+/// 発生源において2桁へ正規化し、下流(points-serviceの残高・fee-serviceのcash_portion・
+/// account-serviceへのWithdraw/Deposit金額)すべてに波及しないようにする。
 fn award_points_for(amount: Decimal) -> Decimal {
-    amount * Decimal::new(1, 3)
+    let mut points = amount * Decimal::new(1, 3);
+    points.rescale(AMOUNT_DECIMAL_PLACES);
+    points
 }
 
 /// 送金サガの状態。DynamoDBの1アイテム=1サガ(docs/adr/0010決定2)。account-domainの
@@ -666,6 +681,22 @@ mod tests {
         let (next, action) = advance(&saga, ObservedOutcome::Accepted);
         assert_eq!(next, SagaState::Credited);
         assert_eq!(action, NextAction::IssueAwardPoints { owner_id: saga.to_owner_id.clone(), amount: dec!(0.1) });
+    }
+
+    /// 実デプロイで発見した回帰(2026-08-19、デモデータ投入時): `amount * Decimal::new(1, 3)`は
+    /// rust_decimalの乗算規則でscaleを持ち越す(`20000.00 * 0.001` = `20.00000`、5桁)。この値が
+    /// そのままpoints-serviceの残高として永続化され、後日その顧客が別の振込の手数料へ充当した
+    /// 際にfee-serviceのcash_portion計算経由でaccount-serviceへのWithdraw金額に混入し、
+    /// `DomainError::InvalidAmountPrecision`(2桁まで、`AMOUNT_DECIMAL_PLACES`)で機械的に
+    /// 却下されるという実害があった。`award_points_for`の戻り値が常に2桁以下であることを
+    /// 直接固定する。
+    #[test]
+    fn award_points_for_never_exceeds_two_decimal_places_even_when_the_multiplication_would_carry_more_scale() {
+        let saga = TransferSaga { amount: dec!(20000.00), ..saga_in(TransferKind::Furikomi, SagaState::PendingCredit) };
+        let (_, action) = advance(&saga, ObservedOutcome::Accepted);
+        let NextAction::IssueAwardPoints { amount, .. } = action else { panic!("expected IssueAwardPoints") };
+        assert!(amount.scale() <= AMOUNT_DECIMAL_PLACES, "amount {amount} has scale {}", amount.scale());
+        assert_eq!(amount, dec!(20));
     }
 
     #[test]

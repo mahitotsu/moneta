@@ -38,6 +38,10 @@ export interface StackOutputs {
   // seed-demo-data.tsのデモユーザー作成の両方に使う。
   userPoolId: string;
   userPoolClientId: string;
+  // ポイント残高照会(docs/adr/0025)。seed-demo-data.tsが投入結果のサマリにポイント残高を
+  // 表示するのに使う——この型がADR-0024〜0026のCfnOutputを一つも知らなかったため、
+  // デモデータ投入時に手数料/ポイントの状態を確認する手段が無かった(2026-08-19発見)。
+  pointsQueryApiUrl: string;
 }
 
 const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
@@ -62,6 +66,7 @@ const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
   customerAccountsTableName: "CustomerAccountsTableName",
   userPoolId: "UserPoolId",
   userPoolClientId: "UserPoolClientId",
+  pointsQueryApiUrl: "PointsQueryApiUrl",
 };
 
 export async function fetchStackOutputs(): Promise<StackOutputs> {

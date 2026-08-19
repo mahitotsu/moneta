@@ -17,9 +17,14 @@ The `cdk.json` file tells the CDK Toolkit how to execute your app.
   protects `scripts/seed-demo-data.ts`'s demo data (see below) from deletion.
 * `npm run seed-demo-data`  populate the deployed stack with persistent, non-e2e demo data
   (`scripts/seed-demo-data.ts`) — two Cognito users (`demo-customer`/`demo-customer-2`,
-  password documented in the script) with a few accounts, a completed 振替, and a completed
-  振込 between them, so there's always something to sign in and look at without having to run
-  the e2e suites first. Idempotent (safe to re-run; no-ops once seeded).
+  password documented in the script) with a few accounts, a completed 振替, and two completed
+  振込 between them (one each direction, docs/adr/0024) so both customers earn points and one
+  of them redeems points against the second furikomi's fee — enough to see the fee/points
+  header badge, breakdown, and history (docs/adr/0024〜0026) without having to run the e2e
+  suites first. Idempotent (safe to re-run; no-ops once seeded) — **note**: because it's
+  idempotent, data seeded before a feature that changes what `start`/`confirm` do (e.g. the fee
+  charge added by `0024`) will NOT retroactively pick that feature up; delete the demo Cognito
+  users and re-run to get fresh data reflecting current backend behavior.
 
 `npm run deploy` provisions everything the app needs (DynamoDB tables, Lambdas, API Gateway,
 Cognito, EventBridge) — there's no separate manual setup script to run afterward.
