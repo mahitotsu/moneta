@@ -58,8 +58,12 @@ scaleの和をそのまま持ち越すため(例: `20000.00 * 0.001` = `20.00000
 `award_points_for`の戻り値を`account-domain`の`normalize_amount`と同じ`rescale`
 (`AMOUNT_DECIMAL_PLACES`、不足はゼロ埋め・超過は丸め)で発生源において2桁へ正規化する形で
 修正し、`saga.rs`に専用の回帰テスト(戻り値の`scale()`を直接検証)を追加した。デプロイ後、
-壊れた状態のまま残っていたデモの`demo-customer-2`の20ptを一度Cognitoユーザーごと削除して
-再投入し直し、修正後は問題なく充当できることを確認する。
+壊れた状態のまま残っていたデモの`demo-customer-2`の20.00000ptを一度Cognitoユーザーごと
+削除して再投入し直し、実デプロイ済みスタックに対して確認済み(2026-08-19): 付与されるポイントが
+`+20.00pt`(2桁)になり、そのポイントを充当する2件目のfurikomiが`GET /transfers/{transferId}`で
+`cashFee:"200.00"`・`pointsUsed:"20.00"`・`state:"credited"`として問題なく完了する。既存の
+`transfer-fee-and-points.e2e.test.ts`・`points-query.e2e.test.ts`(9件)・
+`transfer-furikomi.e2e.test.ts`/`transfer-recall.e2e.test.ts`(7件、回帰確認)もいずれもgreen。
 
 ## コンテキスト
 
