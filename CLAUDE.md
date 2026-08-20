@@ -23,7 +23,18 @@ both APIs under one origin so the browser never needs CORS — see `0007`.
 history — this file only orients and points there.** Don't copy specifics (retry counts,
 SQLSTATE codes, backoff parameters, full constraint lists) from an ADR into this file; they've
 already drifted out of sync here once. Read the relevant ADR before changing behavior it covers,
-and add a new ADR (or revise one) when a non-obvious decision is made or reversed.
+and add a new ADR (or revise one) when a non-obvious decision is made or reversed. Reserve a new
+ADR for decisions with a real weighed alternative and lasting rationale (architecture, protocol,
+service/data boundary, technology choice) — a display bug fix or a one-off correction is a
+commit, not an ADR. An ADR's "Status" section states what's Accepted/Superseded and, at most, a
+one-line pointer to the test suite that verifies it live — it is not a running log of every
+`cargo test`/deploy/verification session; that detail belongs in commit messages, which this
+project already writes thoroughly. `docs/insights.md` is the distillation of *what these ADRs
+collectively taught us* about building an event-driven net-banking system — the actual
+deliverable this whole PoC exists to produce, as opposed to the process artifacts (ADRs,
+`docs/production-readiness-matrix.md`, `docs/decision-tables.md`) that exist to validate and
+find gaps in individual claims. Revisit it when a new ADR changes or reinforces a claim it
+records.
 
 - `0001`: microservice boundaries (aggregate ≠ microservice; bounded contexts) and event-driven
   service integration — Notification service remains proposed/out of scope; Query service is
