@@ -9,7 +9,13 @@ Accepted。`crates/query-service`(`src/bin/query_projector.rs`)・`crates/transf
 `infra/scripts/backfill-item-owners.ts`(新規)に実装する。
 
 `cargo test`/`cargo clippy`(全crate、警告0件)、`infra`のCDK synthテスト(48件、新規4件を含む)
-がすべてgreen。
+がすべてgreen。2026-08-20、デプロイ後に`infra/scripts/backfill-item-owners.ts`を実行し
+(既存の口座9件・取引履歴34件・送金18件へ属性を補完)、`api-e2e`をライブスタックに対して実行
+——新規`item-level-authorization.e2e.test.ts`を含む28スイート62テストが全てgreen(実行過程で
+2件の実機ならではの発見があり、下記トレードオフ節・および本文中に記録: 既存の複数識別子
+シナリオが「別人のqueryApiで自分の口座を確認する」という、まさにこのADRが塞いだ抜け穴に
+依存していたため修正が必要だったこと、L1のプロパティベーステストが追加レイテンシの累積で
+既存のタイムアウト値に収まらなくなったこと)。
 
 ## コンテキスト
 
