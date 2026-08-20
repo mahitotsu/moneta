@@ -8,14 +8,12 @@ Accepted。`crates/query-service`(`src/bin/query_projector.rs`)・`crates/transf
 `listTransactionsIntegration`・`getTransferIntegration`の3つのVTL)・
 `infra/scripts/backfill-item-owners.ts`(新規)に実装する。
 
-`cargo test`/`cargo clippy`(全crate、警告0件)、`infra`のCDK synthテスト(48件、新規4件を含む)
-がすべてgreen。2026-08-20、デプロイ後に`infra/scripts/backfill-item-owners.ts`を実行し
-(既存の口座9件・取引履歴34件・送金18件へ属性を補完)、`api-e2e`をライブスタックに対して実行
-——新規`item-level-authorization.e2e.test.ts`を含む28スイート62テストが全てgreen(実行過程で
-2件の実機ならではの発見があり、下記トレードオフ節・および本文中に記録: 既存の複数識別子
-シナリオが「別人のqueryApiで自分の口座を確認する」という、まさにこのADRが塞いだ抜け穴に
-依存していたため修正が必要だったこと、L1のプロパティベーステストが追加レイテンシの累積で
-既存のタイムアウト値に収まらなくなったこと)。
+`cargo test`/`cargo clippy`(全crate、警告0件)、`infra`のCDK synth(48件)、`api-e2e`
+(新規`item-level-authorization.e2e.test.ts`を含む28スイート62テスト)がライブスタックに対して
+green。デプロイ後の`backfill-item-owners.ts`実行と、実機検証で見つかった2件の発見(既存の
+複数識別子シナリオがこのADRの塞いだ抜け穴に依存していたこと——[insights.md](../insights.md)
+2.2、L1のプロパティベーステストが追加レイテンシでタイムアウトに触れたこと)の詳細はコミット
+ログを参照。
 
 ## コンテキスト
 

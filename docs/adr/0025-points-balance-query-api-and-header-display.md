@@ -2,56 +2,14 @@
 
 ## ステータス
 
-Accepted。`infra/lib/account-pipeline-stack.ts`(`PointsQueryApi`新規、CloudFrontプレフィックス
-`/points-query-api`追加)・`web-ui/src/api/`・`web-ui/src/hooks/usePointsBalance.ts`(新規)・
-`web-ui/src/components/AppBar.tsx`/`AccountListScreen.tsx`/`TransferListScreen.tsx`。
-`points-service`/`fee-service`/`transfer-service`への変更は無い(純粋に読み取り経路の追加)。
-
-デプロイ後、`api-e2e`の新規`scenarios/points-query.e2e.test.ts`で以下を実デプロイ済みスタックに
-対して検証済み(2026-08-18): 未獲得の顧客に`{"balance": "0"}`が返る・未認証リクエストが401に
-なる・振込でポイントが付与された後は`GET /customers/me/points`でも同じ値が見える。検証中、
-`amount * award_rate`(`saga.rs`の`award_points_for`)がscaleを持ち越して`"0.300"`のような
-文字列になりうることに気づき(`rust_decimal`の乗算はscaleを自動的に正規化しない)、
-テストの期待値を文字列の完全一致ではなく数値比較に直した——CLAUDE.mdの「AWS/ライブラリの
-挙動は仮定せず確認する」を踏まえ、憶測で`"0.3"`と決め打ちしなかった。
-
-**未検証のまま残るもの**: `web-ui`の単体テスト(vitest、モック経由)は全てgreenだが、
-実際のブラウザで`BrandAppBar`にポイント残高バッジが正しく描画されるかは`ui-e2e`
-(Playwright)による確認をまだ行っていない——バックエンドのAPI契約は検証済みだが、
-見た目の検証は次の機会に残す。
-
-**追記(同日)**: 最初のデプロイ後、ユーザーから「手数料が見えない」という指摘を受けて確認した
-ところ、決定3で述べる`cashFee`の投影・表示が実装から漏れていたことが判明した(コンテキストで
-「`transfer-status-projector.rs`が持っている`cash_fee`を送金詳細画面に出せる」と自分で書いて
-おきながら、実際にはポイント残高の話だけを実装して終えていた)。デモデータの問題ではなく
-実装漏れだったため、同じセッション内で決定3として追加・実装し、`api-e2e`の
-`scenarios/transfer-fee-and-points.e2e.test.ts`にAPI経由での確認を追加して再デプロイ・
-再検証した。
-
-**追記2(同日)**: 決定3のデプロイ後、ユーザーから「手数料が¥のみ(数字が付かない)と表示される」
-という指摘を再度受けた。原因は二重で、①ご覧になった送金が`cashFee`導入(0024/0025)より前に
-作られた既存データだったため、DynamoDBの当該アイテムに`cashFee`属性自体が存在しなかった
-(スキーマレスなDynamoDBへ後から必須属性を足しても既存アイテムには反映されない——`0011`の
-`owner_id`導入時と同じ既知の現象)、②それに加えて自分のVTL側の不備で、属性が存在しない場合に
-`$input.path(...)`が返す空文字列をそのまま`"cashFee":""`としてしまい、
-`formatCurrency("")`が「¥」だけの壊れた表示になっていた。②を`#if`による`"0"`への
-フォールバックとして修正し、実際に壊れて見えていた送金IDに対して修正後のAPIレスポンスが
-`"cashFee":"0"`になることを直接確認した。
-
-**追記3(同日)**: この時点ではまだ`TransferDetailScreen.tsx`側が`cashFee !== "0"`の場合
-だけ行を表示する設計(決定3の初版)のままだったため、修正の結果「手数料の行自体が消えた」
-状態になった。ユーザーから「0円のときは非表示なのか」と問われ、さらに「手数料という概念が
-導入されている以上、¥0が明示的に表示されるべきではないか」という指摘を受けて設計を再考し、
-決定3を「`cashFee`が存在する限り`"0"`でも明示的に表示する」へ変更した(本文は最新版に更新
-済み)。
-
-**追記4(2026-08-19)**: 決定3実装当時のトレードオフ「手数料の完全な内訳は次の増分に残す」を
-埋める決定4を追加(下記)。当初想定していた「`fee-service`自身の新しい照会API」は不要だった
-——`fee.event.FeeReserved`のペイロードに`points_used`を1フィールド足すだけで、`cashFee`が
-たどっているのと同じ既存の経路(`fee-service`のイベント→`saga_step.rs`の
-`reserve_fee_observed`→`TransferSagaTable`→`transfer-status-projector`→
-`TransferStatusView`→VTL)にそのまま相乗りできた。新しいAPI/テーブル/Lambdaを一切増やさず、
-既存パイプラインへのフィールド追加のみで完結している。
+Accepted。`infra/lib/account-pipeline-stack.ts`(`PointsQueryApi`新規)・`web-ui/src/api/`・
+`web-ui/src/hooks/usePointsBalance.ts`(新規)・`web-ui/src/components/AppBar.tsx`/
+`AccountListScreen.tsx`/`TransferListScreen.tsx`に決定1・2を実装。決定3・4
+(送金詳細画面への`cashFee`/`pointsUsed`表示)は同セッション内でスコープを広げて追加した。
+`points-service`/`fee-service`/`transfer-service`への変更は決定4のイベントペイロード拡張
+(`points_used`フィールド追加)以外はない。`api-e2e`(`points-query.e2e.test.ts`・
+`transfer-fee-and-points.e2e.test.ts`)がライブスタックに対してgreen(開発中に見つかった
+実装漏れ・表示不具合の詳細はコミットログ・[insights.md](../insights.md)3.1を参照)。
 
 ## コンテキスト
 
@@ -152,6 +110,9 @@ points_used`と計算している、`fee-service/src/reservation.rs`)、`web-ui`
 
 ## トレードオフ
 
+- **`BrandAppBar`にポイント残高バッジが実際に描画されるかは、`ui-e2e`(ブラウザ)では未検証**:
+  バックエンドのAPI契約(`points-query.e2e.test.ts`)と`web-ui`の単体テスト(vitest、モック経由)
+  はどちらもgreenだが、実ブラウザでの描画確認は次の機会に残している。
 - **`DetailAppBar`にはポイント残高が出ない**: 送金詳細・口座詳細を見ている間はヘッダーから
   ポイント残高が消える。「常に」表示を厳密に守るなら妥協だが、`0022`のミニマルな詳細画面設計を
   崩さない方を優先した。

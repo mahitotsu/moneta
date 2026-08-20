@@ -4,66 +4,14 @@
 
 Accepted。`crates/fee-service`(新規)・`crates/points-service`(新規)・`crates/transfer-service`の
 `saga.rs`/`commands.rs`/`persistence.rs`/`bin/command_intake.rs`/`bin/saga_step.rs`・
-`infra/lib/account-pipeline-stack.ts`のFee/Points serviceセクション、いずれも実装済み。
-`cargo test --workspace`(全テストgreen)・`cargo clippy --workspace --all-targets`(警告ゼロ)・
-`infra`の`npm test`(CDK synth、42件全合格)で確認済み。2026-08-17、デプロイ後に既存の
-`api-e2e`(振込・組戻しシナリオ)を実行し、実デプロイでしか見つからない不具合を1件発見・修正
-した:`bin/saga_step.rs`の`issue_action`が`NextAction::IssueWithdraw`を`unreachable!()`のまま
-残していたため(`reserve_fee_observed`がこの経路で新たに`IssueWithdraw`を返すようになった
-ことをこの1箇所だけ反映し忘れていた)、`ReservingFee`→`PendingDebit`遷移のたびにLambdaが
-panicし、全ての振込がタイムアウトしていた。修正・再デプロイ後、`transfer-furikomi`/
-`transfer-recall`とも全件合格を確認した。
-
-振込の残高計算に伴い、既存の`api-e2e`シナリオ(`transfer-furikomi.e2e.test.ts`・
-`transfer-recall.e2e.test.ts`)のうち手数料導入前の期待残高を固定していたテストを更新した。
-特に**組戻し(recall)は元のfurikomiで徴収された手数料を返金しない**という設計判断(送金額
-(300円)だけを組戻し、220円の手数料は組戻し後も送金元に残る)を今回のセッションで確定した
-——決定2の「組戻し自体は手数料を課さない」は「新しい組戻し取引に新しい手数料を乗せない」
-という意味であり、「元の取引の手数料を遡って取り消す」ことまでは意味しない、と明文化する。
-実際の銀行慣行(振込手数料は取消後も非返金であるのが一般的)にも合致し、組戻しのサガが元の
-`transfer_id`の手数料予約に踏み込む新しい結合を持ち込まずに済む(`0011`決定5の「組戻しは
-新しい終端状態を追加しない」というシンプルさを保つ)。
-
-`account-service`/`query-service`/`account-domain`への変更は無い。
-
-**別件(同session、本ADRの決定ではないが記録に値する)**: `api-e2e/support/httpClient.ts`の
-`deposit`/`withdraw`ヘルパーが`[[0023-transaction-channel-provenance]]`で`channel`が必須に
-なった後も追随しておらず、19シナリオファイルに影響する既存の潜在バグを発見・修正した
-(`channel`引数を追加し、既定値`"Atm"`を持たせた)。修正後、`api-e2e`フルスイート
-(25スイート・49テスト)は48件即時合格、残り1件(`conservation-property.e2e.test.ts`、
-furikaeのみを使う資金保存則のプロパティベーステストで手数料機能とは無関係)は並列実行時の
-リソース競合により600秒のタイムアウトぎりぎりで超過しただけと判明——単独実行では約101秒で
-合格することを確認済み。
-
-**追記(2026-08-19)**: `infra/scripts/seed-demo-data.ts`(ADR-0024後もデモデータは更新されて
-いるか、という確認)を実行中、実際にポイントを獲得した顧客が別の振込でそのポイントを充当
-しようとした瞬間に振込が`Failed`になる、という実害のあるバグを発見した。原因は
-`award_points_for(amount) = amount * Decimal::new(1, 3)`——rust_decimalの乗算は両オペランドの
-scaleの和をそのまま持ち越すため(例: `20000.00 * 0.001` = `20.00000`、5桁)、この値が
-`points-service`の残高としてそのまま永続化される。この不整合な精度の値は、後で
-`ledger::reserve`(`points_used`)→`fee-service`の`cash_portion`計算→`TransferSaga.cash_fee`
-と伝播し、最終的に`account-service`へ送る`Withdraw`の`amount`(`transfer_amount + cash_fee`)が
-5桁精度のまま組み立てられ、`AMOUNT_DECIMAL_PLACES`(2桁まで)を強制する
-`DomainError::InvalidAmountPrecision`で機械的に却下される——`PendingDebit`が却下→`Failed`→
-`RefundFee`という、コード上は正しく動作する巻き戻し経路ではあるが、振込そのものは100%失敗する。
-
-この経路は既存の`api-e2e`では一度も踏まれていなかった:`transfer-fee-and-points.e2e.test.ts`は
-`seedPointsBalance`でポイント残高を整数のまま直接DynamoDBに書き込んでいたため
-(テスト専用の裏口、`support/pointsState.ts`)、「実際に`AwardPoints`で獲得したポイントを
-その後の振込で充当する」という一連の流れを一度も実際には通していなかった。ADR-0025の検証時に
-この`0.1`が`"0.300"`のような文字列になりうることには気づいていた(テストの期待値を数値比較に
-直して済ませた)が、これを「表示上のフォーマットの問題」としてのみ扱い、下流の`Withdraw`金額の
-精度制約を壊しうることには気づいていなかった。
-
-`award_points_for`の戻り値を`account-domain`の`normalize_amount`と同じ`rescale`
-(`AMOUNT_DECIMAL_PLACES`、不足はゼロ埋め・超過は丸め)で発生源において2桁へ正規化する形で
-修正し、`saga.rs`に専用の回帰テスト(戻り値の`scale()`を直接検証)を追加した。デプロイ後、
-壊れた状態のまま残っていたデモの`demo-customer-2`の20.00000ptを一度Cognitoユーザーごと
-削除して再投入し直し、実デプロイ済みスタックに対して確認済み(2026-08-19): 付与されるポイントが
-`+20.00pt`(2桁)になり、そのポイントを充当する2件目のfurikomiが`GET /transfers/{transferId}`で
-`cashFee:"200.00"`・`pointsUsed:"20.00"`・`state:"credited"`として問題なく完了する。既存の
-`transfer-fee-and-points.e2e.test.ts`・`points-query.e2e.test.ts`(9件)・
-`transfer-furikomi.e2e.test.ts`/`transfer-recall.e2e.test.ts`(7件、回帰確認)もいずれもgreen。
+`infra/lib/account-pipeline-stack.ts`のFee/Points serviceセクションに実装。`account-service`・
+`query-service`・`account-domain`への変更はない。`cargo test`/`cargo clippy`(全crate)・
+`infra`のCDK synth・`api-e2e`(`scenarios/transfer-fee-and-points.e2e.test.ts`)いずれもgreen、
+ライブスタックに対して検証済み(開発中に見つかった実装バグの詳細はコミットログ・
+[insights.md](../insights.md)3.1を参照)。**組戻し(recall)は元のfurikomiで徴収された手数料を
+返金しない**(送金額のみを組戻し、手数料は組戻し後も送金元に残る)——決定2の「組戻し自体は
+手数料を課さない」は新しい取引に新しい手数料を乗せないという意味であり、元の取引の手数料を
+遡って取り消すことまでは意味しない。実際の銀行慣行に合わせた意図的な決定。
 
 ## コンテキスト
 
@@ -194,8 +142,13 @@ PendingConfirmation --confirm--> ReservingFee --(FeeReserved観測)--> PendingDe
 `PendingCredit`が成功した場合(`Credited`へ遷移)、`saga.kind == Furikomi`であれば追加で
 `NextAction::IssueAwardPoints { owner_id: to_owner_id, amount: award_points_for(saga.amount) }`を
 `points-service`へ直接発行する(`fee-service`は一切関与しない——付与は手数料とは独立した
-関心事であるため)。`award_points_for`は`amount`の0.1%を仮の付与率とする固定関数。振替・組戻しは
-決定2と同じ理由(自分の口座間の往復で無限にポイントを稼げる経路を作らないため)で対象外とする。
+関心事であるため)。`award_points_for`は`amount`の0.1%を仮の付与率とする固定関数で、戻り値は
+`account-domain`の`normalize_amount`と同じ`rescale`により必ず2桁精度へ正規化する
+——`rust_decimal`の乗算は両オペランドのscaleの和をそのまま持ち越す(例:
+`20000.00 * 0.001` = `20.00000`、5桁)ため、正規化しないとこの値が`points_used`→`cash_portion`→
+`Withdraw`の金額へと伝播し、`account-domain`の`AMOUNT_DECIMAL_PLACES`制約(2桁まで)に
+違反して振込そのものが却下される。振替・組戻しは決定2と同じ理由(自分の口座間の往復で
+無限にポイントを稼げる経路を作らないため)で対象外とする。
 
 失敗時の返却(決定5の`RefundFee`→`RefundPoints`)も同様に、`transfer-service`は`fee-service`だけを
 呼び、`points-service`を直接は呼ばない——ポイントの「原資としての消費」を仲介したのが
@@ -255,60 +208,20 @@ PendingConfirmation --confirm--> ReservingFee --(FeeReserved観測)--> PendingDe
   fire-and-forgetにする設計(決定6)により、`transfer-service`の状態遷移を1つも増やさずに
   済むため不要。
 
-## 次のステップ
+## 実装メモ
 
-実装・デプロイ・E2E検証まですべて完了済み:
-
-1. ✅ `crates/points-service`(`ledger.rs`: `reserve`/`credit`)——単体テスト6件
-2. ✅ `crates/fee-service`(`reservation.rs`: `fee_for`/`start`/`points_reserved`/`refund`)——単体
-   テスト7件
-3. ✅ `crates/transfer-service`の`saga.rs`(`ReservingFee`状態、`reserve_fee_observed`、`advance`の
-   拡張、`TransferSaga`への`from_owner_id`/`to_owner_id`/`cash_fee`追加)・`persistence.rs`
-   (`advance_saga_to_pending_debit_with_fee`)・`commands.rs`(`send_reserve_fee`/`send_refund_fee`/
-   `send_award_points`)・`bin/command_intake.rs`/`bin/saga_step.rs`のLambda glue——単体テスト36件、
-   `cargo test --workspace`/`cargo clippy --workspace --all-targets`とも green
-
-4. ✅ `crates/points-service`のLambda glue: `bin/command_intake.rs`(`ReservePoints`/
-   `RefundPoints`/`AwardPoints`、楽観ロックのリトライ付き)・`bin/outbox_projector.rs`
-   (`points.event.PointsReserved`)・`persistence.rs`(`PointsTable`、冪等性ログ、決定6の
-   アウトボックス)
-5. ✅ `crates/fee-service`のLambda glue: `bin/command_intake.rs`(`ReserveFee`/`RefundFee`)・
-   `bin/points_observation.rs`(`points.event.PointsReserved`の観測、`transfer-service`の
-   `bin/saga_step.rs`と同型)・`bin/outbox_projector.rs`(`fee.event.FeeReserved`)・
-   `persistence.rs`(`FeeReservationsTable`)・`commands.rs`(`points-service`宛のコマンド送信)。
-   実装中に発見した重要な事実(CLAUDE.mdの「AWS/ライブラリの挙動は仮定せず確認する」を適用):
-   `time`クレートの`serde-human-readable`は`OffsetDateTime`を**RFC3339ではなく独自の空白区切り
-   形式**でシリアライズする(`time-0.3.54`のソースで確認)。`account_domain::EventEnvelope`
-   (`transfer-service`が`fee.event.FeeReserved`のパースに使う型)の`occurred_at`はこの形式を
-   要求するため、`fee-service`の`outbox_projector.rs`はRFC3339文字列を手組みするのではなく、
-   DynamoDBから読んだ値を一度`OffsetDateTime`に戻し、`account_domain::EventEnvelope`と同形の
-   ローカル構造体(`account-domainには依存しないが同じ`time`クレートを使う)を介して
-   `serde_json`にシリアライズさせることで形式を一致させている。
-
-6. ✅ `infra/lib/account-pipeline-stack.ts`: `FeeCommandQueue`/`PointsCommandQueue`(それぞれ
-   DLQ+CloudWatchアラーム込み)、`PointsTable`/`PointsEventsTable`/`PointsIdempotencyTable`/
-   `FeeReservationsTable`/`FeeEventsTable`、5つの新規Lambda(`points-command-intake`/
-   `points-outbox-projector`/`fee-command-intake`/`fee-points-observation`/
-   `fee-outbox-projector`)、`FeePointsObservationRule`(新規)、既存の
-   `TransferSagaObservationRule`への`fee-service`ソース追加、IAM(`transferCommandIntakeFn`/
-   `transferSagaStepFn`への既存定義ブロックを書き換えない追記——`.addEnvironment()`/
-   `grantSendMessages()`を後段で呼ぶ形)。`infra/test/account-pipeline-stack.test.ts`の
-   Lambda数(15→20)・DynamoDBテーブル一覧・CloudWatchアラーム数(4→8)・
-   `TransferSagaObservationRule`のsource配列を検証するテストを合わせて更新し、
-   account-service専用のTransactWriteItems回帰テストがpoints-service/fee-serviceの
-   同種の権限を誤って数えないよう実行ロール単位に絞り込んだ。`npm test`(CDK synth、
-   42件全合格)で確認済み。
-
-7. ✅ `api-e2e`シナリオの追加(`scenarios/transfer-fee-and-points.e2e.test.ts`、新規)。
-   `transfer-furikomi.e2e.test.ts`/`transfer-recall.e2e.test.ts`は保有ポイント0(現金全額
-   負担)のケースしか検証していなかったギャップを埋める3シナリオ:
-   - 振込の着金でポイントが付与される(決定7、送金額の0.1%)
-   - 保有ポイントで手数料の一部を充当できる(決定3・4、100pt保有→220円の手数料のうち
-     100ptを充当、残り120円だけ現金負担)
-   - 送金が失敗した場合、消費したポイントは全額返却される(決定5、`FeeReservationsTable`が
-     `refunded`へ遷移することも直接確認)
-   照会APIを持たない`PointsTable`/`FeeReservationsTable`への直接アクセスは新設の
-   `support/pointsState.ts`(`support/sagaState.ts`と同じ「裏口ではなく妥当な検証手段」という
-   位置づけ)で行う。実デプロイ済みスタックに対して3件とも一発で合格を確認した(2026-08-18)。
-   これにより、ステータス節で触れた「`api-e2e`フルスイートは手数料導入前の期待値のまま」
-   というギャップ(保有ポイント0のケースしか通っていなかった)も解消済み。
+- `crates/points-service`(`ledger.rs`)・`crates/fee-service`(`reservation.rs`)・
+  `crates/transfer-service`の`saga.rs`/`persistence.rs`/`commands.rs`に単体テストを持つ。
+  Lambda glue(各crateの`bin/command_intake.rs`/`bin/outbox_projector.rs`/
+  `bin/points_observation.rs`)・`infra/lib/account-pipeline-stack.ts`
+  (`FeeCommandQueue`/`PointsCommandQueue`・関連DynamoDBテーブル・5つの新規Lambda・
+  `FeePointsObservationRule`)は`infra/test/`のCDK synthテストで検証する。
+- `api-e2e/scenarios/transfer-fee-and-points.e2e.test.ts`(新規)がポイント付与・手数料充当・
+  失敗時の返却の3経路を検証する。照会APIを持たない`PointsTable`/`FeeReservationsTable`への
+  直接アクセスは`support/pointsState.ts`(`support/sagaState.ts`と同じ「裏口ではなく妥当な
+  検証手段」という位置づけ)で行う。
+- `time`クレートの`serde-human-readable`は`OffsetDateTime`をRFC3339ではなく独自の空白区切り
+  形式でシリアライズする(`time-0.3.54`のソースで確認済み)。`fee-service`の
+  `outbox_projector.rs`は`fee.event.FeeReserved`が`account_domain::EventEnvelope`の
+  `occurred_at`(RFC3339を要求)としてパースされるよう、RFC3339文字列を手組みせず
+  `OffsetDateTime`を経由してシリアライズし直している。
