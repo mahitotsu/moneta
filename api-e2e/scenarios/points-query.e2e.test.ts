@@ -39,11 +39,14 @@ describe("GET /customers/me/points(docs/adr/0025)", () => {
     const commandApiA = createCommandApi(outputs.commandApiUrl, identityA.idToken);
     const commandApiB = createCommandApi(outputs.commandApiUrl, identityB.idToken);
     const queryApi = createQueryApi(outputs.queryApiUrl, identityA.idToken);
+    // docs/adr/0027: GET /accounts/{id}はitem単位の認可を持つため、口座Bの状態確認は
+    // 口座Bの名義(identityB)のqueryApiで行う——identityAのqueryApiで問い合わせると403になる。
+    const queryApiB = createQueryApi(outputs.queryApiUrl, identityB.idToken);
     const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl, identityA.idToken);
     const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identityA.idToken);
 
     const fromId = await openFreshAccount(commandApiA, queryApi, "1000.00");
-    const toId = await openFreshAccount(commandApiB, queryApi, "0.00");
+    const toId = await openFreshAccount(commandApiB, queryApiB, "0.00");
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, fromId);
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, toId);
 
@@ -78,11 +81,14 @@ describe("GET /customers/me/points/history(docs/adr/0026)", () => {
     const commandApiA = createCommandApi(outputs.commandApiUrl, identityA.idToken);
     const commandApiB = createCommandApi(outputs.commandApiUrl, identityB.idToken);
     const queryApi = createQueryApi(outputs.queryApiUrl, identityA.idToken);
+    // docs/adr/0027: GET /accounts/{id}はitem単位の認可を持つため、口座Bの状態確認は
+    // 口座Bの名義(identityB)のqueryApiで行う——identityAのqueryApiで問い合わせると403になる。
+    const queryApiB = createQueryApi(outputs.queryApiUrl, identityB.idToken);
     const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl, identityA.idToken);
     const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identityA.idToken);
 
     const fromId = await openFreshAccount(commandApiA, queryApi, "1000.00");
-    const toId = await openFreshAccount(commandApiB, queryApi, "0.00");
+    const toId = await openFreshAccount(commandApiB, queryApiB, "0.00");
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, fromId);
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, toId);
 

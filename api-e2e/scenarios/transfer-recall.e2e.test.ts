@@ -38,13 +38,17 @@ const FURIKOMI_FEE = 220;
 async function creditedFurikomi(
   commandApiA: ReturnType<typeof createCommandApi>,
   commandApiB: ReturnType<typeof createCommandApi>,
-  queryApi: ReturnType<typeof createQueryApi>,
+  queryApiA: ReturnType<typeof createQueryApi>,
+  queryApiB: ReturnType<typeof createQueryApi>,
   transferCommandApi: TransferCommandApi,
   transferQueryApi: TransferQueryApi,
   outputs: Awaited<ReturnType<typeof fetchStackOutputs>>,
 ) {
-  const fromId = await openFreshAccount(commandApiA, queryApi, "1000.00");
-  const toId = await openFreshAccount(commandApiB, queryApi, "0.00");
+  // docs/adr/0027: GET /accounts/{id}はitem単位の認可を持つため、それぞれの口座の状態確認は
+  // その口座の名義自身のqueryApiで行う——identityAのqueryApiでidentityBの口座を問い合わせると
+  // 403になる。
+  const fromId = await openFreshAccount(commandApiA, queryApiA, "1000.00");
+  const toId = await openFreshAccount(commandApiB, queryApiB, "0.00");
   await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, fromId);
   await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, toId);
 
@@ -64,12 +68,14 @@ describe("J9: 期限内のCredited済み振込は組戻しできる", () => {
     const commandApiA = createCommandApi(outputs.commandApiUrl, identityA.idToken);
     const commandApiB = createCommandApi(outputs.commandApiUrl, identityB.idToken);
     const queryApi = createQueryApi(outputs.queryApiUrl, identityA.idToken);
+    const queryApiB = createQueryApi(outputs.queryApiUrl, identityB.idToken);
     const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl, identityA.idToken);
     const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identityA.idToken);
     const { fromId, toId, transferId } = await creditedFurikomi(
       commandApiA,
       commandApiB,
       queryApi,
+      queryApiB,
       transferCommandApi,
       transferQueryApi,
       outputs,
@@ -96,7 +102,7 @@ describe("J9: 期限内のCredited済み振込は組戻しできる", () => {
     );
     await waitFor(
       async () => {
-        const view = await queryApi.getAccount(toId);
+        const view = await queryApiB.getAccount(toId);
         return view && Number(view.balance) === 0 ? view : undefined;
       },
       { description: `account ${toId} balance to return to 0 after recall` },
@@ -111,12 +117,14 @@ describe("J10a: 受取人の残高不足での組戻しはfailedになる", () =
     const commandApiA = createCommandApi(outputs.commandApiUrl, identityA.idToken);
     const commandApiB = createCommandApi(outputs.commandApiUrl, identityB.idToken);
     const queryApi = createQueryApi(outputs.queryApiUrl, identityA.idToken);
+    const queryApiB = createQueryApi(outputs.queryApiUrl, identityB.idToken);
     const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl, identityA.idToken);
     const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identityA.idToken);
     const { fromId, toId, transferId } = await creditedFurikomi(
       commandApiA,
       commandApiB,
       queryApi,
+      queryApiB,
       transferCommandApi,
       transferQueryApi,
       outputs,
@@ -128,7 +136,7 @@ describe("J10a: 受取人の残高不足での組戻しはfailedになる", () =
     expect(withdrawResponse.status).toBe(202);
     await waitFor(
       async () => {
-        const view = await queryApi.getAccount(toId);
+        const view = await queryApiB.getAccount(toId);
         return view && Number(view.balance) === 50 ? view : undefined;
       },
       { description: `account ${toId} balance to drop to 50 before attempting recall` },
@@ -141,7 +149,7 @@ describe("J10a: 受取人の残高不足での組戻しはfailedになる", () =
     expect(status.state).toBe("failed");
 
     const fromView = await queryApi.getAccount(fromId);
-    const toView = await queryApi.getAccount(toId);
+    const toView = await queryApiB.getAccount(toId);
     expect(Number(fromView?.balance)).toBe(1000 - 300 - FURIKOMI_FEE); // 組戻し失敗時も手数料は既に徴収済みのまま。
     expect(Number(toView?.balance)).toBe(50.0);
   });
@@ -154,12 +162,14 @@ describe("J10b: 組戻し可能な時間窓を過ぎている場合は受付時�
     const commandApiA = createCommandApi(outputs.commandApiUrl, identityA.idToken);
     const commandApiB = createCommandApi(outputs.commandApiUrl, identityB.idToken);
     const queryApi = createQueryApi(outputs.queryApiUrl, identityA.idToken);
+    const queryApiB = createQueryApi(outputs.queryApiUrl, identityB.idToken);
     const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl, identityA.idToken);
     const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identityA.idToken);
     const { fromId, toId, transferId } = await creditedFurikomi(
       commandApiA,
       commandApiB,
       queryApi,
+      queryApiB,
       transferCommandApi,
       transferQueryApi,
       outputs,
@@ -178,7 +188,7 @@ describe("J10b: 組戻し可能な時間窓を過ぎている場合は受付時�
     expect(recallStatus).toBeNull();
 
     const fromView = await queryApi.getAccount(fromId);
-    const toView = await queryApi.getAccount(toId);
+    const toView = await queryApiB.getAccount(toId);
     expect(Number(fromView?.balance)).toBe(1000 - 300 - FURIKOMI_FEE); // 組戻し却下時も手数料は既に徴収済みのまま。
     expect(Number(toView?.balance)).toBe(300.0);
   });

@@ -34,13 +34,16 @@ describe("振込の着金でポイントが付与される(docs/adr/0024決定7)
     const commandApiA = createCommandApi(outputs.commandApiUrl, identityA.idToken);
     const commandApiB = createCommandApi(outputs.commandApiUrl, identityB.idToken);
     const queryApi = createQueryApi(outputs.queryApiUrl, identityA.idToken);
+    // docs/adr/0027: GET /accounts/{id}はitem単位の認可を持つため、口座Bの状態確認は
+    // 口座Bの名義(identityB)のqueryApiで行う——identityAのqueryApiで問い合わせると403になる。
+    const queryApiB = createQueryApi(outputs.queryApiUrl, identityB.idToken);
     const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl, identityA.idToken);
     const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identityA.idToken);
     const toOwnerId = subFromIdToken(identityB.idToken);
     expect(toOwnerId).toBeDefined();
 
     const fromId = await openFreshAccount(commandApiA, queryApi, "1000.00");
-    const toId = await openFreshAccount(commandApiB, queryApi, "0.00");
+    const toId = await openFreshAccount(commandApiB, queryApiB, "0.00");
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, fromId);
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, toId);
 
@@ -61,6 +64,9 @@ describe("保有ポイントで手数料の一部を充当できる(docs/adr/002
     const commandApiA = createCommandApi(outputs.commandApiUrl, identityA.idToken);
     const commandApiB = createCommandApi(outputs.commandApiUrl, identityB.idToken);
     const queryApi = createQueryApi(outputs.queryApiUrl, identityA.idToken);
+    // docs/adr/0027: GET /accounts/{id}はitem単位の認可を持つため、口座Bの状態確認は
+    // 口座Bの名義(identityB)のqueryApiで行う——identityAのqueryApiで問い合わせると403になる。
+    const queryApiB = createQueryApi(outputs.queryApiUrl, identityB.idToken);
     const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl, identityA.idToken);
     const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identityA.idToken);
     const fromOwnerId = subFromIdToken(identityA.idToken);
@@ -72,7 +78,7 @@ describe("保有ポイントで手数料の一部を充当できる(docs/adr/002
     await seedPointsBalance(outputs.pointsTableName, fromOwnerId!, seededPoints);
 
     const fromId = await openFreshAccount(commandApiA, queryApi, "1000.00");
-    const toId = await openFreshAccount(commandApiB, queryApi, "0.00");
+    const toId = await openFreshAccount(commandApiB, queryApiB, "0.00");
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, fromId);
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, toId);
 
@@ -119,6 +125,9 @@ describe("送金が失敗した場合、消費したポイントは返却され�
     const commandApiA = createCommandApi(outputs.commandApiUrl, identityA.idToken);
     const commandApiB = createCommandApi(outputs.commandApiUrl, identityB.idToken);
     const queryApi = createQueryApi(outputs.queryApiUrl, identityA.idToken);
+    // docs/adr/0027: GET /accounts/{id}はitem単位の認可を持つため、口座Bの状態確認は
+    // 口座Bの名義(identityB)のqueryApiで行う——identityAのqueryApiで問い合わせると403になる。
+    const queryApiB = createQueryApi(outputs.queryApiUrl, identityB.idToken);
     const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl, identityA.idToken);
     const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identityA.idToken);
     const fromOwnerId = subFromIdToken(identityA.idToken);
@@ -131,7 +140,7 @@ describe("送金が失敗した場合、消費したポイントは返却され�
     // 送金額(300円)そのものに満たない残高にしておく——PendingDebitのWithdraw(300+0)が
     // 残高不足で却下されるようにする。
     const fromId = await openFreshAccount(commandApiA, queryApi, "100.00");
-    const toId = await openFreshAccount(commandApiB, queryApi, "0.00");
+    const toId = await openFreshAccount(commandApiB, queryApiB, "0.00");
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, fromId);
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, toId);
 
@@ -174,6 +183,9 @@ describe("送金が失敗した場合、消費したポイントは返却され�
     const commandApiA = createCommandApi(outputs.commandApiUrl, identityA.idToken);
     const commandApiB = createCommandApi(outputs.commandApiUrl, identityB.idToken);
     const queryApi = createQueryApi(outputs.queryApiUrl, identityA.idToken);
+    // docs/adr/0027: GET /accounts/{id}はitem単位の認可を持つため、口座Bの状態確認は
+    // 口座Bの名義(identityB)のqueryApiで行う——identityAのqueryApiで問い合わせると403になる。
+    const queryApiB = createQueryApi(outputs.queryApiUrl, identityB.idToken);
     const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl, identityA.idToken);
     const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identityA.idToken);
     const fromOwnerId = subFromIdToken(identityA.idToken);
@@ -184,7 +196,7 @@ describe("送金が失敗した場合、消費したポイントは返却され�
     await seedPointsBalance(outputs.pointsTableName, fromOwnerId!, FURIKOMI_FEE);
 
     const fromId = await openFreshAccount(commandApiA, queryApi, "1000.00");
-    const toId = await openFreshAccount(commandApiB, queryApi, "0.00");
+    const toId = await openFreshAccount(commandApiB, queryApiB, "0.00");
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, fromId);
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, toId);
 
@@ -192,7 +204,7 @@ describe("送金が失敗した場合、消費したポイントは返却され�
     // Compensatingへ進むようにする(FC4と同じ凍結操作)。
     const freezeResponse = await commandApiB.freeze(toId, "CustomerRequest");
     expect(freezeResponse.status).toBe(202);
-    await waitForStatus(queryApi, toId, "frozen");
+    await waitForStatus(queryApiB, toId, "frozen");
 
     const transferId = crypto.randomUUID();
     await transferCommandApi.start({ transferId, fromAccountId: fromId, toAccountId: toId, amount: "300.00" });

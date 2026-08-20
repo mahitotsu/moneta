@@ -66,8 +66,11 @@ describe("docs/adr/0027決定2: GET /transfers/{transferId}は送金元・送金
     const commandApiSender = createCommandApi(outputs.commandApiUrl, sender.idToken);
     const commandApiReceiver = createCommandApi(outputs.commandApiUrl, receiver.idToken);
     const queryApi = createQueryApi(outputs.queryApiUrl, sender.idToken);
+    // 口座BはreceiverのidTokenのqueryApiで確認する——本ADR自身が作った403判定のせいで、
+    // senderのqueryApiでreceiverの口座を確認すると(意図通り)403になってしまうため。
+    const queryApiReceiver = createQueryApi(outputs.queryApiUrl, receiver.idToken);
     const fromId = await openFreshAccount(commandApiSender, queryApi, "1000.00");
-    const toId = await openFreshAccount(commandApiReceiver, queryApi, "0.00");
+    const toId = await openFreshAccount(commandApiReceiver, queryApiReceiver, "0.00");
 
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, fromId);
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, toId);

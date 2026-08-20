@@ -35,10 +35,13 @@ describe("J5/J6: 振込(名義不一致)は確認前は出金されず、確認�
     const commandApiA = createCommandApi(outputs.commandApiUrl, identityA.idToken);
     const commandApiB = createCommandApi(outputs.commandApiUrl, identityB.idToken);
     const queryApi = createQueryApi(outputs.queryApiUrl, identityA.idToken);
+    // docs/adr/0027: GET /accounts/{id}はitem単位の認可を持つため、口座Bの状態確認は
+    // 口座Bの名義(identityB)のqueryApiで行う——identityAのqueryApiで問い合わせると403になる。
+    const queryApiB = createQueryApi(outputs.queryApiUrl, identityB.idToken);
     const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl, identityA.idToken);
     const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identityA.idToken);
     const fromId = await openFreshAccount(commandApiA, queryApi, "1000.00");
-    const toId = await openFreshAccount(commandApiB, queryApi, "0.00");
+    const toId = await openFreshAccount(commandApiB, queryApiB, "0.00");
 
     // 送金元・送金先双方の名義インデックスへの反映を待ってからStartする——反映前に送ると
     // command_intake.rs側でInfra扱いの再試行になり(docs/adr/0011)、テストが遅くなるだけで
@@ -58,7 +61,7 @@ describe("J5/J6: 振込(名義不一致)は確認前は出金されず、確認�
     const pending = await waitForTransferState(transferQueryApi, transferId, ["pending_confirmation"]);
     expect(pending.kind).toBe("furikomi");
     const fromBeforeConfirm = await queryApi.getAccount(fromId);
-    const toBeforeConfirm = await queryApi.getAccount(toId);
+    const toBeforeConfirm = await queryApiB.getAccount(toId);
     expect(Number(fromBeforeConfirm?.balance)).toBe(1000.0);
     expect(Number(toBeforeConfirm?.balance)).toBe(0.0);
 
@@ -77,7 +80,7 @@ describe("J5/J6: 振込(名義不一致)は確認前は出金されず、確認�
     );
     await waitFor(
       async () => {
-        const view = await queryApi.getAccount(toId);
+        const view = await queryApiB.getAccount(toId);
         return view && Number(view.balance) === 300 ? view : undefined;
       },
       { description: `account ${toId} balance to reach 300 after confirmed furikomi` },
@@ -92,10 +95,13 @@ describe("J8: 振込の上限額超過は受付時点で却下される", () => 
     const commandApiA = createCommandApi(outputs.commandApiUrl, identityA.idToken);
     const commandApiB = createCommandApi(outputs.commandApiUrl, identityB.idToken);
     const queryApi = createQueryApi(outputs.queryApiUrl, identityA.idToken);
+    // docs/adr/0027: GET /accounts/{id}はitem単位の認可を持つため、口座Bの状態確認は
+    // 口座Bの名義(identityB)のqueryApiで行う——identityAのqueryApiで問い合わせると403になる。
+    const queryApiB = createQueryApi(outputs.queryApiUrl, identityB.idToken);
     const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl, identityA.idToken);
     const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identityA.idToken);
     const fromId = await openFreshAccount(commandApiA, queryApi, "1000.00");
-    const toId = await openFreshAccount(commandApiB, queryApi, "0.00");
+    const toId = await openFreshAccount(commandApiB, queryApiB, "0.00");
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, fromId);
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, toId);
 
@@ -127,10 +133,13 @@ describe("FC14: 確認済み(credited)の振込への二重Confirmは却下さ�
     const commandApiA = createCommandApi(outputs.commandApiUrl, identityA.idToken);
     const commandApiB = createCommandApi(outputs.commandApiUrl, identityB.idToken);
     const queryApi = createQueryApi(outputs.queryApiUrl, identityA.idToken);
+    // docs/adr/0027: GET /accounts/{id}はitem単位の認可を持つため、口座Bの状態確認は
+    // 口座Bの名義(identityB)のqueryApiで行う——identityAのqueryApiで問い合わせると403になる。
+    const queryApiB = createQueryApi(outputs.queryApiUrl, identityB.idToken);
     const transferCommandApi = createTransferCommandApi(outputs.transferCommandApiUrl, identityA.idToken);
     const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identityA.idToken);
     const fromId = await openFreshAccount(commandApiA, queryApi, "1000.00");
-    const toId = await openFreshAccount(commandApiB, queryApi, "0.00");
+    const toId = await openFreshAccount(commandApiB, queryApiB, "0.00");
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, fromId);
     await waitForOwnerIndexed(outputs.transferAccountOwnersTableName, toId);
 
@@ -148,7 +157,7 @@ describe("FC14: 確認済み(credited)の振込への二重Confirmは却下さ�
     const status = await transferQueryApi.getTransferStatus(transferId);
     expect(status?.state).toBe("credited"); // 状態は変化しない。
     const fromView = await queryApi.getAccount(fromId);
-    const toView = await queryApi.getAccount(toId);
+    const toView = await queryApiB.getAccount(toId);
     expect(Number(fromView?.balance)).toBe(1000 - 300 - FURIKOMI_FEE); // 二重出金・二重手数料徴収されていない。
     expect(Number(toView?.balance)).toBe(300.0); // 二重入金されていない。
   });
