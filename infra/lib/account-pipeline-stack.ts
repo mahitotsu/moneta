@@ -1683,6 +1683,55 @@ export class AccountPipelineStack extends cdk.Stack {
     feeCommandQueue.grantSendMessages(transferSagaStepFn);
     pointsCommandQueue.grantSendMessages(transferSagaStepFn);
 
+    // --- [Transfer service所有] transfer-saga-watchdog: サガの自己修復(docs/adr/0028) ---
+    // ADR-0010決定6が「compensatingのまま滞留するケースへの対応は本ADRのスコープ外」として
+    // いたのを解決する。saga_step.rs(イベント駆動)・command_intake.rs(SQS駆動)と違い、
+    // こちらはスケジュール駆動——「一定時間、期待していたイベントが来ない」という不在は
+    // イベント購読では原理的に検知できず、タイマーでしか検知できないため。
+    const transferSagaWatchdogFn = new lambda.Function(this, "TransferSagaWatchdogFunction", {
+      runtime: lambda.Runtime.PROVIDED_AL2023,
+      architecture: lambda.Architecture.X86_64,
+      handler: "bootstrap",
+      timeout: cdk.Duration.seconds(30),
+      code: rustLambdaCode("transfer-service", "transfer-saga-watchdog"),
+      environment: {
+        SAGA_TABLE_NAME: transferSagaTable.tableName,
+        ACCOUNT_COMMAND_QUEUE_URL: commandQueue.queueUrl,
+        FEE_COMMAND_QUEUE_URL: feeCommandQueue.queueUrl,
+      },
+    });
+    transferSagaTable.grantReadWriteData(transferSagaWatchdogFn);
+    commandQueue.grantSendMessages(transferSagaWatchdogFn);
+    feeCommandQueue.grantSendMessages(transferSagaWatchdogFn);
+    // PutMetricDataはリソースレベルの権限を持たないAWS API(常に"*")——CloudWatchの
+    // カスタムメトリクス発行に共通の制約(AWS公式ドキュメント)。
+    transferSagaWatchdogFn.addToRolePolicy(
+      new iam.PolicyStatement({ actions: ["cloudwatch:PutMetricData"], resources: ["*"] }),
+    );
+
+    new events.Rule(this, "TransferSagaWatchdogSchedule", {
+      // 結果整合性の窓(アウトボックス経由、最大約1分)より十分に粗い間隔にする——
+      // 正常な遅延を「詰まっている」と誤認する頻度を下げるため(docs/adr/0028)。
+      schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
+      targets: [new targets.LambdaFunction(transferSagaWatchdogFn)],
+    });
+
+    // docs/adr/0028: 再送の上限に達したサガをO1(DLQアラーム)と同じ「1件でも見えたら発報」
+    // という保守的な閾値で運用者に見せる。
+    new cloudwatch.Alarm(this, "StuckSagaEscalatedAlarm", {
+      alarmName: "moneta-transfer-saga-stuck-escalated",
+      metric: new cloudwatch.Metric({
+        namespace: "Moneta/TransferSaga",
+        metricName: "StuckSagaEscalated",
+        statistic: "Sum",
+        period: cdk.Duration.minutes(5),
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
     // ==========================================================================
     // Transfer serviceの顧客向け入口(docs/adr/0012) — [Transfer service所有]
     //
@@ -2332,6 +2381,9 @@ export class AccountPipelineStack extends cdk.Stack {
     new cdk.CfnOutput(this, "TransferCommandDeadLetterQueueUrl", { value: transferCommandDlq.queueUrl });
     new cdk.CfnOutput(this, "TransferCommandIntakeFunctionName", { value: transferCommandIntakeFn.functionName });
     new cdk.CfnOutput(this, "TransferSagaStepFunctionName", { value: transferSagaStepFn.functionName });
+    // docs/adr/0028: api-e2eがスケジュールを待たずに直接invokeするために使う
+    // (support/sagaState.tsのbackdateSagaUpdatedAtと同じ「テスト専用の裏口」の位置づけ)。
+    new cdk.CfnOutput(this, "TransferSagaWatchdogFunctionName", { value: transferSagaWatchdogFn.functionName });
     new cdk.CfnOutput(this, "TransferOwnerProjectorFunctionName", { value: transferOwnerProjectorFn.functionName });
     new cdk.CfnOutput(this, "TransferStatusViewTableName", { value: transferStatusViewTable.tableName });
     new cdk.CfnOutput(this, "TransferStatusProjectorFunctionName", { value: transferStatusProjectorFn.functionName });

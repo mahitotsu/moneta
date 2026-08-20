@@ -43,6 +43,9 @@ export interface StackOutputs {
   pointsTableName: string;
   feeReservationsTableName: string;
   pointsQueryApiUrl: string;
+  // サガの自己修復ウォッチドッグ(docs/adr/0028)。support/sagaState.tsのinvokeSagaWatchdogが
+  // スケジュールを待たず直接invokeするために使う。
+  transferSagaWatchdogFunctionName: string;
 }
 
 const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
@@ -70,6 +73,7 @@ const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
   pointsTableName: "PointsTableName",
   feeReservationsTableName: "FeeReservationsTableName",
   pointsQueryApiUrl: "PointsQueryApiUrl",
+  transferSagaWatchdogFunctionName: "TransferSagaWatchdogFunctionName",
 };
 
 export async function fetchStackOutputs(): Promise<StackOutputs> {

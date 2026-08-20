@@ -144,8 +144,8 @@ describe("AccountPipelineStack", () => {
     });
   });
 
-  test("creates exactly twenty Lambda functions: write path, outbox projector, query projector, account number projector, customer accounts projector, the three auth-service functions (pre sign-up, post confirmation, post authentication), the five transfer-service functions (command intake, saga step, owner projector, status projector, history projector), the two points-service functions (command intake, outbox projector), the three fee-service functions (command intake, points observation, outbox projector), and the two Web UI hosting custom-resource handlers (S3 auto-delete-objects, BucketDeployment sync)", () => {
-    template.resourceCountIs("AWS::Lambda::Function", 20);
+  test("creates exactly twenty-one Lambda functions: write path, outbox projector, query projector, account number projector, customer accounts projector, the three auth-service functions (pre sign-up, post confirmation, post authentication), the six transfer-service functions (command intake, saga step, saga watchdog, owner projector, status projector, history projector), the two points-service functions (command intake, outbox projector), the three fee-service functions (command intake, points observation, outbox projector), and the two Web UI hosting custom-resource handlers (S3 auto-delete-objects, BucketDeployment sync)", () => {
+    template.resourceCountIs("AWS::Lambda::Function", 21);
   });
 
   // docs/adr/0015: owner_projector.rs(docs/adr/0011)と同じ理由でaccount.event.Openedのみ
@@ -348,8 +348,8 @@ describe("AccountPipelineStack", () => {
   // 経過時間にCloudWatchアラームを張る」と決定していたが、実装が伴っていなかった(2026-08-10発見)。
   test("all four DLQs (account command, transfer command, fee command, points command) have alarms on messages-visible and oldest-message-age", () => {
     // docs/adr/0024でFeeCommandDlq/PointsCommandDlqにも同じaddDlqAlarmsを適用したため、
-    // 4キュー×2アラーム=8件になった。
-    template.resourceCountIs("AWS::CloudWatch::Alarm", 8);
+    // 4キュー×2アラーム=8件、docs/adr/0028のStuckSagaEscalatedAlarmが1件加わり9件になった。
+    template.resourceCountIs("AWS::CloudWatch::Alarm", 9);
     // DimensionsのValueはキュー論理IDへのFn::GetAtt(QueueName)であり、キュー名の文字列
     // リテラルとしては現れない(CDKの`metricApproximateNumberOfMessagesVisible`の実際の
     // 出力を実行して確認済み)。どのキューかまでは論理IDから間接的にしか分からないため、
@@ -467,6 +467,52 @@ describe("AccountPipelineStack", () => {
       (id) => id.includes("TransferStatusProjectorFunction") || id.includes("TransferHistoryProjectorFunction"),
     );
     expect(transferSagaMappings).toHaveLength(2);
+  });
+
+  // docs/adr/0028: ADR-0010決定6が「compensatingのまま滞留するケースへの対応はスコープ外」と
+  // していたのを解決する、スケジュール駆動の自己修復Lambda。イベント購読ではなくタイマーで
+  // 起動されることを、EventBridge Ruleがscheduleを持ちtargetがTransferSagaWatchdogFunctionで
+  // あることで確認する(sourceを絞ったeventPatternではない=これがイベント駆動ではなく
+  // スケジュール駆動である証拠)。
+  test("transfer saga watchdog runs on a schedule (not an event subscription), reading/writing TransferSagaTable and able to send to both the account and fee command queues", () => {
+    template.hasResourceProperties("AWS::Events::Rule", {
+      ScheduleExpression: "rate(5 minutes)",
+      Targets: Match.arrayWith([Match.objectLike({ Arn: { "Fn::GetAtt": [Match.stringLikeRegexp("^TransferSagaWatchdogFunction"), "Arn"] } })]),
+    });
+
+    const policies = template.findResources("AWS::IAM::Policy");
+    const watchdogPolicies = Object.entries(policies).filter(([id]) => id.includes("TransferSagaWatchdogFunction"));
+    expect(watchdogPolicies.length).toBeGreaterThan(0);
+    const allActions = watchdogPolicies.flatMap(([, policy]) =>
+      (policy.Properties.PolicyDocument.Statement as Array<{ Action: unknown; Resource: unknown }>).flatMap((s) =>
+        ([] as string[]).concat(s.Action as string | string[]),
+      ),
+    );
+    // TransferSagaTableへの読み書き(スキャン+条件付き更新)・両コマンドキューへの送信・
+    // カスタムメトリクス発行のいずれも欠けていないことを確認する。
+    expect(allActions).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/^dynamodb:/),
+        "sqs:SendMessage",
+        "cloudwatch:PutMetricData",
+      ]),
+    );
+    const cloudwatchStatement = watchdogPolicies
+      .flatMap(([, policy]) => policy.Properties.PolicyDocument.Statement as Array<{ Action: unknown; Resource: unknown }>)
+      .find((s) => ([] as string[]).concat(s.Action as string | string[]).includes("cloudwatch:PutMetricData"));
+    // PutMetricDataはリソースレベル権限を持たないAWS API(AWS公式ドキュメント)——"*"であるべき。
+    expect(cloudwatchStatement?.Resource).toBe("*");
+  });
+
+  // docs/adr/0028: O1(DLQアラーム)と同じ「1件でも見えたら発報」という保守的な閾値。
+  test("alarms when a stuck saga exceeds the watchdog's retry cap and is escalated", () => {
+    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      AlarmName: "moneta-transfer-saga-stuck-escalated",
+      Namespace: "Moneta/TransferSaga",
+      MetricName: "StuckSagaEscalated",
+      Threshold: 1,
+      ComparisonOperator: "GreaterThanOrEqualToThreshold",
+    });
   });
 
   test("exposes GET /customers/me/transfers as a direct DynamoDB Query integration against the byUpdatedAt GSI, keyed off the Cognito sub claim, newest first", () => {

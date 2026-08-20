@@ -183,6 +183,34 @@ pub fn expected_step(saga: &TransferSaga) -> Option<ExpectedStep> {
     }
 }
 
+/// `expected_step`(「何を待っているか」)と対になる、「詰まっている場合に再発行すべき
+/// コマンドは何か」のマッピング(docs/adr/0028、`bin/saga_watchdog.rs`が呼ぶ)。新しい
+/// ロジックではなく、`confirm`/`reserve_fee_observed`/`advance`が各状態への遷移時に
+/// **既に一度計算して発行した`NextAction`と同じもの**を、保存済みの`TransferSaga`(`cash_fee`
+/// 等、遷移時点で確定した値を保持している)から再構成するだけ——遷移ロジックの複製ではなく
+/// 再現である。`expected_step`が`None`を返す状態(確認待ち・終端状態)では、そもそも
+/// 発行すべきコマンドが無いため`NextAction::None`を返す。
+pub fn resume_action(saga: &TransferSaga) -> NextAction {
+    match saga.state {
+        SagaState::PendingConfirmation => NextAction::None,
+        SagaState::ReservingFee => NextAction::IssueReserveFee {
+            transfer_id: saga.transfer_id.clone(),
+            owner_id: saga.from_owner_id.clone(),
+            account_id: saga.from_account_id,
+            transfer_amount: saga.amount,
+        },
+        SagaState::PendingDebit => {
+            NextAction::IssueWithdraw { account_id: saga.from_account_id, amount: saga.amount + saga.cash_fee }
+        }
+        SagaState::PendingCredit => NextAction::IssueDeposit { account_id: saga.to_account_id, amount: saga.amount },
+        SagaState::Compensating => NextAction::IssueCompensatingDeposit {
+            account_id: saga.from_account_id,
+            amount: saga.amount + saga.cash_fee,
+        },
+        SagaState::Credited | SagaState::Compensated | SagaState::Failed | SagaState::Cancelled => NextAction::None,
+    }
+}
+
 /// `start`が受理できない、決定論的に確定した入力エラー。account-domainの`DomainError`と
 /// 同じ位置づけ——リトライしても結果は変わらないため、呼び出し側は再試行してはならない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -808,6 +836,57 @@ mod tests {
             SagaState::PendingConfirmation,
         ] {
             assert_eq!(expected_step(&saga_in(TransferKind::Furikomi, state)), None);
+        }
+    }
+
+    // docs/adr/0028: resume_actionは新しいロジックではなく、各遷移関数が元々発行した
+    // NextActionと同じものを保存済みのサガから再構成するだけ——ここでは、実際に遷移関数を
+    // 呼んで得られるNextActionと、resume_actionが同じ状態に対して返すNextActionが一致する
+    // ことを直接突き合わせて検証する。
+    #[test]
+    fn resume_action_reconstructs_the_same_next_action_confirm_would_issue_for_reserving_fee() {
+        let pending = saga_in(TransferKind::Furikomi, SagaState::PendingConfirmation);
+        let (reserving, confirm_action) = confirm(&pending, now()).unwrap();
+        assert_eq!(reserving.state, SagaState::ReservingFee);
+        assert_eq!(resume_action(&reserving), confirm_action);
+    }
+
+    #[test]
+    fn resume_action_reconstructs_the_same_next_action_reserve_fee_observed_would_issue_for_pending_debit() {
+        let reserving = saga_in(TransferKind::Furikomi, SagaState::ReservingFee);
+        let (pending_debit, observed_action) = reserve_fee_observed(&reserving, dec!(20), dec!(0), now());
+        assert_eq!(pending_debit.state, SagaState::PendingDebit);
+        assert_eq!(resume_action(&pending_debit), observed_action);
+    }
+
+    #[test]
+    fn resume_action_reconstructs_the_same_next_action_advance_would_issue_for_pending_credit() {
+        let pending_debit = saga_in(TransferKind::Furikae, SagaState::PendingDebit);
+        let (pending_credit, advance_action) = advance(&pending_debit, ObservedOutcome::Accepted);
+        assert_eq!(pending_credit, SagaState::PendingCredit);
+        let saga = TransferSaga { state: pending_credit, ..pending_debit };
+        assert_eq!(resume_action(&saga), advance_action);
+    }
+
+    #[test]
+    fn resume_action_reconstructs_the_same_next_action_advance_would_issue_for_compensating() {
+        let pending_credit = TransferSaga { cash_fee: dec!(20), ..saga_in(TransferKind::Furikomi, SagaState::PendingCredit) };
+        let (compensating, advance_action) = advance(&pending_credit, ObservedOutcome::Rejected);
+        assert_eq!(compensating, SagaState::Compensating);
+        let saga = TransferSaga { state: compensating, ..pending_credit };
+        assert_eq!(resume_action(&saga), advance_action);
+    }
+
+    #[test]
+    fn resume_action_is_none_for_terminal_states_and_pending_confirmation() {
+        for state in [
+            SagaState::Credited,
+            SagaState::Compensated,
+            SagaState::Failed,
+            SagaState::Cancelled,
+            SagaState::PendingConfirmation,
+        ] {
+            assert_eq!(resume_action(&saga_in(TransferKind::Furikomi, state)), NextAction::None);
         }
     }
 }

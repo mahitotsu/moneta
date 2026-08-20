@@ -216,6 +216,113 @@ pub async fn advance_saga_to_pending_debit_with_fee(
     }
 }
 
+/// ウォッチドッグ(`bin/saga_watchdog.rs`、docs/adr/0028)向けのスキャン結果1件。
+/// `watchdogRetryCount`は`TransferSaga`ドメイン構造体には持たせていない(`record_watchdog_retry`
+/// のコメント参照)ため、この型でだけ一緒に運ぶ。
+pub struct StuckSaga {
+    pub saga: TransferSaga,
+    pub retry_count: u32,
+}
+
+/// `states`のいずれかの状態にあり、かつ`updated_at`が`older_than`より前(=一定時間
+/// 詰まっている)サガを列挙する(docs/adr/0028、`bin/saga_watchdog.rs`)。PoC規模のテーブル
+/// サイズを前提にフルスキャン+`FilterExpression`で実装する(`infra/scripts/backfill-item-owners.ts`
+/// と同じ「PoC規模ではスキャンで十分」という割り切り)。
+pub async fn scan_stuck_sagas(
+    client: &Client,
+    table_name: &str,
+    states: &[SagaState],
+    older_than: OffsetDateTime,
+) -> Result<Vec<StuckSaga>, aws_sdk_dynamodb::Error> {
+    let state_placeholders: Vec<String> = (0..states.len()).map(|i| format!(":state{i}")).collect();
+    let filter_expression = format!("#s IN ({}) AND updatedAt < :olderThan", state_placeholders.join(", "));
+
+    let mut results = Vec::new();
+    let mut exclusive_start_key = None;
+    loop {
+        let mut request = client
+            .scan()
+            .table_name(table_name)
+            .filter_expression(&filter_expression)
+            .expression_attribute_names("#s", "state")
+            .expression_attribute_values(
+                ":olderThan",
+                AttributeValue::S(older_than.format(&Rfc3339).expect("OffsetDateTime always formats as RFC3339")),
+            )
+            .set_exclusive_start_key(exclusive_start_key.clone());
+        for (placeholder, state) in state_placeholders.iter().zip(states) {
+            request = request.expression_attribute_values(placeholder, AttributeValue::S(state_to_str(state).to_string()));
+        }
+
+        let output = request.send().await?;
+        for item in output.items.unwrap_or_default() {
+            let retry_count = item
+                .get("watchdogRetryCount")
+                .and_then(|v| v.as_n().ok())
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
+            results.push(StuckSaga { saga: item_to_saga(&item), retry_count });
+        }
+
+        exclusive_start_key = output.last_evaluated_key;
+        if exclusive_start_key.is_none() {
+            break;
+        }
+    }
+    Ok(results)
+}
+
+/// ウォッチドッグ(`bin/saga_watchdog.rs`、docs/adr/0028)が、詰まっていると判断したサガへ
+/// コマンドを再発行した回数を記録する。`watchdogRetryCount`/`lastWatchdogAt`は`TransferSaga`
+/// ドメイン構造体には持たせない(`saga_to_item`/`item_to_saga`を経由しない)——運用上の
+/// ブックキーピングをピュアな状態機械のモデルに混ぜないという、このcrateの既存の規律
+/// (`correlation_id`/`channel`を「輸送のみの関心事」として扱うのと同種の切り分け)。
+///
+/// `ConditionExpression`は`state`と`updatedAt`の両方がスキャン時点から変化していないことを
+/// 要求する——`advance_saga_state`と同じCASパターンだが、こちらはスキャンからコマンド発行
+/// までの間にサガが自然に(通常の観測経路で)先へ進んだ場合、古い情報に基づく不要な再送を
+/// 未然に防ぐためのもの。条件不成立はエラーではなく「今回は何もしなかった」として扱う。
+pub async fn record_watchdog_retry(
+    client: &Client,
+    table_name: &str,
+    transfer_id: &str,
+    expected_state: &SagaState,
+    expected_updated_at: OffsetDateTime,
+    now: OffsetDateTime,
+) -> Result<bool, aws_sdk_dynamodb::Error> {
+    let result = client
+        .update_item()
+        .table_name(table_name)
+        .key("transferId", AttributeValue::S(transfer_id.to_string()))
+        .update_expression(
+            "SET watchdogRetryCount = if_not_exists(watchdogRetryCount, :zero) + :one, lastWatchdogAt = :now",
+        )
+        .condition_expression("#s = :expectedState AND updatedAt = :expectedUpdatedAt")
+        .expression_attribute_names("#s", "state")
+        .expression_attribute_values(":zero", AttributeValue::N("0".to_string()))
+        .expression_attribute_values(":one", AttributeValue::N("1".to_string()))
+        .expression_attribute_values(
+            ":now",
+            AttributeValue::S(now.format(&Rfc3339).expect("OffsetDateTime always formats as RFC3339")),
+        )
+        .expression_attribute_values(":expectedState", AttributeValue::S(state_to_str(expected_state).to_string()))
+        .expression_attribute_values(
+            ":expectedUpdatedAt",
+            AttributeValue::S(expected_updated_at.format(&Rfc3339).expect("OffsetDateTime always formats as RFC3339")),
+        )
+        .send()
+        .await;
+
+    match result {
+        Ok(_) => Ok(true),
+        Err(err) => {
+            let is_stale =
+                err.as_service_error().is_some_and(|service_err| service_err.is_conditional_check_failed_exception());
+            if is_stale { Ok(false) } else { Err(err.into()) }
+        }
+    }
+}
+
 // --- 口座名義インデックス(docs/adr/0011) -----------------------------------------------
 //
 // `account.event.Opened`だけを購読する専用の小さな投影(`bin/owner_projector.rs`)が書き込み、
