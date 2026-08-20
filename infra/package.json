@@ -19,7 +19,8 @@
     "predestroy": "npm run build-web-ui",
     "destroy": "npm run cdk -- destroy",
     "clean-data": "NODE_OPTIONS=\"--require ./force-ipv4.cjs\" tsx scripts/clean-data.ts",
-    "seed-demo-data": "NODE_OPTIONS=\"--require ./force-ipv4.cjs\" tsx scripts/seed-demo-data.ts"
+    "seed-demo-data": "NODE_OPTIONS=\"--require ./force-ipv4.cjs\" tsx scripts/seed-demo-data.ts",
+    "backfill-item-owners": "NODE_OPTIONS=\"--require ./force-ipv4.cjs\" tsx scripts/backfill-item-owners.ts"
   },
   "devDependencies": {
     "@aws-sdk/client-cloudformation": "^3.1101.0",

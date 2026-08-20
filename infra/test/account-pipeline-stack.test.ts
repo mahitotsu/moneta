@@ -227,6 +227,59 @@ describe("AccountPipelineStack", () => {
     });
   });
 
+  // docs/adr/0027決定1: 404判定に続けて、認証済みユーザー(sub)がこの口座の名義(ownerId)と
+  // 一致しなければ403にする——item単位の読み取り認可。
+  test("GET /accounts/{accountId} 403s when the authenticated caller isn't the account's owner (docs/adr/0027決定1)", () => {
+    template.hasResourceProperties("AWS::ApiGateway::Method", {
+      HttpMethod: "GET",
+      Integration: Match.objectLike({
+        IntegrationResponses: Match.arrayWith([
+          Match.objectLike({
+            ResponseTemplates: Match.objectLike({
+              "application/json": Match.stringLikeRegexp(
+                '(?=[\\s\\S]*Item\\.ownerId\\.S)(?=[\\s\\S]*authorizer\\.claims\\.sub)(?=[\\s\\S]*403)',
+              ),
+            }),
+          }),
+        ]),
+      }),
+      MethodResponses: Match.arrayWith([{ StatusCode: "403" }]),
+    });
+  });
+
+  // docs/adr/0027決定1: FilterExpressionでownerId不一致のアイテムを除外し、フィルタ後0件なら
+  // 403にする(実在する口座はEvent::Openedの分だけ必ず1件以上の履歴を持つため、0件は
+  // 「他人の口座」以外にありえない、history.rs参照)。
+  test("GET /accounts/{accountId}/transactions filters by ownerId and 403s when nothing matches (docs/adr/0027決定1)", () => {
+    template.hasResourceProperties("AWS::ApiGateway::Method", {
+      HttpMethod: "GET",
+      Integration: Match.objectLike({
+        RequestTemplates: Match.objectLike({
+          // FilterExpressionもauthorizer.claims.subも、TableName(CDKトークン)より後ろの
+          // 同一リテラル区間に現れるため、Fn::Joinは1つの配列要素にまとめる——arrayWithは
+          // 複数パターンを別々の要素に割り当てる部分列マッチなので、1要素に両方求めるときは
+          // 1つの正規表現(2つの先読み)にまとめて渡す(下のResponseTemplatesの
+          // "cashFee"/"pointsUsed"チェックと同じ理由)。
+          "application/json": Match.objectLike({
+            "Fn::Join": Match.arrayWith([
+              Match.arrayWith([
+                Match.stringLikeRegexp('(?=[\\s\\S]*FilterExpression)(?=[\\s\\S]*authorizer\\.claims\\.sub)'),
+              ]),
+            ]),
+          }),
+        }),
+        IntegrationResponses: Match.arrayWith([
+          Match.objectLike({
+            ResponseTemplates: Match.objectLike({
+              "application/json": Match.stringLikeRegexp('(?=[\\s\\S]*items\\.size\\(\\) == 0)(?=[\\s\\S]*403)'),
+            }),
+          }),
+        ]),
+      }),
+      MethodResponses: Match.arrayWith([{ StatusCode: "403" }]),
+    });
+  });
+
   test("creates the account history table with a composite key (accountId, sk) separate from the view table", () => {
     template.hasResourceProperties("AWS::DynamoDB::Table", {
       TableName: "moneta-account-history",
@@ -344,6 +397,10 @@ describe("AccountPipelineStack", () => {
 
   // docs/adr/0004・0013: query projectorはEventBridgeのdetailだけで完結し、
   // account-serviceの内部ストア(accountsTable等)への読み取り権限を一切持たない。
+  // docs/adr/0027決定1でquery projectorがCustomerAccountsTable(query-service自身が所有する
+  // テーブル、[[0016]]決定4)への読み取りを新たに得たが、これは"AccountsTable"を論理ID接尾辞に
+  // 含むため素朴な正規表現だと誤検知する——account-service自身の`AccountsTable`(construct id
+  // が完全一致)とは区別する(否定後読み)。
   test("query projector never gets IAM access to account-service's own tables (accountsTable/accountEventsTable/processedMessagesTable)", () => {
     const policies = template.findResources("AWS::IAM::Policy");
     const queryProjectorPolicies = Object.entries(policies).filter(([id]) => id.includes("QueryProjector"));
@@ -351,7 +408,7 @@ describe("AccountPipelineStack", () => {
       const statements = policy.Properties.PolicyDocument.Statement as Array<{ Resource: unknown }>;
       for (const statement of statements) {
         const resources = JSON.stringify(statement.Resource);
-        expect(resources).not.toMatch(/AccountsTable|AccountEventsTable|ProcessedMessagesTable/);
+        expect(resources).not.toMatch(/(?<!Customer)AccountsTable|AccountEventsTable|ProcessedMessagesTable/);
       }
     }
   });
@@ -461,6 +518,27 @@ describe("AccountPipelineStack", () => {
           }),
         ]),
       }),
+    });
+  });
+
+  // docs/adr/0027決定2: 認証済みユーザー(sub)が送金元・送金先どちらの名義でもなければ403
+  // (振込は送金元・送金先で名義が異なるため「いずれか一致」——[[0020]]の「送金元/送金先
+  // どちらから見ても自分の送金として見える」という前提と対称)。
+  test("GET /transfers/{transferId} 403s unless the caller is the sender or the receiver (docs/adr/0027決定2)", () => {
+    template.hasResourceProperties("AWS::ApiGateway::Method", {
+      HttpMethod: "GET",
+      Integration: Match.objectLike({
+        IntegrationResponses: Match.arrayWith([
+          Match.objectLike({
+            ResponseTemplates: Match.objectLike({
+              "application/json": Match.stringLikeRegexp(
+                '(?=[\\s\\S]*Item\\.fromOwnerId\\.S)(?=[\\s\\S]*Item\\.toOwnerId\\.S)(?=[\\s\\S]*authorizer\\.claims\\.sub)(?=[\\s\\S]*403)',
+              ),
+            }),
+          }),
+        ]),
+      }),
+      MethodResponses: Match.arrayWith([{ StatusCode: "403" }]),
     });
   });
 
@@ -688,6 +766,37 @@ describe("AccountPipelineStack", () => {
         { AttributeName: "accountId", KeyType: "RANGE" },
       ],
     });
+  });
+
+  // docs/adr/0027決定1: AccountQueryProjectorFunctionがownerId解決のため引く、accountId→ownerId
+  // の逆引きGSI(AccountNumbersTableが既に持つ同名GSIと同じパターン)。読み取り専用であることも
+  // 確認する(query projector never gets IAM access...と同じ「書き込み権限の混入を防ぐ」観点)。
+  test("adds a byAccountId GSI to CustomerAccountsTable, and grants the query projector read-only access to it (docs/adr/0027決定1)", () => {
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      TableName: "moneta-customer-accounts",
+      GlobalSecondaryIndexes: Match.arrayWith([
+        Match.objectLike({
+          IndexName: "byAccountId",
+          KeySchema: [{ AttributeName: "accountId", KeyType: "HASH" }],
+          Projection: { ProjectionType: "ALL" },
+        }),
+      ]),
+    });
+
+    const policies = template.findResources("AWS::IAM::Policy");
+    const queryProjectorPolicies = Object.entries(policies).filter(([id]) => id.includes("QueryProjector"));
+    const grantsOnCustomerAccounts = queryProjectorPolicies.flatMap(([, policy]) =>
+      (policy.Properties.PolicyDocument.Statement as Array<{ Action: unknown; Resource: unknown }>).filter((s) =>
+        JSON.stringify(s.Resource).includes("CustomerAccountsTable"),
+      ),
+    );
+    expect(grantsOnCustomerAccounts.length).toBeGreaterThan(0);
+    for (const statement of grantsOnCustomerAccounts) {
+      const actions = ([] as string[]).concat(statement.Action as string | string[]);
+      for (const action of actions) {
+        expect(action).not.toMatch(/PutItem|UpdateItem|DeleteItem|BatchWriteItem/);
+      }
+    }
   });
 
   test("customer accounts projector subscribes only to account.event.Opened (same reasoning as owner_projector.rs/account_number_projector.rs)", () => {

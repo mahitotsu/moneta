@@ -23,6 +23,8 @@ async fn main() -> Result<(), Error> {
     let table_name = std::env::var("TABLE_NAME").expect("TABLE_NAME environment variable must be set");
     let history_table_name =
         std::env::var("HISTORY_TABLE_NAME").expect("HISTORY_TABLE_NAME environment variable must be set");
+    let customer_accounts_table_name = std::env::var("CUSTOMER_ACCOUNTS_TABLE_NAME")
+        .expect("CUSTOMER_ACCOUNTS_TABLE_NAME environment variable must be set");
     let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
     let dynamodb = aws_sdk_dynamodb::Client::new(&aws_config);
 
@@ -30,18 +32,31 @@ async fn main() -> Result<(), Error> {
         let dynamodb = dynamodb.clone();
         let table_name = table_name.clone();
         let history_table_name = history_table_name.clone();
-        async move { project_one(&dynamodb, &table_name, &history_table_name, event.payload.detail).await }
+        let customer_accounts_table_name = customer_accounts_table_name.clone();
+        async move {
+            project_one(
+                &dynamodb,
+                &table_name,
+                &history_table_name,
+                &customer_accounts_table_name,
+                event.payload.detail,
+            )
+            .await
+        }
     }))
     .await
 }
 
 /// account-serviceが発行したドメインイベント1件を、Query Serviceの2つのread modelへ適用する:
 /// (1) 現在状態のview(last-writer-wins、docs/adr/0004) (2) 取引履歴(event_idをキーに含む
-/// 冪等な追記、docs/adr/0009——ADR-0004の投影パターンの延長)。
+/// 冪等な追記、docs/adr/0009——ADR-0004の投影パターンの延長)。docs/adr/0027決定1により、
+/// 両方のread modelへ`ownerId`も書く(item単位の読み取り認可のため、API Gateway VTLが
+/// `$context.authorizer.claims.sub`と比較する)。
 async fn project_one(
     dynamodb: &aws_sdk_dynamodb::Client,
     table_name: &str,
     history_table_name: &str,
+    customer_accounts_table_name: &str,
     envelope: EventEnvelope,
 ) -> Result<(), Error> {
     if envelope.kind != EVENT_KIND {
@@ -57,10 +72,55 @@ async fn project_one(
     let occurred_at = envelope.occurred_at;
     let event: Event = serde_json::from_value(envelope.data.clone())?;
 
-    put_current_view(dynamodb, table_name, account_id, occurred_at, event_id, &event).await?;
-    put_history_entry(dynamodb, history_table_name, account_id, &envelope, &event).await?;
+    let owner_id = resolve_owner_id(dynamodb, customer_accounts_table_name, account_id, &event).await?;
+
+    put_current_view(dynamodb, table_name, account_id, occurred_at, event_id, &event, &owner_id).await?;
+    put_history_entry(dynamodb, history_table_name, account_id, &envelope, &event, &owner_id).await?;
 
     Ok(())
+}
+
+/// このイベントを起こした口座の名義(`ownerId`)を求める(docs/adr/0027決定1)。`Opened`自身は
+/// `owner_id`を運んでいるため参照するだけで済み、ルックアップが不要——レースが起きない。
+/// それ以外のイベントは、query-service自身が所有する`CustomerAccountsTable`
+/// ([[0016-cognito-authentication]]決定4)の`byAccountId` GSIを引く。account-serviceの
+/// 内部(`accounts`テーブル等)は一切読まない——query-serviceが書き込み経路の内部に踏み込まない
+/// という境界(docs/adr/0008)を保つ。
+///
+/// まだ`CustomerAccountsTable`に反映されていない場合はエラーを返し、呼び出し元(`handle_batch`
+/// 相当のLambdaランタイム)にbatch item failureとして再試行させる——`ownerId`のない
+/// (=認可判定ができない)アイテムを書いてしまうと、安全側のデフォルト(認可不明は拒否)が
+/// 常に403になってしまい実質的に壊れるため、書き込み自体を遅らせる方を選ぶ
+/// ([[eventual_consistency_not_a_failure]]と同じ考え方、`transfer-service::persistence::load_owner`
+/// の呼び出し元と同じ扱い)。
+async fn resolve_owner_id(
+    dynamodb: &aws_sdk_dynamodb::Client,
+    customer_accounts_table_name: &str,
+    account_id: AccountId,
+    event: &Event,
+) -> Result<String, Error> {
+    if let Event::Opened { owner_id, .. } = event {
+        return Ok(owner_id.clone());
+    }
+
+    let output = dynamodb
+        .query()
+        .table_name(customer_accounts_table_name)
+        .index_name("byAccountId")
+        .key_condition_expression("accountId = :accountId")
+        .expression_attribute_values(":accountId", AttributeValue::S(account_id.to_string()))
+        .limit(1)
+        .send()
+        .await?;
+
+    output
+        .items
+        .unwrap_or_default()
+        .first()
+        .and_then(|item| item.get("ownerId"))
+        .and_then(|v| v.as_s().ok())
+        .cloned()
+        .ok_or_else(|| format!("owner not yet indexed for account {account_id}").into())
 }
 
 /// 保存済みより新しいイベントの場合のみ上書きするlast-writer-wins方式(docs/adr/0004。
@@ -72,6 +132,7 @@ async fn put_current_view(
     occurred_at: OffsetDateTime,
     event_id: Uuid,
     event: &Event,
+    owner_id: &str,
 ) -> Result<(), Error> {
     let view = projection::view_from_event(account_id, event);
     let occurred_at_nanos = occurred_at.unix_timestamp_nanos().to_string();
@@ -81,6 +142,8 @@ async fn put_current_view(
     item.insert("view".to_string(), AttributeValue::S(serde_json::to_string(&view)?));
     item.insert("lastEventAt".to_string(), AttributeValue::N(occurred_at_nanos.clone()));
     item.insert("lastEventId".to_string(), AttributeValue::S(event_id.to_string()));
+    // docs/adr/0027決定1: item単位の読み取り認可のためAPI Gateway VTLが比較する属性。
+    item.insert("ownerId".to_string(), AttributeValue::S(owner_id.to_string()));
 
     let result = dynamodb
         .put_item()
@@ -119,6 +182,7 @@ async fn put_history_entry(
     account_id: AccountId,
     envelope: &EventEnvelope,
     event: &Event,
+    owner_id: &str,
 ) -> Result<(), Error> {
     let event_id = envelope.event_id;
     let entry = history::history_entry_from_event(
@@ -135,6 +199,8 @@ async fn put_history_entry(
     item.insert("accountId".to_string(), AttributeValue::S(account_id.to_string()));
     item.insert("sk".to_string(), AttributeValue::S(sort_key));
     item.insert("entry".to_string(), AttributeValue::S(serde_json::to_string(&entry)?));
+    // docs/adr/0027決定1: 取引履歴の一覧照会(FilterExpression)がこの属性で絞り込む。
+    item.insert("ownerId".to_string(), AttributeValue::S(owner_id.to_string()));
 
     dynamodb.put_item().table_name(history_table_name).set_item(Some(item)).send().await?;
     Ok(())

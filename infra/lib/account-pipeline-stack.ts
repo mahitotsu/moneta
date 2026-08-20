@@ -553,10 +553,15 @@ export class AccountPipelineStack extends cdk.Stack {
               // DynamoDBはGetItemで見つからなくてもHTTP 200・空ボディを返すため、
               // 「見つからない」の判定と404への変換はここ(VTL)で行う。DynamoDBの1アイテムの
               // `view`属性がそのままQuery APIのレスポンスJSON(docs/adr/0004)。
+              // docs/adr/0027決定1: 404判定の次に、認証済みユーザー(sub)がこの口座の名義
+              // (ownerId)と一致するかを見る——一致しなければ403(item単位の読み取り認可)。
               "application/json": [
                 '#if($input.path("$.Item") == "")',
                 "#set($context.responseOverride.status = 404)",
                 '{"message": "account not found"}',
+                '#elseif($input.path("$.Item.ownerId.S") != $context.authorizer.claims.sub)',
+                "#set($context.responseOverride.status = 403)",
+                '{"message": "forbidden"}',
                 "#else",
                 '$input.path("$.Item.view.S")',
                 "#end",
@@ -570,7 +575,7 @@ export class AccountPipelineStack extends cdk.Stack {
     const accountsResource = queryApi.root.addResource("accounts");
     const accountResource = accountsResource.addResource("{accountId}");
     accountResource.addMethod("GET", getAccountIntegration, {
-      methodResponses: [{ statusCode: "200" }, { statusCode: "404" }],
+      methodResponses: [{ statusCode: "200" }, { statusCode: "403" }, { statusCode: "404" }],
       authorizationType: apigateway.AuthorizationType.COGNITO,
       authorizer: accountQueryAuthorizer,
     });
@@ -588,11 +593,18 @@ export class AccountPipelineStack extends cdk.Stack {
         credentialsRole: queryApiDynamoRole,
         passthroughBehavior: apigateway.PassthroughBehavior.NEVER,
         requestTemplates: {
+          // docs/adr/0027決定1: FilterExpressionでownerId不一致のアイテムを除外する。
+          // Limit(50)はDynamoDB内部でFilterExpression適用前のキー一致件数に対してかかる
+          // (AWS公式ドキュメントで確認済みの既知の挙動)が、同一accountId(パーティション)配下の
+          // アイテムは全て同じownerIdを持つため、この境界ケースは実害がない
+          // (「一部だけ絞り込まれて消える」ことが起こり得ない——全件一致か全件不一致かの二択)。
           "application/json": JSON.stringify({
             TableName: accountHistoryTable.tableName,
             KeyConditionExpression: "accountId = :accountId",
+            FilterExpression: "ownerId = :ownerId",
             ExpressionAttributeValues: {
               ":accountId": { S: "$input.params('accountId')" },
+              ":ownerId": { S: "$context.authorizer.claims.sub" },
             },
             ScanIndexForward: false,
             Limit: 50,
@@ -603,14 +615,22 @@ export class AccountPipelineStack extends cdk.Stack {
             statusCode: "200",
             responseTemplates: {
               // 各アイテムのentry属性(history_entry_from_eventが生成した、既にJSON文字列)を
-              // カンマ区切りで連結してJSON配列を組み立てる。
+              // カンマ区切りで連結してJSON配列を組み立てる。docs/adr/0027決定1: 実在する口座は
+              // Event::Openedの分だけ必ず1件以上の履歴を持つ(history.rs)ため、フィルタ後0件は
+              // 「他人の口座」(または未反映のeventual consistencyの窓)以外にありえず、404/403の
+              // 判定に曖昧さは生じない。
               "application/json": [
                 "#set($items = $input.path('$.Items'))",
+                '#if($items.size() == 0)',
+                "#set($context.responseOverride.status = 403)",
+                '{"message": "forbidden"}',
+                "#else",
                 "[",
                 "#foreach($item in $items)",
                 "$item.entry.S#if($foreach.hasNext),#end",
                 "#end",
                 "]",
+                "#end",
               ].join("\n"),
             },
           },
@@ -620,7 +640,7 @@ export class AccountPipelineStack extends cdk.Stack {
 
     const transactionsResource = accountResource.addResource("transactions");
     transactionsResource.addMethod("GET", listTransactionsIntegration, {
-      methodResponses: [{ statusCode: "200" }],
+      methodResponses: [{ statusCode: "200" }, { statusCode: "403" }],
       authorizationType: apigateway.AuthorizationType.COGNITO,
       authorizer: accountQueryAuthorizer,
     });
@@ -804,6 +824,15 @@ export class AccountPipelineStack extends cdk.Stack {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
+    // accountId→ownerIdの逆引き用(docs/adr/0027決定1)。AccountQueryProjectorFunctionが
+    // Deposit/Freeze等、owner_idを運ばないイベントの処理時にownerIdを解決するために引く
+    // ——AccountNumbersTableが既に持つ同名GSI([[0015]])と同じ「基本キーとは別目的の索引を
+    // 足す」パターン。テーブルが小さいPoC規模なのでALL射影にする。
+    customerAccountsTable.addGlobalSecondaryIndex({
+      indexName: "byAccountId",
+      partitionKey: { name: "accountId", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
 
     const customerAccountsProjectorFn = new lambda.Function(this, "CustomerAccountsProjectorFunction", {
       runtime: lambda.Runtime.PROVIDED_AL2023,
@@ -816,6 +845,12 @@ export class AccountPipelineStack extends cdk.Stack {
       },
     });
     customerAccountsTable.grantWriteData(customerAccountsProjectorFn);
+
+    // docs/adr/0027決定1: AccountQueryProjectorFunctionがownerId解決のためbyAccountId GSIを引く。
+    // queryProjectorFnはcustomerAccountsTableより前で定義されているため、ここで
+    // addEnvironment/grantを後付けする(customerAccountsProjectorFnへの上のgrantと同じ並び)。
+    queryProjectorFn.addEnvironment("CUSTOMER_ACCOUNTS_TABLE_NAME", customerAccountsTable.tableName);
+    customerAccountsTable.grantReadData(queryProjectorFn);
 
     new events.Rule(this, "CustomerAccountsObservationRule", {
       eventBus: domainEventBus,
@@ -1781,10 +1816,17 @@ export class AccountPipelineStack extends cdk.Stack {
               // account-serviceのGetAccountIntegrationと同じ404変換パターン(決定1)。
               // TransferStatusViewの各属性をそのままJSONオブジェクトとして組み立てる
               // (accountViewTableのようなview属性への集約はしていないため、フィールドごと)。
+              // docs/adr/0027決定2: 404判定の次に、認証済みユーザー(sub)が送金元・送金先
+              // どちらの名義でもなければ403(振込は送金元・送金先で名義が異なるため「いずれか
+              // 一致」——[[0020]]が確立した「送金元/送金先どちらから見ても自分の送金として
+              // 見える」という前提と対称)。
               "application/json": [
                 '#if($input.path("$.Item") == "")',
                 "#set($context.responseOverride.status = 404)",
                 '{"message": "transfer not found"}',
+                '#elseif($input.path("$.Item.fromOwnerId.S") != $context.authorizer.claims.sub && $input.path("$.Item.toOwnerId.S") != $context.authorizer.claims.sub)',
+                "#set($context.responseOverride.status = 403)",
+                '{"message": "forbidden"}',
                 "#else",
                 "{",
                 '"transferId":"$input.path("$.Item.transferId.S")",',
@@ -1830,7 +1872,7 @@ export class AccountPipelineStack extends cdk.Stack {
     const transfersResource = transferQueryApi.root.addResource("transfers");
     const transferResource = transfersResource.addResource("{transferId}");
     transferResource.addMethod("GET", getTransferIntegration, {
-      methodResponses: [{ statusCode: "200" }, { statusCode: "404" }],
+      methodResponses: [{ statusCode: "200" }, { statusCode: "403" }, { statusCode: "404" }],
       authorizationType: apigateway.AuthorizationType.COGNITO,
       authorizer: transferQueryAuthorizer,
     });

@@ -101,14 +101,17 @@ PutEvents失敗はログのみに留め、サインアップ/サインイン自�
 
 ## トレードオフ
 
-- **読み取り系の項目単位の認可は実装しない**: 認証済みの別人が他人の`accountId`を直接URLに
-  指定して`GET /accounts/{id}`を叩けば、依然として閲覧できてしまう(「認証」は満たすが
-  「この口座は自分のものか」という認可は満たさない)。Lambdaレスの直接統合という設計
-  ([[0004-query-service-event-driven-projection]]/[[0006-write-path-api-gateway-sqs-direct-integration]])はアイテム単位の認可をVTLで表現しづらく、これを実装するには
-  クエリ系エンドポイントをLambda経由に変える必要がある——それは「Lambdaレス直接統合」という
-  このPoCが検証している設計そのものを手放すことになるため、今回は見送った。書き込み系
-  (Freeze/Unfreeze/Close)は決定3の`requested_by`検証で認可済みだが、読み取り系は認証止まり
-  である、という非対称を正直に記録する。
+- **読み取り系の項目単位の認可は実装しない**(**[[0027-item-level-read-authorization]]で解消**
+  ——当時の「クエリ系エンドポイントをLambda経由に変える必要がある」という判断は、GetItem/Query
+  の**レスポンス**側VTLでアイテム自身が持つ名義属性と比較する形でLambdaを増やさずに実現できると
+  後に判明し覆った): 認証済みの別人が他人の`accountId`を直接URLに指定して`GET /accounts/{id}`を
+  叩けば、依然として閲覧できてしまう(「認証」は満たすが「この口座は自分のものか」という認可は
+  満たさない)。Lambdaレスの直接統合という設計([[0004-query-service-event-driven-projection]]/
+  [[0006-write-path-api-gateway-sqs-direct-integration]])はアイテム単位の認可をVTLで表現しづらく、
+  これを実装するにはクエリ系エンドポイントをLambda経由に変える必要がある——それは「Lambdaレス
+  直接統合」というこのPoCが検証している設計そのものを手放すことになるため、今回は見送った。
+  書き込み系(Freeze/Unfreeze/Close)は決定3の`requested_by`検証で認可済みだが、読み取り系は
+  認証止まりである、という非対称を正直に記録する。
 - **CloudFrontのAuthorizationヘッダー転送は完全な無キャッシュにできない**: 実装時に2段階の
   AWS挙動が判明した。(1) CDKの`OriginRequestPolicy`は`allowList`に`Authorization`を含めると
   synth時点で拒否する——このヘッダーは`CachePolicy`側の`headerBehavior`でのみ転送できる。

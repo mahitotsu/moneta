@@ -315,6 +315,28 @@ and add a new ADR (or revise one) when a non-obvious decision is made or reverse
   in `CustomerFlow.tsx` independent of both tabs' own nav state, so closing it always returns to
   whatever was showing when it opened. History rows cross-link to the causing transfer (`0021`'s
   pattern) since `transferId` is now always present on `awarded`/`refunded`/`reserved` entries.
+- `0027`: closes the item-level read-authorization gap `0016` had deliberately left open (an
+  authenticated user who knew another customer's `accountId`/`transferId` could still
+  `GET /accounts/{id}`/`GET /transfers/{id}` directly) — reprioritized ahead of the
+  documentation/test-hardening work otherwise planned next, on explicit instruction that security
+  comes first for a banking app. `0016`'s original call ("would require moving query endpoints
+  off Lambda-less direct integration") turned out to be wrong on closer inspection: the check can
+  live entirely in the GetItem/Query **response** VTL, comparing
+  `$context.authorizer.claims.sub` against an owner attribute already on the item — no Lambda
+  added. `query-service`'s `query_projector.rs` now stamps `ownerId` onto every
+  `AccountViewTable`/`AccountHistoryTable` item (sourced from the `Opened` event directly, or
+  otherwise resolved via a new `byAccountId` GSI on `0016` decision 4's own `CustomerAccountsTable`
+  — never by reading `account-service`'s internal tables, preserving `0008`'s crate boundary);
+  `transfer-service`'s `transfer_status_projector.rs` copies `fromOwnerId`/`toOwnerId` (already
+  present on every `TransferSagaTable` item since `saga_to_item`) onto `TransferStatusViewTable`.
+  `GET /accounts/{id}` and `GET /transfers/{id}` 403 on an owner mismatch (either side, for
+  furikomi); `GET /accounts/{id}/transactions` adds a `FilterExpression` on `ownerId` and 403s on
+  an empty result (safe because `Event::Opened` always seeds one history row, so empty can only
+  mean wrong owner). `AccountNumberQueryApi` is deliberately unchanged — `0019`'s "resolves any
+  accountId regardless of caller ownership" is a different, intentional feature (furikomi
+  destination-name confirmation). A new one-off `infra/scripts/backfill-item-owners.ts` stamps
+  the new attributes onto data that predates this deploy, since the safe default for missing
+  authorization data is deny, not `0025`'s "fall back to 0."
 
 ## Commands
 

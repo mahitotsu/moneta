@@ -30,6 +30,13 @@ struct SagaImage {
     from_account_id: String,
     #[serde(rename = "toAccountId")]
     to_account_id: String,
+    /// 送金元の名義(docs/adr/0027決定2: item単位の読み取り認可のためAPI Gateway VTLが
+    /// `$context.authorizer.claims.sub`と比較する)。`TransferSagaTable`は`saga_to_item`
+    /// (persistence.rs)によりサガ作成時から常にこの属性を持つため必須フィールドとして扱える。
+    #[serde(rename = "fromOwnerId")]
+    from_owner_id: String,
+    #[serde(rename = "toOwnerId")]
+    to_owner_id: String,
     amount: String,
     kind: String,
     state: String,
@@ -96,6 +103,8 @@ async fn project_one(dynamodb: &Client, table_name: &str, record: &EventRecord) 
         .item("transferId", AttributeValue::S(image.transfer_id))
         .item("fromAccountId", AttributeValue::S(image.from_account_id))
         .item("toAccountId", AttributeValue::S(image.to_account_id))
+        .item("fromOwnerId", AttributeValue::S(image.from_owner_id))
+        .item("toOwnerId", AttributeValue::S(image.to_owner_id))
         .item("amount", AttributeValue::S(image.amount))
         .item("kind", AttributeValue::S(image.kind))
         .item("state", AttributeValue::S(image.state))
