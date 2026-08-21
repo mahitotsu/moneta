@@ -46,7 +46,21 @@ describe("L1: 資金保存則(同一名義口座間の振替が閉じた系の�
       const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identity.idToken);
 
       await fc.assert(
-        fc.asyncProperty(fc.array(transferArbitrary, { minLength: 5, maxLength: 15 }), async (transfers) => {
+        // docs/production-readiness-matrix.md L1: このpredicateは1回の実行で実AWS呼び出し
+        // (口座4つ開設+最大15件送金+その終端状態待ち)を伴う高コストな処理——`numRuns: 5`を
+        // 「試行回数は控えめにする」と抑えたのと同じ理由で、fast-checkの既定動作である
+        // 失敗時の自動shrink(最小反例を探すため同じpredicateを何度も再実行する)も、生成する
+        // 入力配列自体を`fc.noShrink`で包んで無効化する(このバージョンのfast-checkでは
+        // shrink制御はプロパティではなくarbitrary側の役割)。2026-08-21、`api-e2e`フルスイート
+        // (29ファイル並列)実行中に本テストだけが単体実行の15倍(約100秒→900秒超)で恒久的に
+        // タイムアウトする事象が発生し、CloudWatchで実機を調査した結果、Lambdaスロットリング
+        // 0件・DynamoDBスロットリング0件・同時実行数最大17(デフォルト上限1000に対し無視できる
+        // 規模)・処理時間は終始数十ms——AWS側のスケーラビリティ問題は皆無だったと判明した。
+        // 原因はテスト側: 他スイートとの並列実行で1回の`waitFor`(既定30秒)がわずかに間に合わ
+        // なかった際、shrinkが同じ高コストなpredicateを繰り返し再実行し(1回あたり最大`timeout`
+        // の180秒)、900秒という値はこの180秒が4〜5回積み重なった規模と符合する——インフラの
+        // 限界ではなく、shrinkによる呼び出し回数の非線形な増幅がテストの実行時間を支配していた。
+        fc.asyncProperty(fc.noShrink(fc.array(transferArbitrary, { minLength: 5, maxLength: 15 })), async (transfers) => {
           const accountIds = await Promise.all(
             Array.from({ length: ACCOUNT_COUNT }, () =>
               openFreshAccount(commandApi, queryApi, String(INITIAL_BALANCE_PER_ACCOUNT)),
@@ -91,7 +105,9 @@ describe("L1: 資金保存則(同一名義口座間の振替が閉じた系の�
     // (Opened以外のイベント)を1回持つようになり、結果整合性の反映がわずかに遅くなった
     // ——このテストは多数の操作を連続実行するため、その遅れが積み重なって元の600秒ちょうどで
     // 実際にタイムアウトすることを2026-08-20に実機で確認した(値そのものの誤りではなく、
-    // 検証結果の反映待ちが間に合わなかっただけ)。900秒に拡大。
+    // 検証結果の反映待ちが間に合わなかっただけ)。900秒に拡大。上記の`noShrink()`により、
+    // この900秒はもはや通常到達しない安全マージンであるはずだが、テスト自体を壊れにくくする
+    // 保険として値はそのまま維持する。
     900_000,
   );
 });

@@ -12,9 +12,13 @@ Accepted。`crates/transfer-service`(`src/saga.rs`の`resume_action`/`sweep_to_s
 (`scenarios/saga-self-healing.e2e.test.ts`、2シナリオ)をライブスタックに対して実行し、
 「詰まる→再送しても詰まったまま→条件解消→再送で回復」と「条件が解消しないまま再送上限を
 超える→仮受金口座へ確定的に退避」の両方を実機で確認済み(green)。`api-e2e`フルスイート
-(29ファイル/63テスト)も実行し、無関係な2件の一時的な失敗(並列実行時のワーカー競合——
-`transfer-furikae`と`conservation-property`、いずれも単独再実行でgreen、本ADRの変更とは
-無関係)を除いて回帰なしを確認した。
+(29ファイル/63テスト)も実行し、無関係な2件の一時的な失敗(`transfer-furikae`は単独再実行で
+即green——本ADRの変更とは無関係な単発フレーク。`conservation-property`は当初「並列実行時の
+ワーカー競合」と誤って診断していたが、実際はCloudWatch調査(2026-08-21、
+[production-readiness-matrix.md](../production-readiness-matrix.md)③節末尾)により全く
+別の原因——`fast-check`のshrink機構がテストの実行時間を非線形に増幅させていたテスト側の
+既存バグ——と判明・修正済み、詳細は同節と`docs/insights.md`§3.5参照)を除いて回帰なしを
+確認した。
 
 **副産物1**: 実機検証中に、`saga_step.rs`が呼ぶ`advance_saga_state`が状態不変の遷移
 (`Compensating`での却下の無反応)でも無条件に`updatedAt`を更新してしまい、ウォッチドッグの
