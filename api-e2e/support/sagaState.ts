@@ -76,6 +76,17 @@ export async function getWatchdogRetryCount(sagaTableName: string, transferId: s
   return (result.Item?.watchdogRetryCount as number | undefined) ?? 0;
 }
 
+// docs/adr/0028: 銀行所有の仮受金口座はどの顧客のCognito subにも属さないため、item単位の
+// 読み取り認可(docs/adr/0027)を持つ`GET /accounts/{id}`では誰も読めない——正当な読み取り
+// 手段が構造的に存在しない。`AccountViewTable`を直接読む(query-serviceの`view`属性は
+// `{"status":...,"balance":...}`のJSON文字列、`crates/query-service/src/projection.rs`)。
+export async function getAccountBalance(accountViewTableName: string, accountId: string): Promise<number> {
+  const result = await doc().send(new GetCommand({ TableName: accountViewTableName, Key: { accountId } }));
+  const view = result.Item?.view as string | undefined;
+  if (!view) throw new Error(`getAccountBalance: no view found for account ${accountId}`);
+  return Number((JSON.parse(view) as { balance: string }).balance);
+}
+
 export interface StuckCompensatingSaga {
   transferId: string;
   fromAccountId: string;

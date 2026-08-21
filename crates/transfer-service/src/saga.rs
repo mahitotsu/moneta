@@ -80,6 +80,10 @@ pub enum SagaState {
     Credited,
     /// 補償が完了した(送金前と同じ残高に戻った)。終端状態。
     Compensated,
+    /// 補償の入金が再送上限を超えて却下され続けたため、銀行所有の仮受金口座へ資金を退避した
+    /// (docs/adr/0028)。`Compensated`(正当な持ち主に戻った)とは意図的に区別する終端状態
+    /// ——資金は安全だが正当な持ち主にはまだ届いていない、要人手フォローアップの状態。
+    SweptToSuspense,
     /// 出金自体が却下された(残高不足等)。まだ何も動いていないため補償は不要。終端状態。
     Failed,
     /// 確認前に取消された。まだ何も動いていないため補償は不要。終端状態(docs/adr/0011)。
@@ -146,8 +150,14 @@ pub enum NextAction {
     /// 振込の着金確定時にポイントを付与する(docs/adr/0024決定7)。`fee-service`を経由せず
     /// `points-service`へ直接発行する、結果を待たないfire-and-forget。
     IssueAwardPoints { owner_id: String, amount: Decimal },
-    /// 終端状態に達した、確認待ち/取消済みで何も発行していない、または補償自体が却下され
-    /// 滞留した(docs/adr/0010の「本ADRのスコープ外」——運用アラートでの手動対応を前提とする)。
+    /// 補償の入金が再送上限を超えて却下され続けた`Compensating`サガに対し、`sweep_to_suspense`
+    /// だけが発行する(docs/adr/0028)。銀行所有の仮受金口座(凍結・解約不能)への退避により、
+    /// 資金の所在を必ず確定させる。`saga_step.rs`/`command_intake.rs`はこのバリアントを
+    /// 一切発行しない(`bin/saga_watchdog.rs`専用)。
+    IssueSuspenseSweepDeposit { account_id: Uuid, amount: Decimal },
+    /// 終端状態に達した、確認待ち/取消済みで何も発行していない、または補償自体が却下されて
+    /// (`Compensating`のno-op)何も発行していない——後者は`bin/saga_watchdog.rs`が一定時間後に
+    /// 再送し(docs/adr/0028)、それでも解決しなければ`sweep_to_suspense`で仮受金口座へ確定させる。
     None,
 }
 
@@ -179,7 +189,9 @@ pub fn expected_step(saga: &TransferSaga) -> Option<ExpectedStep> {
         SagaState::PendingDebit => Some(ExpectedStep { account_id: saga.from_account_id, event_variant: "Withdrawn" }),
         SagaState::PendingCredit => Some(ExpectedStep { account_id: saga.to_account_id, event_variant: "Deposited" }),
         SagaState::Compensating => Some(ExpectedStep { account_id: saga.from_account_id, event_variant: "Deposited" }),
-        SagaState::Credited | SagaState::Compensated | SagaState::Failed | SagaState::Cancelled => None,
+        SagaState::Credited | SagaState::Compensated | SagaState::SweptToSuspense | SagaState::Failed | SagaState::Cancelled => {
+            None
+        }
     }
 }
 
@@ -207,7 +219,38 @@ pub fn resume_action(saga: &TransferSaga) -> NextAction {
             account_id: saga.from_account_id,
             amount: saga.amount + saga.cash_fee,
         },
-        SagaState::Credited | SagaState::Compensated | SagaState::Failed | SagaState::Cancelled => NextAction::None,
+        SagaState::Credited
+        | SagaState::Compensated
+        | SagaState::SweptToSuspense
+        | SagaState::Failed
+        | SagaState::Cancelled => NextAction::None,
+    }
+}
+
+/// ウォッチドッグの再送上限を超えた`Compensating`サガに対してのみ意味を持つ、銀行所有の
+/// 仮受金口座への退避(docs/adr/0028)。`Compensating`以外の状態に対して呼ばれることは
+/// `bin/saga_watchdog.rs`の実装上起こらない(呼び出し元が`Compensating`のみを対象にする)が、
+/// `SagaState`の全バリアントを明示的に扱う(ワイルドカード禁止の規律、`advance`/
+/// `reserve_fee_observed`と同じ)。
+pub fn sweep_to_suspense(saga: &TransferSaga, suspense_account_id: Uuid, now: OffsetDateTime) -> (TransferSaga, NextAction) {
+    match saga.state {
+        SagaState::Compensating => {
+            let next = TransferSaga { state: SagaState::SweptToSuspense, updated_at: now, ..saga.clone() };
+            let action = NextAction::IssueSuspenseSweepDeposit {
+                account_id: suspense_account_id,
+                amount: saga.amount + saga.cash_fee,
+            };
+            (next, action)
+        }
+        SagaState::PendingConfirmation
+        | SagaState::ReservingFee
+        | SagaState::PendingDebit
+        | SagaState::PendingCredit
+        | SagaState::Credited
+        | SagaState::Compensated
+        | SagaState::SweptToSuspense
+        | SagaState::Failed
+        | SagaState::Cancelled => (saga.clone(), NextAction::None),
     }
 }
 
@@ -344,6 +387,7 @@ pub fn reserve_fee_observed(saga: &TransferSaga, cash_fee: Decimal, points_used:
         | SagaState::Compensating
         | SagaState::Credited
         | SagaState::Compensated
+        | SagaState::SweptToSuspense
         | SagaState::Failed
         | SagaState::Cancelled => (saga.clone(), NextAction::None),
     }
@@ -440,13 +484,16 @@ pub fn advance(saga: &TransferSaga, observed: ObservedOutcome) -> (SagaState, Ne
                 };
                 (SagaState::Compensated, refund)
             }
-            // 補償自体の却下はスコープ外(docs/adr/0010)。状態を変えず滞留させ、運用側の
-            // 検知(今後の課題)に委ねる。
+            // 補償自体の却下は状態を変えず滞留させる——`bin/saga_watchdog.rs`(docs/adr/0028)が
+            // 一定時間後に`resume_action`で同じ補償入金を再送し、それでも解決しなければ
+            // `sweep_to_suspense`で銀行所有の仮受金口座へ確定的に退避する。
             ObservedOutcome::Rejected => (SagaState::Compensating, NextAction::None),
         },
-        SagaState::Credited | SagaState::Compensated | SagaState::Failed | SagaState::Cancelled => {
-            (saga.state.clone(), NextAction::None)
-        }
+        SagaState::Credited
+        | SagaState::Compensated
+        | SagaState::SweptToSuspense
+        | SagaState::Failed
+        | SagaState::Cancelled => (saga.state.clone(), NextAction::None),
     }
 }
 
@@ -655,6 +702,7 @@ mod tests {
             SagaState::PendingCredit,
             SagaState::Compensating,
             SagaState::Compensated,
+            SagaState::SweptToSuspense,
             SagaState::Failed,
             SagaState::Cancelled,
         ] {
@@ -882,11 +930,45 @@ mod tests {
         for state in [
             SagaState::Credited,
             SagaState::Compensated,
+            SagaState::SweptToSuspense,
             SagaState::Failed,
             SagaState::Cancelled,
             SagaState::PendingConfirmation,
         ] {
             assert_eq!(resume_action(&saga_in(TransferKind::Furikomi, state)), NextAction::None);
+        }
+    }
+
+    // docs/adr/0028決定(仮受金口座への退避)。
+    #[test]
+    fn sweep_to_suspense_moves_compensating_to_swept_and_issues_a_deposit_to_the_suspense_account() {
+        let saga = TransferSaga { cash_fee: dec!(20), ..saga_in(TransferKind::Furikomi, SagaState::Compensating) };
+        let suspense_account_id = Uuid::new_v4();
+        let (next, action) = sweep_to_suspense(&saga, suspense_account_id, now());
+        assert_eq!(next.state, SagaState::SweptToSuspense);
+        // 送金額+現金負担分の手数料——本来Compensatingが送金元へ返そうとしていたのと同じ金額
+        // (resume_actionのCompensating分岐と同じ計算)を、宛先だけ差し替えて仮受金口座へ送る。
+        assert_eq!(action, NextAction::IssueSuspenseSweepDeposit { account_id: suspense_account_id, amount: dec!(120) });
+    }
+
+    #[test]
+    fn sweep_to_suspense_is_a_defensive_no_op_outside_compensating() {
+        let suspense_account_id = Uuid::new_v4();
+        for state in [
+            SagaState::PendingConfirmation,
+            SagaState::ReservingFee,
+            SagaState::PendingDebit,
+            SagaState::PendingCredit,
+            SagaState::Credited,
+            SagaState::Compensated,
+            SagaState::SweptToSuspense,
+            SagaState::Failed,
+            SagaState::Cancelled,
+        ] {
+            let saga = saga_in(TransferKind::Furikomi, state.clone());
+            let (next, action) = sweep_to_suspense(&saga, suspense_account_id, now());
+            assert_eq!(next.state, state);
+            assert_eq!(action, NextAction::None);
         }
     }
 }

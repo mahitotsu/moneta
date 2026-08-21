@@ -325,7 +325,8 @@ async fn issue_start_action(
         | NextAction::IssueCompensatingDeposit { .. }
         | NextAction::IssueReserveFee { .. }
         | NextAction::IssueRefundFee { .. }
-        | NextAction::IssueAwardPoints { .. } => {
+        | NextAction::IssueAwardPoints { .. }
+        | NextAction::IssueSuspenseSweepDeposit { .. } => {
             unreachable!("start() only ever returns IssueWithdraw or None")
         }
     }

@@ -210,6 +210,12 @@ async fn issue_action(
         NextAction::IssueReserveFee { .. } => {
             unreachable!("IssueReserveFee is only ever returned by confirm(), handled in command_intake.rs")
         }
+        // docs/adr/0028: IssueSuspenseSweepDepositは`sweep_to_suspense`だけが返し、
+        // `bin/saga_watchdog.rs`だけが発行する——advance/reserve_fee_observedはこの
+        // バリアントを一切返さないため、ここには来ない。
+        NextAction::IssueSuspenseSweepDeposit { .. } => {
+            unreachable!("IssueSuspenseSweepDeposit is only ever returned by sweep_to_suspense, handled in saga_watchdog.rs")
+        }
         NextAction::None => {}
     }
 

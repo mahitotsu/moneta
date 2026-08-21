@@ -46,6 +46,9 @@ export interface StackOutputs {
   // サガの自己修復ウォッチドッグ(docs/adr/0028)。support/sagaState.tsのinvokeSagaWatchdogが
   // スケジュールを待たず直接invokeするために使う。
   transferSagaWatchdogFunctionName: string;
+  // 銀行所有の仮受金口座(docs/adr/0028)。再送上限を超えたCompensatingサガの退避先——
+  // シナリオがこの口座の残高増分を確認するのに使う。
+  suspenseAccountId: string;
 }
 
 const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
@@ -74,6 +77,7 @@ const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
   feeReservationsTableName: "FeeReservationsTableName",
   pointsQueryApiUrl: "PointsQueryApiUrl",
   transferSagaWatchdogFunctionName: "TransferSagaWatchdogFunctionName",
+  suspenseAccountId: "SuspenseAccountId",
 };
 
 export async function fetchStackOutputs(): Promise<StackOutputs> {

@@ -37,6 +37,13 @@ const EVENT_SCHEMA_NAME = `${EVENT_SOURCE}@AccountDomainEvent`;
 const FEE_EVENT_SOURCE = "fee-service";
 const POINTS_EVENT_SOURCE = "points-service";
 
+// docs/adr/0028: 銀行所有の仮受金口座(サスペンス口座)の固定accountId。account-serviceの
+// クライアント生成ID方式(docs/adr/0006決定2)をそのまま使い、CDK側とinfra/scripts/
+// setup-suspense-account.ts側で同じ固定値を持つ——チキンエッグ(口座はデプロイ後に開設する
+// が、ウォッチドッグLambdaの環境変数はデプロイ時点で確定させる必要がある)を、Custom Resource
+// ではなく固定IDの共有だけで解消する(docs/adr/0013がCustom Resourceから離れた方向性を踏襲)。
+const SUSPENSE_ACCOUNT_ID = "00000000-0000-0000-0000-000000000001";
+
 // account-domain::Eventの全バリアントに対応するDetailType(account-service/src/outbox.rsの
 // to_outbox_entryが生成する形式と一致させる)。rejection(却下)はここに含めない——却下は
 // viewを変化させないため、Query Serviceは購読しない。
@@ -1698,6 +1705,7 @@ export class AccountPipelineStack extends cdk.Stack {
         SAGA_TABLE_NAME: transferSagaTable.tableName,
         ACCOUNT_COMMAND_QUEUE_URL: commandQueue.queueUrl,
         FEE_COMMAND_QUEUE_URL: feeCommandQueue.queueUrl,
+        SUSPENSE_ACCOUNT_ID: SUSPENSE_ACCOUNT_ID,
       },
     });
     transferSagaTable.grantReadWriteData(transferSagaWatchdogFn);
@@ -1723,6 +1731,23 @@ export class AccountPipelineStack extends cdk.Stack {
       metric: new cloudwatch.Metric({
         namespace: "Moneta/TransferSaga",
         metricName: "StuckSagaEscalated",
+        statistic: "Sum",
+        period: cdk.Duration.minutes(5),
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    // docs/adr/0028: 仮受金口座への退避が起きたことを運用者に見せる——`StuckSagaEscalated`
+    // (原因不明でまだ解決していない)とは別の意味を持つ(資金は安全だが、正当な持ち主への
+    // 決済は別途システム外の手段で完了させる必要がある)ため、別のメトリクス・アラームにする。
+    new cloudwatch.Alarm(this, "SagaSweptToSuspenseAlarm", {
+      alarmName: "moneta-transfer-saga-swept-to-suspense",
+      metric: new cloudwatch.Metric({
+        namespace: "Moneta/TransferSaga",
+        metricName: "SagaSweptToSuspense",
         statistic: "Sum",
         period: cdk.Duration.minutes(5),
       }),
@@ -2384,6 +2409,8 @@ export class AccountPipelineStack extends cdk.Stack {
     // docs/adr/0028: api-e2eがスケジュールを待たずに直接invokeするために使う
     // (support/sagaState.tsのbackdateSagaUpdatedAtと同じ「テスト専用の裏口」の位置づけ)。
     new cdk.CfnOutput(this, "TransferSagaWatchdogFunctionName", { value: transferSagaWatchdogFn.functionName });
+    // docs/adr/0028: infra/scripts/setup-suspense-account.tsがこのIDで口座を開設する。
+    new cdk.CfnOutput(this, "SuspenseAccountId", { value: SUSPENSE_ACCOUNT_ID });
     new cdk.CfnOutput(this, "TransferOwnerProjectorFunctionName", { value: transferOwnerProjectorFn.functionName });
     new cdk.CfnOutput(this, "TransferStatusViewTableName", { value: transferStatusViewTable.tableName });
     new cdk.CfnOutput(this, "TransferStatusProjectorFunctionName", { value: transferStatusProjectorFn.functionName });

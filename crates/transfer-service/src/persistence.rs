@@ -18,6 +18,7 @@ fn state_to_str(state: &SagaState) -> &'static str {
         SagaState::Compensating => "compensating",
         SagaState::Credited => "credited",
         SagaState::Compensated => "compensated",
+        SagaState::SweptToSuspense => "swept_to_suspense",
         SagaState::Failed => "failed",
         SagaState::Cancelled => "cancelled",
     }
@@ -32,6 +33,7 @@ fn state_from_str(value: &str) -> SagaState {
         "compensating" => SagaState::Compensating,
         "credited" => SagaState::Credited,
         "compensated" => SagaState::Compensated,
+        "swept_to_suspense" => SagaState::SweptToSuspense,
         "failed" => SagaState::Failed,
         "cancelled" => SagaState::Cancelled,
         other => unreachable!("unknown saga state persisted in DynamoDB: {other}"),
@@ -141,6 +143,15 @@ pub async fn load_saga(
 /// 先へ進んでいた場合(EventBridgeのat-least-once配信による重複イベント)は条件不成立になり、
 /// `false`を返す——エラーではなく「何もしなかった」として扱う。`updatedAt`も同時に書く
 /// (`Credited`到達時刻の代用として`recall_eligibility`が使う、docs/adr/0011)。
+///
+/// `next == expected_current`(`advance`が却下を状態不変のno-opとして扱う場合、例:
+/// `Compensating`での補償却下)では、DynamoDBへの書き込み自体を行わない——docs/adr/0028で
+/// 実機検証中に発見: 無条件に書き込むと、実際には何も変わっていないのに`updatedAt`だけが
+/// 更新され、「一定時間状態が変わっていないサガ」を検出する`saga_watchdog.rs`の
+/// `scan_stuck_sagas`が、ウォッチドッグ自身が発火させた却下の観測のたびに対象から
+/// 外れてしまう(詰まったサガが「最近動きがあった」ように見えてしまい、実際には全く
+/// 進んでいないのに再検出までの猶予が起動のたびにリセットされる)。`updatedAt`の本来の意味
+/// (「直近の**状態遷移**時刻」)からしても、状態が変わっていないのに更新するのは誤りだった。
 pub async fn advance_saga_state(
     client: &Client,
     table_name: &str,
@@ -149,6 +160,9 @@ pub async fn advance_saga_state(
     next: &SagaState,
     now: OffsetDateTime,
 ) -> Result<bool, aws_sdk_dynamodb::Error> {
+    if next == expected_current {
+        return Ok(true);
+    }
     let result = client
         .update_item()
         .table_name(table_name)

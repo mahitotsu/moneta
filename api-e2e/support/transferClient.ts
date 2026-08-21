@@ -16,6 +16,8 @@ export type SagaState =
   | "compensating"
   | "credited"
   | "compensated"
+  // docs/adr/0028: 再送上限を超えたCompensatingサガの、銀行所有の仮受金口座への確定的な退避先。
+  | "swept_to_suspense"
   | "failed"
   | "cancelled";
 

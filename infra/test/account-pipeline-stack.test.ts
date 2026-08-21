@@ -348,8 +348,9 @@ describe("AccountPipelineStack", () => {
   // 経過時間にCloudWatchアラームを張る」と決定していたが、実装が伴っていなかった(2026-08-10発見)。
   test("all four DLQs (account command, transfer command, fee command, points command) have alarms on messages-visible and oldest-message-age", () => {
     // docs/adr/0024でFeeCommandDlq/PointsCommandDlqにも同じaddDlqAlarmsを適用したため、
-    // 4キュー×2アラーム=8件、docs/adr/0028のStuckSagaEscalatedAlarmが1件加わり9件になった。
-    template.resourceCountIs("AWS::CloudWatch::Alarm", 9);
+    // 4キュー×2アラーム=8件、docs/adr/0028のStuckSagaEscalatedAlarm・SagaSweptToSuspenseAlarm
+    // が2件加わり10件になった。
+    template.resourceCountIs("AWS::CloudWatch::Alarm", 10);
     // DimensionsのValueはキュー論理IDへのFn::GetAtt(QueueName)であり、キュー名の文字列
     // リテラルとしては現れない(CDKの`metricApproximateNumberOfMessagesVisible`の実際の
     // 出力を実行して確認済み)。どのキューかまでは論理IDから間接的にしか分からないため、
@@ -513,6 +514,31 @@ describe("AccountPipelineStack", () => {
       Threshold: 1,
       ComparisonOperator: "GreaterThanOrEqualToThreshold",
     });
+  });
+
+  // docs/adr/0028決定(仮受金口座への退避)。ウォッチドッグがSUSPENSE_ACCOUNT_IDを知っており、
+  // 退避が起きたことを示す別のアラーム(StuckSagaEscalatedとは別のメトリクス)が存在することを
+  // 確認する——「原因不明でまだ解決していない」ものと「資金は安全だが要フォローアップ」の
+  // ものを運用者が混同しないための切り分けそのものが主張なので、2つのアラームが別物として
+  // 存在することを両方とも固定する。
+  test("the watchdog knows the suspense account id and a distinct alarm exists for sagas swept to it", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Handler: "bootstrap",
+      Environment: Match.objectLike({
+        Variables: Match.objectLike({ SUSPENSE_ACCOUNT_ID: Match.stringLikeRegexp("^[0-9a-f-]{36}$") }),
+      }),
+    });
+    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      AlarmName: "moneta-transfer-saga-swept-to-suspense",
+      Namespace: "Moneta/TransferSaga",
+      MetricName: "SagaSweptToSuspense",
+      Threshold: 1,
+      ComparisonOperator: "GreaterThanOrEqualToThreshold",
+    });
+  });
+
+  test("publishes the suspense account id as a stack output for setup-suspense-account.ts to open it", () => {
+    template.hasOutput("SuspenseAccountId", {});
   });
 
   test("exposes GET /customers/me/transfers as a direct DynamoDB Query integration against the byUpdatedAt GSI, keyed off the Cognito sub claim, newest first", () => {

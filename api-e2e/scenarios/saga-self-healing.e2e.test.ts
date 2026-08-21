@@ -9,8 +9,13 @@
 // 再送→実際の口座残高の変化→サガの状態遷移)は完全に実機のE2E検証**。
 import { fetchStackOutputs } from "../support/stackOutputs";
 import { createCommandApi, createQueryApi } from "../support/httpClient";
-import { REJECTION_SETTLE_MS, settle } from "../support/poll";
-import { getWatchdogRetryCount, invokeSagaWatchdog, seedStuckCompensatingSaga } from "../support/sagaState";
+import { REJECTION_SETTLE_MS, settle, waitFor } from "../support/poll";
+import {
+  getAccountBalance,
+  getWatchdogRetryCount,
+  invokeSagaWatchdog,
+  seedStuckCompensatingSaga,
+} from "../support/sagaState";
 import { openFreshAccount, waitForStatus } from "../support/testAccount";
 import { trackCreatedTransfer } from "../support/testDataCleanup";
 import { createTransferQueryApi, waitForTransferState } from "../support/transferClient";
@@ -73,5 +78,63 @@ describe("docs/adr/0028: 恒久的に詰まったサガ(Compensating)は、条�
 
     const finalView = await queryApi.getAccount(accountId);
     expect(Number(finalView?.balance)).toBe(1300.0); // 1000(初期) + 300(補償入金) = 資金は保存された。
+  });
+});
+
+describe("docs/adr/0028: 再送上限を超えても条件が解消しない場合は、銀行所有の仮受金口座へ確定的に退避する", () => {
+  it("SweptToSuspenseへ確定し、仮受金口座の残高が退避額ぶん増える——「多分大丈夫」ではなく必ず確定した終端状態になる", async () => {
+    const outputs = await fetchStackOutputs();
+    const identity = await signUpAndSignIn(outputs.userPoolClientId);
+    const commandApi = createCommandApi(outputs.commandApiUrl, identity.idToken);
+    const queryApi = createQueryApi(outputs.queryApiUrl, identity.idToken);
+    const transferQueryApi = createTransferQueryApi(outputs.transferQueryApiUrl, identity.idToken);
+
+    const accountId = await openFreshAccount(commandApi, queryApi, "1000.00");
+    const freezeResponse = await commandApi.freeze(accountId, "CustomerRequest");
+    expect(freezeResponse.status).toBe(202);
+    await waitForStatus(queryApi, accountId, "frozen");
+
+    const transferId = crypto.randomUUID();
+    await seedStuckCompensatingSaga(
+      outputs.transferSagaTableName,
+      { transferId, fromAccountId: accountId, ownerId: identity.sub, amount: "500.00" },
+      1,
+    );
+    trackCreatedTransfer(transferId);
+    await waitForTransferState(transferQueryApi, transferId, ["compensating"]);
+
+    const suspenseBalanceBefore = await getAccountBalance(outputs.accountViewTableName, outputs.suspenseAccountId);
+
+    // 凍結を一切解除しないまま、再送上限(MAX_WATCHDOG_RETRIES=3、saga_watchdog.rs)まで
+    // ウォッチドッグを起動する——却下=何も適用されていないため連続invokeしても安全
+    // (docs/adr/0028の安全性分析)。record_watchdog_retryはupdatedAtを更新しないため、
+    // 都度backdateし直す必要はない。
+    for (let i = 0; i < 3; i++) {
+      await invokeSagaWatchdog(outputs.transferSagaWatchdogFunctionName);
+    }
+    expect(await getWatchdogRetryCount(outputs.transferSagaTableName, transferId)).toBe(3);
+
+    // 4回目: 再送上限に達しているため、今度は仮受金口座への退避に切り替わる。
+    await invokeSagaWatchdog(outputs.transferSagaWatchdogFunctionName);
+
+    const swept = await waitForTransferState(transferQueryApi, transferId, ["swept_to_suspense"], { timeoutMs: 30_000 });
+    expect(swept.state).toBe("swept_to_suspense");
+
+    // 口座自体は凍結されたまま(=正当な持ち主にはまだ届いていない)——このシナリオは
+    // seedStuckCompensatingSagaで直接作った架空のサガであり、口座の実残高は最初の1000.00の
+    // まま一度も動いていない(実際に組戻しが失敗するシナリオでは、正当な持ち主の残高は
+    // 別途track済みの実際の出金額から計算する)。ここでの主張は「資金の所在が必ず確定する」
+    // ことであり、それは仮受金口座の残高増分で確認する。
+    const stillFrozen = await queryApi.getAccount(accountId);
+    expect(stillFrozen?.status).toBe("frozen");
+
+    const suspenseBalanceAfter = await waitFor(
+      async () => {
+        const balance = await getAccountBalance(outputs.accountViewTableName, outputs.suspenseAccountId);
+        return balance !== suspenseBalanceBefore ? balance : undefined;
+      },
+      { description: "suspense account balance to reflect the swept deposit" },
+    );
+    expect(suspenseBalanceAfter - suspenseBalanceBefore).toBe(500.0);
   });
 });

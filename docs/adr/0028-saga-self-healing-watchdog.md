@@ -2,14 +2,21 @@
 
 ## ステータス
 
-Accepted。`crates/transfer-service`(`src/saga.rs`の`resume_action`、`src/persistence.rs`の
-`scan_stuck_sagas`/`record_watchdog_retry`、新規`src/bin/saga_watchdog.rs`)・
-`infra/lib/account-pipeline-stack.ts`(`TransferSagaWatchdogFunction`・スケジュール駆動の
-`events.Rule`・`StuckSagaEscalatedAlarm`)に実装する。`cargo test`/`cargo clippy`(全crate、
-警告0件)・`infra`のCDK synth(50件、新規4件を含む)はgreen。デプロイ後、
-`api-e2e`(`scenarios/saga-self-healing.e2e.test.ts`)をライブスタックに対して実行し、
-「詰まる→再送しても詰まったまま→条件解消→再送で回復」までを実機で確認する(検証結果は
-このセクションを更新する)。
+Accepted。`crates/transfer-service`(`src/saga.rs`の`resume_action`/`sweep_to_suspense`、
+`src/persistence.rs`の`scan_stuck_sagas`/`record_watchdog_retry`/`advance_saga_state`、
+新規`src/bin/saga_watchdog.rs`)・`infra/lib/account-pipeline-stack.ts`
+(`TransferSagaWatchdogFunction`・スケジュール駆動の`events.Rule`・`StuckSagaEscalatedAlarm`・
+`SagaSweptToSuspenseAlarm`・銀行所有の仮受金口座)・`infra/scripts/setup-suspense-account.ts`
+(新規)に実装する。`cargo test`/`cargo clippy`(全crate、警告0件)・`infra`のCDK synth
+(52件)はgreen。デプロイ後、`api-e2e`(`scenarios/saga-self-healing.e2e.test.ts`、2シナリオ)
+をライブスタックに対して実行し、「詰まる→再送しても詰まったまま→条件解消→再送で回復」と
+「条件が解消しないまま再送上限を超える→仮受金口座へ確定的に退避」の両方を実機で確認する
+(検証結果はこのセクションを更新する)。
+
+**副産物**: 実機検証中に、`saga_step.rs`が呼ぶ`advance_saga_state`が状態不変の遷移
+(`Compensating`での却下の無反応)でも無条件に`updatedAt`を更新してしまい、ウォッチドッグの
+「一定時間動きがない」判定が却下観測のたびにリセットされる実バグを発見・修正した——
+`next == expected_current`の場合はDynamoDBへの書き込み自体をスキップする(詳細は決定6参照)。
 
 ## コンテキスト
 
@@ -22,6 +29,18 @@ Accepted。`crates/transfer-service`(`src/saga.rs`の`resume_action`、`src/pers
 それでは`docs/insights.md`に足す新しい知見にならない(既知の事実の再確認に過ぎない)という
 指摘を受けた。本ADRは、実際に**イベント駆動の枠内で自己修復を設計・実装・検証する**ことに
 取り組んだ結果である。
+
+決定1〜6(再送ウォッチドッグ)の実装後、さらに「バンキングのシステムなので『多分大丈夫』では
+困る。組戻しに失敗し続ける場合は、銀行所有の口座へ一旦振り替えて確実に清算できる仕様にすべき
+ではないか」という指摘を受けた。これも正しい指摘で、再送を繰り返してもCloudWatchアラームを
+鳴らすだけでは、エスカレーション後もサガが`Compensating`のまま無期限に宙に浮き、システムとして
+の結論が未確定のままになる。実世界の銀行・決済システムには確立された解決策がある: **仮受金
+口座(サスペンス口座/GL suspense account)**——SWIFT送金が受取人に届けられなかった場合の
+コルレス銀行内部清算口座、ACHの返却処理、決済ネットワークの「unmatched suspense」、会計上の
+仮受金勘定など、いずれも「絶対に受け取れる、組織自身が所有する口座」へ一旦資金を逃がすことで、
+システムとしての結論を必ず確定させる(資金の所在が常に追跡可能)という共通の設計思想を持つ。
+「顧客への現実の返金」はそこから先の別の(システム外でもよい)手段に委ねる——このPoCが一貫して
+線引きしている組織的リアリズム(運用プロセス)の外に自然に置ける。決定7がこれを実装する。
 
 ## 決定
 
@@ -104,6 +123,54 @@ account-serviceの冪等性ログ(`crates/account-service/src/handler.rs`)はSQS
 コマンド発行の間にサガが通常の観測経路で自然に先へ進んでいた場合、古い情報に基づく不要な
 再送を防ぐ。
 
+**実機検証で発見した関連バグの修正**: `saga_step.rs`が呼ぶ既存の`advance_saga_state`は、
+`next == expected_current`(状態が実際には変わらない遷移、例: `Compensating`での却下の
+無反応)でも無条件に`UpdateItem`を発行し`updatedAt`を更新していた。これにより、ウォッチドッグの
+1回目の再送が引き起こす却下の観測(状態は`Compensating`のまま)のたびに`updatedAt`が
+「今」に更新され、`scan_stuck_sagas`の「一定時間動きがない」という判定基準がリセットされて
+しまい、2回目以降の再送が`STUCK_THRESHOLD`(10分)ぶん遅延する——実質的に5分ごとのスケジュール
+では**ほぼ再送が進まない**という設計上の欠陥だった。`advance_saga_state`を「`next ==
+expected_current`のときは書き込み自体を行わない」よう修正した。`updatedAt`の本来の意味
+(「直近の**状態遷移**時刻」)からしても、状態が変わっていないのに更新するのは誤りであり、
+この修正はウォッチドッグ以外の既存の呼び出し元にも一般的に正しい。
+
+### 7. 再送上限を超えた`Compensating`は、銀行所有の仮受金口座へ確定的に退避する
+
+`SagaState`に新しい終端状態`SweptToSuspense`を追加する。既存の`Compensated`(正当な持ち主に
+戻った)とは意図的に区別する——「資金は安全だが正当な持ち主にはまだ届いていない」ことを表し、
+突合(reconciliation)の対象を機械的に抽出できるようにする。
+
+適用範囲は`Compensating`だけに絞る: `ReservingFee`/`PendingDebit`/`PendingCredit`は却下されても
+`Failed`等の確定した終端状態へ必ず進む(却下=お金は動いていない、が確定する)——「詰まったまま
+無反応」になりうるのは`Compensating`(補償の入金が却下され続け、`advance`が`NextAction::None`
+のno-opとして扱う設計)だけである。他の3状態には「入金先を差し替える」という安全なフォール
+バックの根拠が無い(お金がどこにあるか自体が未確定なため機械的に確定させられない)ため、
+引き続き決定4のアラームのみに留める。
+
+`saga.rs`の`sweep_to_suspense(saga, suspense_account_id, now)`(純粋関数、`resume_action`と
+同じ形)が`(TransferSaga{state: SweptToSuspense, ..}, NextAction::IssueSuspenseSweepDeposit{account_id, amount})`
+を返す——`resume_action`のCompensating分岐と同じ金額計算(`saga.amount + saga.cash_fee`)を、
+宛先だけ差し替えるだけ。`bin/saga_watchdog.rs`は`candidate.retry_count >= MAX_WATCHDOG_RETRIES`
+かつ`state == Compensating`のときにこれを呼び、状態遷移の書き込みは既存の
+`persistence::advance_saga_state`をそのまま再利用する(`expected_current = Compensating`,
+`next = SweptToSuspense`)——新しい永続化関数は不要。
+
+銀行所有の仮受金口座は`infra/lib/account-pipeline-stack.ts`の固定`SUSPENSE_ACCOUNT_ID`
+(クライアント生成ID方式、[[0006-write-path-api-gateway-sqs-direct-integration]]決定2)を、
+`infra/scripts/setup-suspense-account.ts`(新規)がaccount-serviceのコマンドキューへ**直接
+SQS送信**して開設する——[[0010]]決定1と同じ経路(API Gateway/Cognitoを経由しない、
+`requested_by`が無いため`resolve_owner_id`は`owner_id`を上書きしない)。**この口座は
+[[0016-cognito-authentication]]の所有者検証だけで構造的に凍結・解約不能になる**:
+`owner_id = "system:suspense"`は実在のCognito subと一致し得ないため、`Freeze`/`Unfreeze`/
+`Close`の`requested_by == owner_id`チェックにより、どの顧客からのリクエストも`NotOwner`で
+却下される。account-domain/account-serviceへの変更は一切不要。
+
+退避が成功したら、`StuckSagaEscalated`とは別のCloudWatchカスタムメトリクス
+`SagaSweptToSuspense`(namespace `Moneta/TransferSaga`)を発行し、専用の`SagaSweptToSuspenseAlarm`
+で運用者に見せる——「原因不明でまだ解決していない」(`StuckSagaEscalated`)とは異なる、
+「資金は安全だが、正当な持ち主への決済は別途システム外の手段で完了させる必要がある」という
+運用上の意味を持つため。
+
 ## トレードオフ
 
 - **決定3の安全性分析は、形式的な証明ではなく確率的な議論である**——完全なexactly-once保証
@@ -115,6 +182,14 @@ account-serviceの冪等性ログ(`crates/account-service/src/handler.rs`)はSQS
   (イベント駆動な自己修復の実証)には寄与しないため見送った。
 - **5分間隔のスケジュールは、詰まりの検知に最大5分+`STUCK_THRESHOLD`(10分)の遅延を持つ**——
   即応性より運用コスト(実行頻度)を優先した設計判断。
+- **仮受金口座への退避は「解決」ではなく「確定的な保留」である**——正当な持ち主への実際の
+  決済は依然として人手のフォローアップ(このPoCのスコープ外の運用プロセス)を要する。
+  この決定が保証するのは「資金の所在が常にシステム上で追跡可能である」ことであり、
+  「顧客が最終的にお金を受け取る」ことそのものではない——`SagaSweptToSuspenseAlarm`は
+  その残作業を運用者に確実に引き継ぐためのものである。
+- **仮受金口座自体が(人為的なミス等で)将来凍結・解約される可能性は理論上ゼロではない**——
+  現状の保証は「顧客はこの口座を凍結・解約できない」という所有者検証止まりで、運用者自身の
+  誤操作までは防げない。このPoCの規模ではこの残余リスクを許容する。
 
 ## 却下した代替案
 
@@ -127,8 +202,14 @@ account-serviceの冪等性ログ(`crates/account-service/src/handler.rs`)はSQS
   問い合わせ、コマンドが本当に未適用かを確認してから送る設計。形式的にはより厳密だが、
   PoCの規模に対して明らかに過大(それ自体が独立した検証テーマになりうる)であり、決定3の
   確率的な安全性で十分と判断した。
-- **`Compensating`だけを対象にする(R7が指す状態に限定する)**: 詰まる根本原因
+- **`Compensating`だけを対象にする(R7が指す状態に限定する、再送については)**: 詰まる根本原因
   (CAS成功後・コマンド発行前のLambdaクラッシュ)は`ReservingFee`/`PendingDebit`/
   `PendingCredit`にも等しく起こりうるため、1つの状態だけを特別扱いする理由がない。
   `expected_step`が`Some`を返す4状態全てに一般化する方が、1つの仕組みで済み設計として
-  一貫する。
+  一貫する(**ただし決定7の仮受金退避は`Compensating`だけに限定する**——他の3状態には
+  「入金先を差し替える」という安全なフォールバックの根拠が無いため)。
+- **決定7: Custom ResourceでCFNデプロイ時に仮受金口座を自動開設する**: [[0013-migrate-account-service-off-aurora-dsql]]がスキーマ移行のCustom Resourceを削除した方向性と逆行する。
+  固定IDの共有(クライアント生成ID方式の応用)だけでチキンエッグを解消できたため不要。
+- **決定7: `Compensated`をそのまま流用し、`swept`フラグを別属性で持たせる**: 「正当な持ち主に
+  戻った」と「資金は安全だが届いていない」を同じ状態値で表現すると、突合(reconciliation)の
+  対象を機械的に抽出できなくなる——別の終端状態として明示的に区別する方を選んだ。

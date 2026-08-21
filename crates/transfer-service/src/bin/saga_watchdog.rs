@@ -5,12 +5,12 @@
 // `saga_step.rs`(イベント駆動)・`command_intake.rs`(SQS駆動)と違い、こちらはタイマー駆動——
 // 「一定時間、期待していたイベントが来ない」という不在を検知できるのはタイマーだけであり、
 // イベント購読では原理的に検知できない(何も届かないことを購読で検知することはできない)。
-use account_domain::OffsetDateTime;
+use account_domain::{OffsetDateTime, Uuid};
 use aws_sdk_cloudwatch::types::{Dimension, MetricDatum, StandardUnit};
 use lambda_runtime::{run, service_fn, Error, LambdaEvent};
 use serde_json::Value;
 use time::Duration;
-use transfer_service::saga::{resume_action, NextAction, SagaState, TransferSaga};
+use transfer_service::saga::{resume_action, sweep_to_suspense, NextAction, SagaState, TransferSaga};
 use transfer_service::{commands, persistence};
 use transfer_service::persistence::StuckSaga;
 
@@ -38,6 +38,12 @@ async fn main() -> Result<(), Error> {
         std::env::var("ACCOUNT_COMMAND_QUEUE_URL").expect("ACCOUNT_COMMAND_QUEUE_URL environment variable must be set");
     let fee_command_queue_url =
         std::env::var("FEE_COMMAND_QUEUE_URL").expect("FEE_COMMAND_QUEUE_URL environment variable must be set");
+    // docs/adr/0028: 銀行所有の仮受金口座(凍結・解約不能、infra/scripts/setup-suspense-account.ts
+    // が一度だけ開設する)。`Compensating`が再送上限を超えても解決しない場合の確定的な退避先。
+    let suspense_account_id = Uuid::parse_str(
+        &std::env::var("SUSPENSE_ACCOUNT_ID").expect("SUSPENSE_ACCOUNT_ID environment variable must be set"),
+    )
+    .expect("SUSPENSE_ACCOUNT_ID must be a valid UUID");
     let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
     let dynamodb = aws_sdk_dynamodb::Client::new(&aws_config);
     let sqs = aws_sdk_sqs::Client::new(&aws_config);
@@ -53,8 +59,16 @@ async fn main() -> Result<(), Error> {
         let account_command_queue_url = account_command_queue_url.clone();
         let fee_command_queue_url = fee_command_queue_url.clone();
         async move {
-            sweep(&dynamodb, &sqs, &cloudwatch, &saga_table_name, &account_command_queue_url, &fee_command_queue_url)
-                .await
+            sweep(
+                &dynamodb,
+                &sqs,
+                &cloudwatch,
+                &saga_table_name,
+                &account_command_queue_url,
+                &fee_command_queue_url,
+                suspense_account_id,
+            )
+            .await
         }
     }))
     .await
@@ -67,6 +81,7 @@ async fn sweep(
     saga_table_name: &str,
     account_command_queue_url: &str,
     fee_command_queue_url: &str,
+    suspense_account_id: Uuid,
 ) -> Result<(), Error> {
     let now = OffsetDateTime::now_utc();
     let older_than = now - STUCK_THRESHOLD;
@@ -74,12 +89,79 @@ async fn sweep(
     tracing::info!(count = stuck.len(), "found stuck saga candidates");
 
     for candidate in stuck {
-        if candidate.retry_count >= MAX_WATCHDOG_RETRIES {
-            escalate(cloudwatch, &candidate.saga).await?;
-        } else {
+        if candidate.retry_count < MAX_WATCHDOG_RETRIES {
             retry(dynamodb, sqs, saga_table_name, account_command_queue_url, fee_command_queue_url, &candidate, now)
                 .await?;
+        } else if candidate.saga.state == SagaState::Compensating {
+            // docs/adr/0028: `Compensating`だけは「同じ補償入金を銀行所有の仮受金口座宛てに
+            // 差し替えて確定させる」という安全な自動フォールバックを持つ(補償の入金先だけを
+            // 差し替えるだけで、"誰にいくら返すべきか"という判断自体は変わらない)。
+            sweep_stuck_compensation(
+                dynamodb,
+                sqs,
+                cloudwatch,
+                saga_table_name,
+                account_command_queue_url,
+                fee_command_queue_url,
+                suspense_account_id,
+                &candidate,
+                now,
+            )
+            .await?;
+        } else {
+            // `ReservingFee`/`PendingDebit`/`PendingCredit`には同種の安全なフォールバックが
+            // 無い(お金がどこにあるか自体が未確定なため、機械的に確定させられない)——引き続き
+            // 運用者への通知に留める。
+            escalate(cloudwatch, &candidate.saga).await?;
         }
+    }
+    Ok(())
+}
+
+/// 再送上限を超えた`Compensating`サガを、銀行所有の仮受金口座への入金に差し替えて
+/// `SweptToSuspense`(終端)へ確定させる(docs/adr/0028)。仮受金口座は構造的に凍結・解約
+/// されない(docs/adr/0016の所有者検証、`owner_id`が実在のCognito subと一致し得ない)ため、
+/// この入金は(このシステムが実際にさらす障害モードの範囲では)確実に成功する前提で、
+/// `RefundFee`/`AwardPoints`(docs/adr/0024決定6)と同じくfire-and-forgetとして扱い、
+/// 発行と同時に終端状態へ倒す。
+#[allow(clippy::too_many_arguments)]
+async fn sweep_stuck_compensation(
+    dynamodb: &aws_sdk_dynamodb::Client,
+    sqs: &aws_sdk_sqs::Client,
+    cloudwatch: &aws_sdk_cloudwatch::Client,
+    saga_table_name: &str,
+    account_command_queue_url: &str,
+    fee_command_queue_url: &str,
+    suspense_account_id: Uuid,
+    candidate: &StuckSaga,
+    now: OffsetDateTime,
+) -> Result<(), Error> {
+    let saga = &candidate.saga;
+    let (_, action) = sweep_to_suspense(saga, suspense_account_id, now);
+    issue_action(sqs, account_command_queue_url, fee_command_queue_url, &saga.transfer_id, action).await?;
+
+    let swept = persistence::advance_saga_state(
+        dynamodb,
+        saga_table_name,
+        &saga.transfer_id,
+        &SagaState::Compensating,
+        &SagaState::SweptToSuspense,
+        now,
+    )
+    .await?;
+    if swept {
+        tracing::error!(
+            transfer_id = %saga.transfer_id,
+            "compensation retries exhausted; swept to the bank-owned suspense account for manual follow-up",
+        );
+        cloudwatch
+            .put_metric_data()
+            .namespace("Moneta/TransferSaga")
+            .metric_data(MetricDatum::builder().metric_name("SagaSweptToSuspense").value(1.0).unit(StandardUnit::Count).build())
+            .send()
+            .await?;
+    } else {
+        tracing::info!(transfer_id = %saga.transfer_id, "saga resolved before the suspense sweep could apply; skipping");
     }
     Ok(())
 }
@@ -141,6 +223,11 @@ async fn issue_action(
         NextAction::IssueCompensatingDeposit { account_id, amount } => {
             commands::send_compensating_deposit(sqs, account_command_queue_url, account_id, amount, transfer_id).await?;
         }
+        // docs/adr/0028: 再送上限を超えた`Compensating`サガに対して`sweep_to_suspense`だけが
+        // 返す、銀行所有の仮受金口座への退避。
+        NextAction::IssueSuspenseSweepDeposit { account_id, amount } => {
+            commands::send_suspense_sweep_deposit(sqs, account_command_queue_url, account_id, amount, transfer_id).await?;
+        }
         // fire-and-forgetの返却・付与系(docs/adr/0024決定6)はサガの状態遷移をブロックしない
         // ため、`resume_action`が対象にする4状態(`expected_step`がSomeを返す状態)からは
         // 発生しない組み合わせ——それでも`NextAction`の全バリアントを網羅する(ワイルドカード
@@ -185,6 +272,7 @@ fn state_label(state: &SagaState) -> &'static str {
         SagaState::Compensating => "Compensating",
         SagaState::Credited => "Credited",
         SagaState::Compensated => "Compensated",
+        SagaState::SweptToSuspense => "SweptToSuspense",
         SagaState::Failed => "Failed",
         SagaState::Cancelled => "Cancelled",
     }

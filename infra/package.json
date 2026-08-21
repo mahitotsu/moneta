@@ -20,7 +20,8 @@
     "destroy": "npm run cdk -- destroy",
     "clean-data": "NODE_OPTIONS=\"--require ./force-ipv4.cjs\" tsx scripts/clean-data.ts",
     "seed-demo-data": "NODE_OPTIONS=\"--require ./force-ipv4.cjs\" tsx scripts/seed-demo-data.ts",
-    "backfill-item-owners": "NODE_OPTIONS=\"--require ./force-ipv4.cjs\" tsx scripts/backfill-item-owners.ts"
+    "backfill-item-owners": "NODE_OPTIONS=\"--require ./force-ipv4.cjs\" tsx scripts/backfill-item-owners.ts",
+    "setup-suspense-account": "NODE_OPTIONS=\"--require ./force-ipv4.cjs\" tsx scripts/setup-suspense-account.ts"
   },
   "devDependencies": {
     "@aws-sdk/client-cloudformation": "^3.1101.0",

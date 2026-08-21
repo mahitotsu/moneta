@@ -42,6 +42,8 @@ export interface StackOutputs {
   // 表示するのに使う——この型がADR-0024〜0026のCfnOutputを一つも知らなかったため、
   // デモデータ投入時に手数料/ポイントの状態を確認する手段が無かった(2026-08-19発見)。
   pointsQueryApiUrl: string;
+  // 銀行所有の仮受金口座(docs/adr/0028)。setup-suspense-account.tsがこのIDで口座を開設する。
+  suspenseAccountId: string;
 }
 
 const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
@@ -67,6 +69,7 @@ const OUTPUT_KEYS: Record<keyof StackOutputs, string> = {
   userPoolId: "UserPoolId",
   userPoolClientId: "UserPoolClientId",
   pointsQueryApiUrl: "PointsQueryApiUrl",
+  suspenseAccountId: "SuspenseAccountId",
 };
 
 export async function fetchStackOutputs(): Promise<StackOutputs> {

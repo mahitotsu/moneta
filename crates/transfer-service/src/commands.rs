@@ -75,6 +75,21 @@ pub async fn send_compensating_deposit(
     send_command(sqs, queue_url, account_id, Command::Deposit { amount }, correlation_id, &idempotency_key).await
 }
 
+/// 銀行所有の仮受金口座への退避(docs/adr/0028)。実質的には`send_compensating_deposit`と
+/// 同じDepositコマンドだが、宛先が原口座ではなく仮受金口座になるため、
+/// `MessageDeduplicationId`を区別する専用ヘルパーとして分ける。`bin/saga_watchdog.rs`
+/// (`sweep_to_suspense`が再送上限を超えた`Compensating`サガに対してのみ発行)専用。
+pub async fn send_suspense_sweep_deposit(
+    sqs: &Client,
+    queue_url: &str,
+    suspense_account_id: Uuid,
+    amount: Decimal,
+    correlation_id: &str,
+) -> Result<(), aws_sdk_sqs::Error> {
+    let idempotency_key = format!("{correlation_id}-sweep");
+    send_command(sqs, queue_url, suspense_account_id, Command::Deposit { amount }, correlation_id, &idempotency_key).await
+}
+
 // --- fee-service / points-service 宛のコマンド(docs/adr/0024) --------------------------
 //
 // account-serviceと同じ理由(commands.rsコメント冒頭参照)で、コード共有はせず独立に
