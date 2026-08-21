@@ -4,19 +4,27 @@
 
 Accepted。`crates/transfer-service`(`src/saga.rs`の`resume_action`/`sweep_to_suspense`、
 `src/persistence.rs`の`scan_stuck_sagas`/`record_watchdog_retry`/`advance_saga_state`、
-新規`src/bin/saga_watchdog.rs`)・`infra/lib/account-pipeline-stack.ts`
-(`TransferSagaWatchdogFunction`・スケジュール駆動の`events.Rule`・`StuckSagaEscalatedAlarm`・
-`SagaSweptToSuspenseAlarm`・銀行所有の仮受金口座)・`infra/scripts/setup-suspense-account.ts`
-(新規)に実装する。`cargo test`/`cargo clippy`(全crate、警告0件)・`infra`のCDK synth
-(52件)はgreen。デプロイ後、`api-e2e`(`scenarios/saga-self-healing.e2e.test.ts`、2シナリオ)
-をライブスタックに対して実行し、「詰まる→再送しても詰まったまま→条件解消→再送で回復」と
-「条件が解消しないまま再送上限を超える→仮受金口座へ確定的に退避」の両方を実機で確認する
-(検証結果はこのセクションを更新する)。
+`src/commands.rs`の`send_*_retry`群、新規`src/bin/saga_watchdog.rs`)・
+`infra/lib/account-pipeline-stack.ts`(`TransferSagaWatchdogFunction`・スケジュール駆動の
+`events.Rule`・`StuckSagaEscalatedAlarm`・`SagaSweptToSuspenseAlarm`・銀行所有の仮受金口座)・
+`infra/scripts/setup-suspense-account.ts`(新規)に実装する。`cargo test`/`cargo clippy`
+(全crate、警告0件)・`infra`のCDK synth(52件)はgreen。デプロイ後、`api-e2e`
+(`scenarios/saga-self-healing.e2e.test.ts`、2シナリオ)をライブスタックに対して実行し、
+「詰まる→再送しても詰まったまま→条件解消→再送で回復」と「条件が解消しないまま再送上限を
+超える→仮受金口座へ確定的に退避」の両方を実機で確認済み(green)。`api-e2e`フルスイート
+(29ファイル/63テスト)も実行し、無関係な2件の一時的な失敗(並列実行時のワーカー競合——
+`transfer-furikae`と`conservation-property`、いずれも単独再実行でgreen、本ADRの変更とは
+無関係)を除いて回帰なしを確認した。
 
-**副産物**: 実機検証中に、`saga_step.rs`が呼ぶ`advance_saga_state`が状態不変の遷移
+**副産物1**: 実機検証中に、`saga_step.rs`が呼ぶ`advance_saga_state`が状態不変の遷移
 (`Compensating`での却下の無反応)でも無条件に`updatedAt`を更新してしまい、ウォッチドッグの
 「一定時間動きがない」判定が却下観測のたびにリセットされる実バグを発見・修正した——
 `next == expected_current`の場合はDynamoDBへの書き込み自体をスキップする(詳細は決定6参照)。
+
+**副産物2**: 決定7デプロイ後の実機検証で、ウォッチドッグの再送が固定`MessageDeduplicationId`
+のためSQS FIFOの重複排除窓(5分)内でサイレントに握りつぶされ、`watchdogRetryCount`は
+増えるのに実際にはaccount-service/fee-serviceへ一度も配信されないという、決定3の安全性分析が
+見落としていた実バグを発見・修正した(詳細は決定8参照)。
 
 ## コンテキスト
 
@@ -95,6 +103,10 @@ account-serviceの冪等性ログ(`crates/account-service/src/handler.rs`)はSQS
 (exactly-onceの形式的な保証)は諦め、このPoCが実際にさらす障害モードに対して十分安全な
 設計を選ぶ**、という意図的なトレードオフである。
 
+**この分析自体、5分を過ぎてからの重複排除だけを検討しており、実機検証で決定8が発見した
+「5分以内の再送はそもそも配信されない」という逆方向の失敗モードを見落としていた**——
+決定8で修正済み。
+
 ### 4. 再送回数に上限を設け、超えたらCloudWatchメトリクスで運用者へ引き継ぐ
 
 `MAX_WATCHDOG_RETRIES`(3回)を超えても解消しないサガは、それ以上再送せず
@@ -170,6 +182,40 @@ SQS送信**して開設する——[[0010]]決定1と同じ経路(API Gateway/Co
 で運用者に見せる——「原因不明でまだ解決していない」(`StuckSagaEscalated`)とは異なる、
 「資金は安全だが、正当な持ち主への決済は別途システム外の手段で完了させる必要がある」という
 運用上の意味を持つため。
+
+### 8. 再送専用の`MessageDeduplicationId`に`attempt`番号を埋め込む
+——決定3の安全性分析が見落としていた「5分**以内**の再送は握りつぶされる」という実バグの修正
+
+決定7のデプロイ後、シナリオ1(条件解消後の自動回復)を実機で検証したところ、口座凍結を解除した
+後もサガが`Compensating`のまま進まなかった。`moneta-account-events`を`correlationId`で
+直接スキャンして原因を特定: `watchdogRetryCount`は起動のたびに正しく増えていたが、
+1回目の却下イベントの後、account-serviceには**それ以降のどの再送も一度も届いていなかった**。
+
+原因は`commands.rs`の`send_command`が使う`MessageDeduplicationId`——`send_withdraw`/
+`send_deposit`/`send_compensating_deposit`/`send_reserve_fee`はいずれも
+`{correlation_id}-{action}`という、同じサガ・同じアクションに対して常に**同一の固定値**に
+なる設計([[0010]]決定5)。これは「1つのアクションを1回だけ発行する」という`saga_step.rs`/
+`command_intake.rs`の前提では正しいが、ウォッチドッグは同じサガ・同じアクションを**複数回**
+発行しうる。SQS FIFOの重複排除は5分間の窓に限定される([AWS公式ドキュメント](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/using-messagededuplicationid-property.html))ため、5分間隔スケジュールで動く
+ウォッチドッグの再送は、直前の再送から5分経っていなければ固定キーのままSQSに黙って
+重複排除され、account-service/fee-serviceに一度も配信されない。
+
+決定3の安全性分析は「5分を**過ぎて**からの再送は二重適用を防げない」というリスクだけを
+検討しており、この「5分**以内**の再送はそもそも配信されず、何も達成しない」という逆方向の
+失敗モードを見落としていた——実害としてはこちらの方が深刻: 二重適用ではなく、
+**ウォッチドッグ機構そのものが実質的に機能しない**(`watchdogRetryCount`だけが増え続け、
+実際のコマンドは初回の1通しか届かない)結果になる。
+
+修正: `commands.rs`に`send_reserve_fee_retry`/`send_withdraw_retry`/`send_deposit_retry`/
+`send_compensating_deposit_retry`(既存の`send_*`と同じ発行ロジックだが、
+`{correlation_id}-{action}-retry-{attempt}`という、呼び出しごとに単調増加する
+`watchdogRetryCount`を埋め込んだ一意な`MessageDeduplicationId`を使う)を追加し、
+`bin/saga_watchdog.rs`の再送経路(`issue_retry_action`、新設)だけをこちらに切り替えた。
+`issue_sweep_action`(決定7の仮受金退避、新設)は1回限りの終端アクションのため既存の
+`send_suspense_sweep_deposit`(固定キー)のままで安全——`issue_action`という1つの関数が
+両方の呼び出し元(通常の`saga_step.rs`/`command_intake.rs`用と、ウォッチドッグの再送用)を
+兼ねていたのが今回の見落としの根本原因だったため、目的ごとに分離した。修正後、両シナリオを
+再度実機で確認しgreen(前掲の副産物2)。
 
 ## トレードオフ
 

@@ -90,6 +90,71 @@ pub async fn send_suspense_sweep_deposit(
     send_command(sqs, queue_url, suspense_account_id, Command::Deposit { amount }, correlation_id, &idempotency_key).await
 }
 
+// --- docs/adr/0028: ウォッチドッグの再送専用ヘルパー -----------------------------------
+//
+// `send_withdraw`/`send_deposit`/`send_compensating_deposit`/`send_reserve_fee`の
+// `MessageDeduplicationId`は`{correlation_id}-{action}`という、同じサガ・同じアクションに
+// 対して常に同じ固定値になる設計(docs/adr/0010決定5)——`saga_step.rs`/`command_intake.rs`が
+// 各アクションを一度だけ発行するという前提では、この固定キーが「Lambdaのリトライで二重発行
+// されない」という目的に対して正しい。しかしウォッチドッグ(`bin/saga_watchdog.rs`)は同じ
+// サガ・同じアクションを**複数回**発行しうる——SQS FIFOの重複排除は5分間の窓に限定される
+// ([AWS公式ドキュメント](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/using-messagededuplicationid-property.html))ため、固定キーのまま複数回送ると、
+// 窓の中に収まる再送は**SQSに黙って重複排除され、account-service/fee-serviceに一度も
+// 配信されない**——実機検証で発見した実バグ(`watchdogRetryCount`は増えるのに、却下も成功も
+// 一切記録されない状態)。`attempt`(その時点の`watchdogRetryCount`、呼び出しごとに単調増加)を
+// 埋め込むことで、再送のたびに異なる`MessageDeduplicationId`にする。
+
+pub async fn send_reserve_fee_retry(
+    sqs: &Client,
+    queue_url: &str,
+    transfer_id: &str,
+    owner_id: &str,
+    account_id: Uuid,
+    transfer_amount: Decimal,
+    attempt: u32,
+) -> Result<(), aws_sdk_sqs::Error> {
+    let idempotency_key = format!("{transfer_id}-reserve-fee-retry-{attempt}");
+    let command =
+        FeeCommand::ReserveFee { transfer_id: transfer_id.to_string(), owner_id: owner_id.to_string(), account_id, transfer_amount };
+    send_fee_command(sqs, queue_url, owner_id, command, &idempotency_key).await
+}
+
+pub async fn send_withdraw_retry(
+    sqs: &Client,
+    queue_url: &str,
+    account_id: Uuid,
+    amount: Decimal,
+    correlation_id: &str,
+    attempt: u32,
+) -> Result<(), aws_sdk_sqs::Error> {
+    let idempotency_key = format!("{correlation_id}-withdraw-retry-{attempt}");
+    send_command(sqs, queue_url, account_id, Command::Withdraw { amount }, correlation_id, &idempotency_key).await
+}
+
+pub async fn send_deposit_retry(
+    sqs: &Client,
+    queue_url: &str,
+    account_id: Uuid,
+    amount: Decimal,
+    correlation_id: &str,
+    attempt: u32,
+) -> Result<(), aws_sdk_sqs::Error> {
+    let idempotency_key = format!("{correlation_id}-deposit-retry-{attempt}");
+    send_command(sqs, queue_url, account_id, Command::Deposit { amount }, correlation_id, &idempotency_key).await
+}
+
+pub async fn send_compensating_deposit_retry(
+    sqs: &Client,
+    queue_url: &str,
+    account_id: Uuid,
+    amount: Decimal,
+    correlation_id: &str,
+    attempt: u32,
+) -> Result<(), aws_sdk_sqs::Error> {
+    let idempotency_key = format!("{correlation_id}-compensate-retry-{attempt}");
+    send_command(sqs, queue_url, account_id, Command::Deposit { amount }, correlation_id, &idempotency_key).await
+}
+
 // --- fee-service / points-service 宛のコマンド(docs/adr/0024) --------------------------
 //
 // account-serviceと同じ理由(commands.rsコメント冒頭参照)で、コード共有はせず独立に

@@ -348,6 +348,39 @@ records.
   destination-name confirmation). A new one-off `infra/scripts/backfill-item-owners.ts` stamps
   the new attributes onto data that predates this deploy, since the safe default for missing
   authorization data is deny, not `0025`'s "fall back to 0."
+- `0028`: adds a self-healing watchdog for R7 (`docs/production-readiness-matrix.md`) — a
+  `TransferSaga` stuck in `Compensating` because the compensating deposit keeps being rejected
+  (e.g. source account frozen), which `0010` decision 6 had deliberately left as an unaddressed
+  gap. A new, purely timer-triggered Lambda (`crates/transfer-service/src/bin/saga_watchdog.rs`,
+  an EventBridge `rate(5 minutes)` rule — event-driven Lambdas can only react to presence, never
+  detect absence) scans for sagas whose `updatedAt` has gone stale past `STUCK_THRESHOLD` and
+  re-issues the same `NextAction` a new `saga.rs` function, `resume_action`, reconstructs from
+  the persisted saga (mirrors `expected_step`, unit-tested against the real transition functions
+  for equivalence) — existing `saga_step.rs`/`command_intake.rs` are untouched. Retries below
+  `MAX_WATCHDOG_RETRIES` (3) reuse the existing SQS command queues; beyond that, a `Compensating`
+  saga is swept to a fixed, bank-owned suspense account (new terminal `SagaState::SweptToSuspense`,
+  `saga.rs`'s `sweep_to_suspense`) — modeled on real banking/payment suspense-account practice
+  (SWIFT correspondent clearing, ACH returns, card-network unmatched suspense): fund location
+  stays machine-traceable even when the rightful owner can't yet be paid back automatically,
+  deferring actual settlement to an out-of-system process this PoC already treats as out of
+  scope. The other 3 stuck-eligible states (`ReservingFee`/`PendingDebit`/`PendingCredit`) keep
+  the older CloudWatch-alarm-only escalation, since unlike `Compensating` they have no safe
+  "redirect the deposit" fallback. The suspense account is opened once via
+  `infra/scripts/setup-suspense-account.ts` (direct SQS `Command::Open`, same
+  client-generated-ID pattern as `0006` decision 2) and is structurally unfreezable/unclosable by
+  construction — `owner_id = "system:suspense"` can never match a real Cognito `sub`, so `0016`'s
+  existing ownership check rejects every such request with zero new code. Two real bugs surfaced
+  only via live verification, not local tests: (1) `persistence.rs`'s `advance_saga_state` was
+  unconditionally refreshing `updatedAt` even on a no-op transition (a rejected compensation
+  observed while still `Compensating`), which reset the watchdog's staleness clock every retry
+  cycle and made retries never actually progress — fixed by skipping the write entirely when the
+  next state equals the current one; (2) `commands.rs`'s command senders use a fixed
+  `MessageDeduplicationId` per saga+action (`0010` decision 5) — correct for a single send, but
+  the watchdog can send the same action repeatedly, and SQS FIFO dedup is scoped to a 5-minute
+  window, so repeated retries inside that window were silently swallowed by SQS and never
+  delivered at all — fixed with dedicated `send_*_retry` senders that embed the attempt number in
+  the dedup key. See ADR-0028 decisions 6 and 8, and `docs/insights.md` §1.4/§3.4 for the
+  resulting lessons.
 
 ## Commands
 

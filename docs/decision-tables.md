@@ -70,13 +70,25 @@
 | **ReservingFee** | ❌ Err(NotPendingConfirmation) | ❌ Err(NotPendingConfirmation) | ✅ → PendingDebit(送金額+現金負担分の手数料で`Withdraw`) | 🔸 no-op(防御的、`advance`経由では到達しない設計) | 🔸 no-op(同左。`fee-service`は原資確保を拒否しない設計のため実際には届かない、決定3) |
 | **PendingDebit** | ❌ Err(NotPendingConfirmation) | ❌ Err(NotPendingConfirmation) | - | ✅ → PendingCredit | ✅ → Failed [furikomiなら`IssueRefundFee`も発行、✅] |
 | **PendingCredit** | ❌ Err(NotPendingConfirmation) | ❌ Err(NotPendingConfirmation) | - | ✅ → Credited [furikomiなら`IssueAwardPoints`も発行、✅] | ✅ → Compensating |
-| **Compensating** | ❌ Err(NotPendingConfirmation) | ❌ Err(NotPendingConfirmation) | - | ✅(R6/旧J3に内包) → Compensated [furikomiなら`IssueRefundFee`も発行、✅(2026-08-18)] | 🔸 no-op(意図的にスコープ外、R7) |
+| **Compensating** | ❌ Err(NotPendingConfirmation) | ❌ Err(NotPendingConfirmation) | - | ✅(R6/旧J3に内包) → Compensated [furikomiなら`IssueRefundFee`も発行、✅(2026-08-18)] | 🔸 no-op([[0028-saga-self-healing-watchdog]]決定7以前は意図的にスコープ外、R7だった——現在は下記のウォッチドッグ列が引き継ぐ) |
 | **Credited**(終端) | ❌ | ❌ | - | 🔸 no-op(防御的) | 🔸 no-op(防御的) |
 | **Compensated**(終端) | ❌ | ❌ | - | 🔸 | 🔸 |
 | **Failed**(終端) | ❌ | ❌ | - | 🔸 | 🔸 |
 | **Cancelled**(終端) | ❌ | ❌ | - | 🔸 | 🔸 |
+| **SweptToSuspense**(終端、[[0028-saga-self-healing-watchdog]]決定7) | ❌ | ❌ | - | 🔸 | 🔸 |
 
-### この表で新たに見つかった穴
+### ウォッチドッグ列: 状態 × トリガー(不在の検知、[[0028-saga-self-healing-watchdog]])
+
+上表の`Confirm`/`Cancel`/`FeeReserved`/`Observed(*)`はいずれも「何かが届いたら反応する」
+イベント駆動のトリガーであり、`Compensating`が却下され続ける(=何も届かない)ケースを
+表現できない。ADR-0028はこれを補う、5分ごとのスケジュール駆動という別種のトリガーを追加した
+(`saga_watchdog.rs`)——`resume_action`/`sweep_to_suspense`の対象は、`STUCK_THRESHOLD`
+(10分)以上`updatedAt`が動いていない`ReservingFee`/`PendingDebit`/`PendingCredit`/
+`Compensating`の4状態のみ。
+
+| 状態 \ ウォッチドッグの判断 | retry_count < 上限(3) | retry_count ≥ 上限 かつ Compensating | retry_count ≥ 上限 かつ それ以外の3状態 |
+|---|---|---|---|
+| **ReservingFee/PendingDebit/PendingCredit/Compensating** | ✅ `resume_action`が返す`NextAction`を`_retry`ヘルパー(決定8)で再送、`watchdogRetryCount`++ | ✅(Compensatingのみ) `sweep_to_suspense` → SweptToSuspense、仮受金口座へDeposit | 🔸 `StuckSagaEscalated`メトリクス発行のみ(安全なフォールバック先が無いため人手に委ねる) |
 
 4. **既に`PendingConfirmation`を過ぎたサガへ`Confirm`/`Cancel`を送った場合の拒否
    (`ConfirmError`/`CancelError::NotPendingConfirmation`)が、単体テストのみでE2E未検証。**
@@ -88,6 +100,10 @@
    `Deposit`が`AccountFrozen`で却下されて`Compensating`→`Compensated`へ進む経路を
    `transfer-fee-and-points.e2e.test.ts`に追加し、ライブスタックに対して実行・合格確認済み
    ——消費した220ptが全額返却されることを確認した。
+7. ~~`Compensating`が却下され続けるケース(R7)は意図的にスコープ外~~ →
+   **対応済み(2026-08-21)**。[[0028-saga-self-healing-watchdog]]がウォッチドッグを追加し、
+   条件解消後の自動回復と、解消しない場合の仮受金口座への確定的退避(`SweptToSuspense`)の
+   両方を実装。`saga-self-healing.e2e.test.ts`でライブスタックに対し両経路とも合格確認済み。
 
 ---
 
@@ -131,7 +147,7 @@
 
 ---
 
-## まとめ: 見つかった6件
+## まとめ: 見つかった7件
 
 | # | 内容 | 優先度 | 影響する既存文書 |
 |---|---|---|---|
@@ -141,6 +157,7 @@
 | 4 | ~~`Confirm`/`Cancel`の二重操作拒否がE2E未検証~~ → **対応済み(2026-08-10)** | 済 | `transfer-furikomi.e2e.test.ts`にFC14として追加、ライブスタックに対して実行・合格確認済み(2026-08-12) |
 | 5 | ~~`RecallError::NotFurikomi`がE2E未検証~~ → **対応済み(2026-08-10)** | 済 | `transfer-recall.e2e.test.ts`にFC15として追加、ライブスタックに対して実行・合格確認済み(2026-08-12) |
 | 6 | ~~`Compensating`→`Compensated`遷移時の`IssueRefundFee`発行がE2E未検証~~ → **対応済み(2026-08-18)** | 済 | `transfer-fee-and-points.e2e.test.ts`に追加、ライブスタックに対して実行・合格確認済み(2026-08-18) |
+| 7 | ~~`Compensating`が却下され続けるケース(R7)は意図的にスコープ外~~ → **対応済み(2026-08-21)** | 済 | [[0028-saga-self-healing-watchdog]]、`saga-self-healing.e2e.test.ts`に追加、ライブスタックに対して実行・合格確認済み(2026-08-21) |
 
 **重要な副産物**: 今回の作業で、`e2e-scenarios.md`のFC3の記述自体が実態より広い保証を謳っていた
 (#1)ことが判明した。プロースのシナリオ記述は「書いた時点では正しいつもりでも、実装の詳細までは

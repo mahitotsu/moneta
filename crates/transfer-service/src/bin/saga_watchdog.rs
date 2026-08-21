@@ -102,7 +102,6 @@ async fn sweep(
                 cloudwatch,
                 saga_table_name,
                 account_command_queue_url,
-                fee_command_queue_url,
                 suspense_account_id,
                 &candidate,
                 now,
@@ -131,14 +130,13 @@ async fn sweep_stuck_compensation(
     cloudwatch: &aws_sdk_cloudwatch::Client,
     saga_table_name: &str,
     account_command_queue_url: &str,
-    fee_command_queue_url: &str,
     suspense_account_id: Uuid,
     candidate: &StuckSaga,
     now: OffsetDateTime,
 ) -> Result<(), Error> {
     let saga = &candidate.saga;
     let (_, action) = sweep_to_suspense(saga, suspense_account_id, now);
-    issue_action(sqs, account_command_queue_url, fee_command_queue_url, &saga.transfer_id, action).await?;
+    issue_sweep_action(sqs, account_command_queue_url, &saga.transfer_id, action).await?;
 
     let swept = persistence::advance_saga_state(
         dynamodb,
@@ -180,7 +178,19 @@ async fn retry(
 ) -> Result<(), Error> {
     let saga = &candidate.saga;
     let action = resume_action(saga);
-    issue_action(sqs, account_command_queue_url, fee_command_queue_url, &saga.transfer_id, action).await?;
+    // docs/adr/0028: attemptにcandidate.retry_count(単調増加)を埋め込み、再送のたびに
+    // MessageDeduplicationIdを変える——固定キーのままだとSQS FIFOの5分間の重複排除窓の中に
+    // 収まる再送が黙って握りつぶされ、account-service/fee-serviceに一度も配信されない
+    // (commands.rsの当該コメント参照、実機検証で発見した実バグ)。
+    issue_retry_action(
+        sqs,
+        account_command_queue_url,
+        fee_command_queue_url,
+        &saga.transfer_id,
+        candidate.retry_count,
+        action,
+    )
+    .await?;
 
     let recorded =
         persistence::record_watchdog_retry(dynamodb, saga_table_name, &saga.transfer_id, &saga.state, saga.updated_at, now)
@@ -198,41 +208,78 @@ async fn retry(
     Ok(())
 }
 
-/// `resume_action`が返しうる全バリアントを扱う。`saga_step.rs`/`command_intake.rs`の各分岐は
-/// 「この呼び出し元は特定のNextActionしか受け取らない」という前提でunreachable!()にできる
-/// 変種を持つが、ここは「どの状態で詰まっていたか」次第でどの`Issue*`も来うるため、
-/// unreachable!()にできる変種は無い。
-async fn issue_action(
+/// `resume_action`が返しうる4つの再送可能バリアント(`IssueReserveFee`/`IssueWithdraw`/
+/// `IssueDeposit`/`IssueCompensatingDeposit`)を扱う。`commands.rs`の`_retry`suffix付き
+/// ヘルパー(`attempt`ごとに`MessageDeduplicationId`を変える、docs/adr/0028)を使う——
+/// 通常の`send_*`(固定キー)をそのまま流用すると、短い間隔での複数回再送がSQS FIFOの
+/// 重複排除窓に飲まれて一度も配信されない実バグを踏む。`IssueSuspenseSweepDeposit`は
+/// `sweep_to_suspense`だけが返す(`resume_action`は返さない)ため`unreachable!()`。
+async fn issue_retry_action(
     sqs: &aws_sdk_sqs::Client,
     account_command_queue_url: &str,
     fee_command_queue_url: &str,
     transfer_id: &str,
+    attempt: u32,
     action: NextAction,
 ) -> Result<(), Error> {
     match action {
         NextAction::IssueReserveFee { transfer_id, owner_id, account_id, transfer_amount } => {
-            commands::send_reserve_fee(sqs, fee_command_queue_url, &transfer_id, &owner_id, account_id, transfer_amount)
-                .await?;
+            commands::send_reserve_fee_retry(
+                sqs,
+                fee_command_queue_url,
+                &transfer_id,
+                &owner_id,
+                account_id,
+                transfer_amount,
+                attempt,
+            )
+            .await?;
         }
         NextAction::IssueWithdraw { account_id, amount } => {
-            commands::send_withdraw(sqs, account_command_queue_url, account_id, amount, transfer_id).await?;
+            commands::send_withdraw_retry(sqs, account_command_queue_url, account_id, amount, transfer_id, attempt).await?;
         }
         NextAction::IssueDeposit { account_id, amount } => {
-            commands::send_deposit(sqs, account_command_queue_url, account_id, amount, transfer_id).await?;
+            commands::send_deposit_retry(sqs, account_command_queue_url, account_id, amount, transfer_id, attempt).await?;
         }
         NextAction::IssueCompensatingDeposit { account_id, amount } => {
-            commands::send_compensating_deposit(sqs, account_command_queue_url, account_id, amount, transfer_id).await?;
+            commands::send_compensating_deposit_retry(sqs, account_command_queue_url, account_id, amount, transfer_id, attempt)
+                .await?;
         }
-        // docs/adr/0028: 再送上限を超えた`Compensating`サガに対して`sweep_to_suspense`だけが
-        // 返す、銀行所有の仮受金口座への退避。
-        NextAction::IssueSuspenseSweepDeposit { account_id, amount } => {
-            commands::send_suspense_sweep_deposit(sqs, account_command_queue_url, account_id, amount, transfer_id).await?;
+        NextAction::IssueSuspenseSweepDeposit { .. } => {
+            unreachable!("IssueSuspenseSweepDeposit is only ever returned by sweep_to_suspense, never resume_action")
         }
         // fire-and-forgetの返却・付与系(docs/adr/0024決定6)はサガの状態遷移をブロックしない
         // ため、`resume_action`が対象にする4状態(`expected_step`がSomeを返す状態)からは
         // 発生しない組み合わせ——それでも`NextAction`の全バリアントを網羅する(ワイルドカード
         // 禁止の規律、saga.rsの`advance`/`reserve_fee_observed`と同じ扱い)。
         NextAction::IssueRefundFee { .. } | NextAction::IssueAwardPoints { .. } | NextAction::None => {}
+    }
+    Ok(())
+}
+
+/// `sweep_to_suspense`が返す`IssueSuspenseSweepDeposit`だけを扱う。この退避は再送上限に
+/// 達した時点で1回だけ発行する終端アクションのため、`send_suspense_sweep_deposit`
+/// (固定`MessageDeduplicationId`)で十分——`issue_retry_action`と違い複数回発行されうる
+/// 心配はない。
+async fn issue_sweep_action(
+    sqs: &aws_sdk_sqs::Client,
+    account_command_queue_url: &str,
+    transfer_id: &str,
+    action: NextAction,
+) -> Result<(), Error> {
+    match action {
+        NextAction::IssueSuspenseSweepDeposit { account_id, amount } => {
+            commands::send_suspense_sweep_deposit(sqs, account_command_queue_url, account_id, amount, transfer_id).await?;
+        }
+        NextAction::None => {}
+        NextAction::IssueReserveFee { .. }
+        | NextAction::IssueWithdraw { .. }
+        | NextAction::IssueDeposit { .. }
+        | NextAction::IssueCompensatingDeposit { .. }
+        | NextAction::IssueRefundFee { .. }
+        | NextAction::IssueAwardPoints { .. } => {
+            unreachable!("sweep_to_suspense only ever returns IssueSuspenseSweepDeposit or None")
+        }
     }
     Ok(())
 }

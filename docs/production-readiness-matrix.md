@@ -76,7 +76,7 @@
 | R4 | 持続的インフラ障害でのDLQ到達 | 🟡(P2・手動確認のみと明記) | `docs/e2e-scenarios.md` I1 |
 | R5 | メッセージグループの独立性(無関係な集約への影響なし) | 🟢 | `group-independence.e2e.test.ts`(E1) |
 | R6 | サガの補償(送金失敗時の資金保全) | 🟢 | [ADR-0010](adr/0010-transfer-service-saga.md)、`transfer-*.e2e.test.ts`(J1-J10) |
-| R7 | サガの補償自体が却下され続けるケース(`Compensating`滞留) | 🟡(意図的にスコープ外と明記) | [saga.rs:277-279](../crates/transfer-service/src/saga.rs#L277-L279)、ADR-0010「本ADRのスコープ外」 |
+| R7 | サガの補償自体が却下され続けるケース(`Compensating`滞留) | 🟢(2026-08-21。ADR-0028のウォッチドッグが自己修復——条件解消後は再送で自動回復、再送上限を超えても銀行所有の仮受金口座へ確定的に退避し「多分大丈夫」を残さない。両経路とも`saga-self-healing.e2e.test.ts`でライブスタックに対し合格確認済み) | [ADR-0028](adr/0028-saga-self-healing-watchdog.md)、`saga-self-healing.e2e.test.ts` |
 | R8 | 複数のイベント駆動な発行元(直接顧客操作 と transfer-serviceのサガ)が同一集約を同時に取り合う安全性 | 🟢(2026-08-10、`concurrency-cross-producer.e2e.test.ts`追加、ライブスタックに対して実行・合格確認済み、2026-08-12) | [commands.rs:35](../crates/transfer-service/src/commands.rs#L35)で同一`MessageGroupId`空間に収束する設計であることを実証するテスト |
 | R9 | DynamoDBスロットリング・接続断からの回復 | 🔴🚧**ブロック中** | ADRは「インフラ起因の失敗」として抽象的に分類するのみで、スロットリング固有の検証(バックオフの妥当性等)への言及なし。**「回復」自体(SQSの再配信をまたぐ)はR3と同じ障害注入基盤が前提条件**——スロットリングはLambda1回の呼び出し内では回復せず、`classify_transact_error`が`ApplyCommandError::Infra`として即座に呼び出し元へ伝播し、SQSの再配信に委ねる設計だから(R2のOptimisticLockConflictとは違うコードパス)。ただし「スロットリングが正しくInfraとして分類・伝播される」こと自体は、R2と同じ`aws-smithy-mocks`パターンで`ProvisionedThroughputExceededException`を返させれば単体テストで決定論的に検証できる(次に着手するならここが低コストな部分検証) |
 
@@ -127,7 +127,7 @@
 | E3 | 毒メッセージ/DLQ(恒久的に失敗するメッセージの隔離) | 🟢(終端到達のみ) | `known-gap-malformed-account-id.e2e.test.ts`(G4)、`group-independence.e2e.test.ts`(E1) |
 | E4 | バックプレッシャー・スケーリング特性 | 🔴 | P2と同一問題。EDAの根幹的リスクだが未着手 |
 | E5 | イベントスキーマの後方/前方互換性 | 🟢(型システムによる保証、実行時テストではない) | `account_domain::Event`をproducer/consumerで共有するモノレポ構成のため、新バリアント追加は全一致箇所でコンパイルエラーになる(CLAUDE.mdの「ワイルドカード禁止」規約)。ただし本物の複数言語・複数リポジトリ環境でのスキーマ進化(consumer側だけ古いバージョンが残る等)は検証対象外 |
-| E6 | サガの補償失敗モード全般 | 🟡 | R6/R7と同一(重複整理) |
+| E6 | サガの補償失敗モード全般 | 🟢 | R6/R7と同一(重複整理) |
 | E7 | 結果整合性の窓(顧客体験としての扱い) | 🟢 | `eventual-consistency.e2e.test.ts`(F1)、`AccountView.test.tsx`(F3) |
 
 ---
